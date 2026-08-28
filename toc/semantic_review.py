@@ -69,6 +69,7 @@ FOUNDATION_SEMANTIC_CRITERIA = {
         "scene_time_of_day_continuity",
         "scene_location_route_continuity",
         "duration_scene_readiness",
+        "adaptation_value_fidelity",
     ),
 }
 
@@ -137,7 +138,19 @@ def semantic_review_scope_binding(scope: Mapping[str, Any]) -> dict[str, Any]:
         "review_scope": str(scope.get("review_scope") or "all_entries"),
         "artifacts": scope.get("artifacts") if isinstance(scope.get("artifacts"), dict) else {},
     }
-    for key in ("shard_id", "scene_id", "canonical_scope", "canonical_report"):
+    for key in (
+        "shard_id",
+        "scene_id",
+        "canonical_scope",
+        "canonical_report",
+        "review_generation_id",
+        "review_generation_collection_sha256",
+        "canonical_review_generation_id",
+        "canonical_collection_sha256",
+        "canonical_semantic_review_input_digest",
+        "canonical_scope_binding_sha256",
+        "canonical_entry_projection_sha256",
+    ):
         value = scope.get(key)
         if value is not None:
             binding[key] = value
@@ -145,6 +158,10 @@ def semantic_review_scope_binding(scope: Mapping[str, Any]) -> dict[str, Any]:
         binding["coverage"] = scope.get("coverage")
     if "shards" in scope:
         binding["shards"] = scope.get("shards")
+    if "entry_projection_sha256s" in scope:
+        binding["entry_projection_sha256s"] = scope.get(
+            "entry_projection_sha256s"
+        )
     return binding
 
 
@@ -1506,7 +1523,9 @@ def _report_scalar_values(text: str, key: str) -> list[str]:
         match = pattern.match(raw.strip())
         if not match:
             continue
-        value = match.group(1).strip().strip("`").strip()
+        value = match.group(1).strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'", "`"}:
+            value = value[1:-1].strip()
         values.append(value)
     return values
 
@@ -1889,6 +1908,61 @@ def semantic_review_currentness_issues(run_dir: Path, stage: str) -> tuple[str, 
     )
     canonical_scope_rel = semantic_review_relpaths(stage)["scope"].as_posix()
     canonical_report_rel = semantic_review_relpaths(stage)["report"].as_posix()
+    generation_keys = (
+        "review_generation_id",
+        "review_generation_collection_sha256",
+        "entry_projection_sha256s",
+    )
+    generation_bound = any(key in scope for key in generation_keys)
+    canonical_generation_id = scope.get("review_generation_id")
+    canonical_collection_sha256 = scope.get("collection_sha256")
+    canonical_generation_collection_sha256 = scope.get(
+        "review_generation_collection_sha256"
+    )
+    canonical_input_digest = scope.get("semantic_review_input_digest")
+    canonical_scope_binding_sha256 = scope.get("scope_binding_sha256")
+    entry_projection_sha256s = scope.get("entry_projection_sha256s")
+    if generation_bound:
+        if (
+            not isinstance(canonical_generation_id, str)
+            or re.fullmatch(r"[0-9a-f]{32}", canonical_generation_id) is None
+        ):
+            errors.append(
+                "per_scene_shards review_generation_id must be a lowercase generation id"
+            )
+        if (
+            not isinstance(canonical_generation_collection_sha256, str)
+            or _SHA256_RE.fullmatch(
+                canonical_generation_collection_sha256
+            ) is None
+        ):
+            errors.append(
+                "per_scene_shards review_generation_collection_sha256 must be a lowercase SHA-256"
+            )
+        elif canonical_generation_collection_sha256 != canonical_collection_sha256:
+            errors.append(
+                "per_scene_shards review generation collection SHA-256 does not match canonical collection"
+            )
+        if not isinstance(entry_projection_sha256s, dict):
+            errors.append(
+                "per_scene_shards entry_projection_sha256s must be an object"
+            )
+            entry_projection_sha256s = {}
+        else:
+            if list(entry_projection_sha256s) != expected_entry_ids:
+                errors.append(
+                    "per_scene_shards entry_projection_sha256s must exactly follow canonical entry_ids"
+                )
+            for entry_id, projection_sha256 in entry_projection_sha256s.items():
+                if (
+                    not isinstance(entry_id, str)
+                    or not isinstance(projection_sha256, str)
+                    or _SHA256_RE.fullmatch(projection_sha256) is None
+                ):
+                    errors.append(
+                        "per_scene_shards entry_projection_sha256s contains an invalid entry hash"
+                    )
+                    break
     seen_shard_ids: set[str] = set()
     seen_artifact_paths: set[str] = set()
     assigned_entry_ids: list[str] = []
@@ -1977,6 +2051,25 @@ def semantic_review_currentness_issues(run_dir: Path, stage: str) -> tuple[str, 
             "canonical_scope": canonical_scope_rel,
             "canonical_report": canonical_report_rel,
         }
+        if generation_bound:
+            expected_links.update(
+                {
+                    "canonical_review_generation_id": canonical_generation_id,
+                    "canonical_collection_sha256": canonical_collection_sha256,
+                    "canonical_semantic_review_input_digest": canonical_input_digest,
+                    "canonical_scope_binding_sha256": canonical_scope_binding_sha256,
+                }
+            )
+            if len(shard_entry_ids) != 1:
+                errors.append(
+                    f"semantic review shard {shard_id or index + 1} generation binding requires exactly one entry_id"
+                )
+            else:
+                expected_links["canonical_entry_projection_sha256"] = (
+                    entry_projection_sha256s.get(shard_entry_ids[0])
+                    if isinstance(entry_projection_sha256s, dict)
+                    else None
+                )
         for key, expected in expected_links.items():
             actual = shard_scope_data.get(key)
             if actual != expected:

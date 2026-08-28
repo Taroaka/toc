@@ -31,6 +31,7 @@ from toc.run_root_binding import (
     require_live_run_root_binding,
     write_run_file_text,
 )
+from toc.state_store import read_current_state
 from scripts.world_walk_source import read_regular_file_nofollow
 
 
@@ -230,14 +231,7 @@ def _parse_run_state_flat(run_dir: Path) -> dict[str, str]:
     path = run_dir / "state.txt"
     if not path.exists():
         return {}
-    state: dict[str, str] = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line == "---" or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        state[key.strip()] = value.strip()
-    return state
+    return dict(read_current_state(path).state)
 
 
 def _parse_stage_table(index_text: str) -> list[dict[str, str]]:

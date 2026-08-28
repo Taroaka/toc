@@ -46,17 +46,12 @@ python scripts/toc-state.py ensure --run-dir "$run_dir" --manifest "$manifest"
 
 python - <<'PY'
 from pathlib import Path
+from toc.harness import parse_state_file
 run_dir = Path(r"""'"$run_dir"'""")
 state_path = run_dir / "state.txt"
 if not state_path.exists():
     raise SystemExit(0)
-state = {}
-for raw in state_path.read_text(encoding="utf-8").splitlines():
-    line = raw.strip()
-    if not line or line == "---" or line.startswith("#") or "=" not in line:
-        continue
-    k, v = line.split("=", 1)
-    state[k.strip()] = v.strip()
+state = parse_state_file(state_path)
 gate = state.get("gate.hybridization_review", "").strip().lower()
 status = state.get("review.hybridization.status", "").strip().lower()
 if gate == "required" and status != "approved":

@@ -6,8 +6,13 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+from toc.adaptation_value_contract import (
+    script_adaptation_issues,
+    source_value_ids as adaptation_source_value_ids,
+)
 from toc.cut_context_packet import WARNING_KEY_BY_DIAGNOSTIC, cut_context_packet_issue_map
 from toc.harness import load_structured_document
+from toc.semantic_pack_scene import scene_acceptance_currentness_issues
 
 from .common import (
     CONCRETE_STORY_ELEMENT_FUNCTIONS,
@@ -909,9 +914,62 @@ def _scene_emotion_film_issue_map(scene: dict[str, Any]) -> dict[str, list[str]]
         if not characters:
             issues["timeline_states_complete"].append(f"scene{scene_id}:scene_character_state_timeline.characters")
         timeline_character_ids = {str(character.get("character_id") or "").strip() for character in characters if str(character.get("character_id") or "").strip()}
+        character_id_owners: dict[str, list[int]] = {}
+        for char_index, character in enumerate(characters, start=1):
+            character_id = str(character.get("character_id") or "").strip()
+            if character_id:
+                character_id_owners.setdefault(character_id, []).append(char_index)
+        appearance_owners: dict[str, list[int]] = {}
+        for char_index, character in enumerate(characters, start=1):
+            if "appearance_asset_ids" not in character:
+                continue
+            raw_appearance_ids = character.get("appearance_asset_ids")
+            if not isinstance(raw_appearance_ids, list):
+                issues["timeline_states_complete"].append(
+                    f"scene{scene_id}:character[{char_index}].appearance_asset_ids"
+                )
+                continue
+            appearance_ids = [
+                value.strip()
+                for value in raw_appearance_ids
+                if isinstance(value, str) and value.strip()
+            ]
+            if (
+                len(appearance_ids) != len(raw_appearance_ids)
+                or len(appearance_ids) != len(set(appearance_ids))
+            ):
+                issues["timeline_states_complete"].append(
+                    f"scene{scene_id}:character[{char_index}].appearance_asset_ids"
+                )
+                continue
+            for appearance_id in appearance_ids:
+                appearance_owners.setdefault(appearance_id, []).append(char_index)
+
+        timeline_appearance_ids: set[str] = set()
+        for appearance_id, owner_indexes in appearance_owners.items():
+            if appearance_id in timeline_character_ids:
+                if (
+                    len(owner_indexes) == 1
+                    and character_id_owners.get(appearance_id) == owner_indexes
+                ):
+                    timeline_appearance_ids.add(appearance_id)
+                    continue
+                for owner_index in owner_indexes:
+                    issues["timeline_states_complete"].append(
+                        f"scene{scene_id}:character[{owner_index}].appearance_asset_ids.conflicts_with_character_id:{appearance_id}"
+                    )
+                continue
+            if len(owner_indexes) != 1:
+                issues["timeline_states_complete"].append(
+                    f"scene{scene_id}:scene_character_state_timeline.appearance_asset_ids.not_unique:{appearance_id}"
+                )
+                continue
+            timeline_appearance_ids.add(appearance_id)
+
         expected_character_ids = _scene_expected_character_ids(scene)
-        if expected_character_ids and not expected_character_ids.issubset(timeline_character_ids):
-            missing = ",".join(sorted(expected_character_ids - timeline_character_ids))
+        bound_character_asset_ids = timeline_character_ids | timeline_appearance_ids
+        if expected_character_ids and not expected_character_ids.issubset(bound_character_asset_ids):
+            missing = ",".join(sorted(expected_character_ids - bound_character_asset_ids))
             issues["timeline_states_complete"].append(f"scene{scene_id}:scene_character_state_timeline.missing_characters:{missing}")
         for char_index, character in enumerate(characters, start=1):
             for state_key in ("start_state", "midpoint_state", "end_state"):
@@ -1843,32 +1901,78 @@ def _append_p400_event_and_film_checks(
         )
 
 
-def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, Any], scenes: list[Any]) -> None:
+def _append_p400_scene_cut_checks(
+    checks: list[dict[str, Any]],
+    data: dict[str, Any],
+    scenes: list[Any],
+    *,
+    run_dir: Path | None = None,
+) -> None:
     if not scenes:
         return
 
+    script_metadata = as_dict(data.get("script_metadata"))
+    authoring_preflight = as_dict(data.get("authoring_preflight"))
+    acceptance_marker = str(
+        script_metadata.get("scene_acceptance_contract") or ""
+    ).strip()
+    acceptance_marker_declared = bool(acceptance_marker)
+    acceptance_marker_present = acceptance_marker == "required_v1"
+    acceptance_currentness_issues = (
+        scene_acceptance_currentness_issues(data, run_dir)
+        if acceptance_marker_declared and run_dir is not None
+        else (
+            ["scene_acceptance.run_dir_missing"]
+            if acceptance_marker_declared
+            else []
+        )
+    )
+    acceptance_preflight_passed = bool(
+        acceptance_marker_present
+        and str(authoring_preflight.get("status") or "").strip().lower()
+        == "passed"
+        and not acceptance_currentness_issues
+    )
+    if acceptance_marker_declared:
+        add_check(
+            checks,
+            "script.scene_acceptance_current",
+            not acceptance_currentness_issues,
+            "scene acceptance contract/source/preflight bindings are current"
+            + (
+                f" (issues: {', '.join(acceptance_currentness_issues[:8])})"
+                if acceptance_currentness_issues
+                else ""
+            ),
+            kind="rubric",
+        )
     scene_set_status = _review_status(data, "scene_set_review")
     scene_detail_status = _review_status(data, "scene_detail_review")
     cut_blueprint_status = _review_status(data, "cut_blueprint_review")
+    accepted_authoring_statuses = (
+        {"approved", "pending_independent_review"}
+        if acceptance_preflight_passed
+        else {"approved"}
+    )
     add_check(
         checks,
         "script.scene_set_review_approved",
-        scene_set_status == "approved",
-        f"p410 abstract scene-set review is approved before p420 (got {scene_set_status or 'missing'})",
+        scene_set_status in accepted_authoring_statuses,
+        f"p410 scene-set is independently approved or deterministically preflighted before p420 (got {scene_set_status or 'missing'})",
         kind="rubric",
     )
     add_check(
         checks,
         "script.scene_detail_review_approved",
-        scene_detail_status == "approved",
-        f"p410 concrete per-scene review is approved before p420 (got {scene_detail_status or 'missing'})",
+        scene_detail_status in accepted_authoring_statuses,
+        f"p410 concrete scenes are independently approved or deterministically preflighted before p420 (got {scene_detail_status or 'missing'})",
         kind="rubric",
     )
     add_check(
         checks,
         "script.cut_blueprint_review_approved",
-        cut_blueprint_status == "approved",
-        f"p420 cut blueprint review is approved before p430 (got {cut_blueprint_status or 'missing'})",
+        cut_blueprint_status in accepted_authoring_statuses,
+        f"p420 cut blueprint is independently approved or built after deterministic preflight before p430 (got {cut_blueprint_status or 'missing'})",
         kind="rubric",
     )
     scene_count = len([scene for scene in scenes if isinstance(scene, dict)])
@@ -1949,17 +2053,22 @@ def _append_p400_scene_cut_checks(checks: list[dict[str, Any]], data: dict[str, 
         )
 
     _append_p400_event_and_film_checks(checks, data, scenes)
+    accepted_scene_agent_statuses = (
+        {"passed", "preflight_passed"}
+        if acceptance_preflight_passed
+        else {"passed"}
+    )
     scenes_agent_passed = sum(
         1
         for scene in scenes
         if isinstance(scene, dict)
-        and str(((scene.get("agent_review") or {}) if isinstance(scene.get("agent_review"), dict) else {}).get("status") or "").strip().lower() == "passed"
+        and str(((scene.get("agent_review") or {}) if isinstance(scene.get("agent_review"), dict) else {}).get("status") or "").strip().lower() in accepted_scene_agent_statuses
     )
     add_check(
         checks,
         "script.scene_agent_review_passed",
         scenes_agent_passed == scene_count,
-        f"all scenes have agent_review.status=passed ({scenes_agent_passed}/{scene_count})",
+        f"all scenes have agent_review.status=passed or contract preflight_passed ({scenes_agent_passed}/{scene_count})",
         kind="rubric",
     )
 
@@ -2055,8 +2164,27 @@ def check_script_single(run_dir: Path, profile: str) -> tuple[dict[str, Any], di
             + (f" (issues: {', '.join(basis_issues[:8])})" if basis_issues else ""),
             kind="rubric",
         )
+    story_data = load_structured_document(run_dir / "story.md")[1] if (run_dir / "story.md").exists() else {}
+    visual_value_data = (
+        load_structured_document(run_dir / "visual_value.md")[1]
+        if (run_dir / "visual_value.md").exists()
+        else {}
+    )
+    adaptation_issues = script_adaptation_issues(
+        data,
+        source_value_ids=adaptation_source_value_ids(story_data),
+        visual_value=visual_value_data,
+    )
+    add_check(
+        checks,
+        "script.adaptation_value_contract",
+        not adaptation_issues,
+        "declared adaptation value contract reaches every scene and cut with valid source value references"
+        + (f" (issues: {', '.join(adaptation_issues[:8])})" if adaptation_issues else ""),
+        kind="rubric",
+    )
     flattened = body_text
-    _append_p400_scene_cut_checks(checks, data, scenes)
+    _append_p400_scene_cut_checks(checks, data, scenes, run_dir=run_dir)
     if not contract:
         add_check(checks, "script.contract_missing", False, "evaluation_contract is missing for script stage.", kind="rubric")
     else:
@@ -2087,6 +2215,9 @@ def check_script_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, An
 
     all_no_todo = True
     scene_event_issues: list[str] = []
+    adaptation_issues: list[str] = []
+    story_data = load_structured_document(run_dir / "story.md")[1] if (run_dir / "story.md").exists() else {}
+    visual_value_data = load_structured_document(run_dir / "visual_value.md")[1] if (run_dir / "visual_value.md").exists() else {}
     for path in script_paths:
         if not path.exists():
             all_no_todo = False
@@ -2099,6 +2230,21 @@ def check_script_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, An
         scenes = as_list(data.get("scenes")) or as_list(nested_get(data, ["script", "scenes"], []))
         if not scenes and isinstance(scene_data, dict):
             scenes = [scene_data]
+        normalized_data = data
+        scene_series_metadata = data.get("scene_script_metadata")
+        if isinstance(scene_series_metadata, dict):
+            normalized_data = {
+                **data,
+                "script_metadata": scene_series_metadata,
+                "scenes": scenes,
+            }
+        adaptation_issues.extend(
+            script_adaptation_issues(
+                normalized_data,
+                source_value_ids=adaptation_source_value_ids(story_data),
+                visual_value=visual_value_data,
+            )
+        )
         scene_event_issues.extend(_scene_event_readiness_issues(scenes, prefix="script.scene_series"))
     if profile == "standard":
         add_check(checks, "script.scene_no_todo", all_no_todo, "scene scripts do not contain TODO/TBD markers", kind="rubric")
@@ -2108,6 +2254,14 @@ def check_script_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, An
         not scene_event_issues,
         "scene-series scripts satisfy scene_event v1 and cut event beat contracts"
         + (f" (issues: {', '.join(scene_event_issues[:8])})" if scene_event_issues else ""),
+        kind="rubric",
+    )
+    add_check(
+        checks,
+        "script.scene_series_adaptation_value_contract",
+        not adaptation_issues,
+        "scene-series artifacts that declare adaptation_value_contract preserve the source-to-scene-to-cut lineage"
+        + (f" (issues: {', '.join(adaptation_issues[:8])})" if adaptation_issues else ""),
         kind="rubric",
     )
 

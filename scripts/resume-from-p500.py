@@ -28,6 +28,7 @@ from toc.harness import (
     append_state_snapshot,
     extract_yaml_block,
     load_structured_document,
+    now_iso,
     parse_state_file,
     safe_load_yaml,
 )
@@ -216,16 +217,9 @@ def _append_resume_state(
 
 def _parse_resume_state(run_dir: Path) -> dict[str, str]:
     active = _active_resume_root(run_dir)
-    if active is None:
-        return parse_state_file(run_dir / "state.txt")
-    parser = getattr(active[2], "_parse_state_text", None)
-    if not callable(parser):
-        raise P500ResumeError(
-            "frontend runner does not expose bound state parsing"
-        )
-    return parser(
-        _read_resume_text(run_dir, "state.txt", missing_ok=True)
-    )
+    if active is not None:
+        _resume_root_identity(run_dir)
+    return parse_state_file(run_dir / "state.txt")
 
 
 def _load_resume_structured_document(
@@ -356,6 +350,42 @@ def _load_frontend_runner() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _recompile_resumed_image_prompt_payloads(run_dir: Path) -> list[str]:
+    """Compile repaired first-frame plans while the resume run is pinned."""
+
+    active = _active_resume_root(run_dir)
+    if active is None:
+        raise P500ResumeError(
+            "p500 image prompt recompile requires the active bound resume root"
+        )
+    from toc.run_root_binding import (
+        current_run_root_binding,
+        require_bound_run_root,
+    )
+
+    binding = current_run_root_binding()
+    if (
+        binding is None
+        or binding.lexical_root != active[0]
+        or binding.identity != active[1]
+    ):
+        raise P500ResumeError(
+            "p500 image prompt recompile escaped the bound resume root"
+        )
+    try:
+        require_bound_run_root(run_dir)
+    except ValueError as exc:
+        raise P500ResumeError(
+            "p500 image prompt recompile run directory identity changed"
+        ) from exc
+
+    # Keep the server import out of dry-run/token planning. This helper is called
+    # only from the applied p500 continuation after the run lease is active.
+    from server import image_gen_app
+
+    return image_gen_app._recompile_image_prompt_payloads_from_plans(run_dir)
 
 
 def _topic_for_run(run_dir: Path, explicit_topic: str) -> str:
@@ -569,6 +599,21 @@ def _resume_checkpoint_metadata(
                 f"p500 resume checkpoint state_before digest does not match: "
                 f"{checkpoint}"
             )
+    state_head_sequence = payload.get("state_head_sequence")
+    state_head_hash = payload.get("state_head_hash")
+    if state_head_sequence is not None and (
+        type(state_head_sequence) is not int or state_head_sequence < 0
+    ):
+        raise P500ResumeError(
+            f"p500 resume checkpoint state head sequence is invalid: {checkpoint}"
+        )
+    if state_head_hash is not None and (
+        not isinstance(state_head_hash, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", state_head_hash) is None
+    ):
+        raise P500ResumeError(
+            f"p500 resume checkpoint state head hash is invalid: {checkpoint}"
+        )
     actual_plan_token = _compute_resume_plan_token(
         run_dir=metadata_run_dir,
         run_dir_identity=plan_run_identity,
@@ -583,6 +628,8 @@ def _resume_checkpoint_metadata(
         downstream_fingerprints=payload["downstream_fingerprints"],
         resume_input_identity=payload.get("resume_input_identity"),
         state_before_sha256=state_before_digest,
+        state_head_sequence=state_head_sequence,
+        state_head_hash=state_head_hash,
     )
     if actual_plan_token != expected_plan_token:
         raise P500ResumeError(
@@ -1591,6 +1638,27 @@ def materialize_from_p500(
             "p500 resume restored source references do not match the "
             "world_walk manifest contract"
         )
+    compiled_selectors = _recompile_resumed_image_prompt_payloads(run_dir)
+    _append_resume_state(
+        run_dir,
+        {
+            "runtime.resume.p500.image_prompt_recompile.status": "done",
+            "runtime.resume.p500.image_prompt_recompile.count": str(
+                len(compiled_selectors)
+            ),
+            "runtime.resume.p500.image_prompt_recompile.compiled_selectors": (
+                ", ".join(compiled_selectors)
+            ),
+        },
+    )
+    _manifest_text, manifest = _load_resume_structured_document(
+        run_dir,
+        "video_manifest.md",
+    )
+    if not manifest:
+        raise P500ResumeError(
+            "recompiled p500 video manifest is unreadable"
+        )
     asset_inventory, asset_plan = frontend._build_asset_artifacts_from_manifest(
         profile=profile,
         manifest=manifest,
@@ -1737,6 +1805,34 @@ def _prepare_resume_grounding(run_dir: Path) -> None:
     )
 
 
+def _mark_resume_dependency_sync_complete(run_dir: Path) -> None:
+    """Supersede interrupted repair sync after full p500 rematerialization."""
+
+    state = _parse_resume_state(run_dir)
+    updates: dict[str, str] = {}
+    for stage in (
+        "research",
+        "story",
+        "scene_set",
+        "scene_detail",
+        "cut_blueprint",
+        "asset_plan",
+    ):
+        prefix = f"review.semantic.{stage}.dependency_sync"
+        if state.get(f"{prefix}.status") not in {"failed", "in_progress"}:
+            continue
+        updates.update(
+            {
+                f"{prefix}.status": "done",
+                f"{prefix}.error": "",
+                f"{prefix}.completed_by": "p500_full_rematerialization",
+                f"{prefix}.updated_at": now_iso(),
+            }
+        )
+    if updates:
+        _append_resume_state(run_dir, updates)
+
+
 def _mark_materialized_asset_requests(run_dir: Path) -> None:
     """Keep non-executed media pending while recording the p550 handoff."""
 
@@ -1865,6 +1961,7 @@ def _continue_run(
             )
             _prepare_resume_grounding(run_dir)
             frontend._refresh_downstream_review_artifacts(run_dir)
+            _mark_resume_dependency_sync_complete(run_dir)
             if materialize_only:
                 asyncio.run(
                     frontend.run_pre_media_semantic_pipeline(

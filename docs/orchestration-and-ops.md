@@ -85,6 +85,7 @@ audit:
 - **run-level orchestration**: L1 Run Orchestrator は `p100` 番台ごとの L2 P-Bucket Supervisor を順番に起動し、本文 artifact を読まずに handoff artifact と slot state だけで次 bucket へ進む
 - **L2 progress memo**: L1 Run Orchestrator は L2 supervisor 起動時に `logs/orchestration/l2_supervisor_progress.md` へ `invoked` を追記する。記録対象は L2 supervisor だけで、L3 task/review agents はここへ記録しない
 - **bucket single writer**: L2 P-Bucket Supervisor は担当 bucket 内の canonical artifact、`state.txt`、`p000_index.md` の single writer として動く。L3 task/review agents は isolated output のみを書く
+- **state transaction**: orchestrator はshared state storeへ変更keyだけを一つのatomic delta eventとして渡す。`state.txt`全履歴のread/merge/full-snapshot appendや、`state.current.json` / `run_status.json` / `p000_index.md`への状態の直接書込みを行わない
 - **bucket completion artifact**: 各 bucket は完了時に `logs/orchestration/pXXX.supervisor_result.json` を書き、`status` / `completed_slots` / `required_artifacts` / `state_keys` / `review_outputs` / `next_bucket` / `blocked_reason` を残す
 - **grounding preflight**: stage 開始前に `scripts/resolve-stage-grounding.py` を実行し、必要 docs / templates / upstream artifact の解決結果を `logs/grounding/<stage>.json` と `state.txt` へ残す
 - **readset audit**: grounding 後に `scripts/audit-stage-grounding.py` を実行し、`logs/grounding/<stage>.readset.json` と `logs/grounding/<stage>.audit.json` を残す

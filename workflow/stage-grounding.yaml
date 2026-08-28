@@ -1,4 +1,4 @@
-contract_version: 4
+contract_version: 6
 
 global_required_docs:
   - docs/system-architecture.md
@@ -23,6 +23,7 @@ stages:
   story:
     required_docs:
       - docs/story-creation.md
+      - docs/adaptation-value-amplification.md
     required_templates:
       - workflow/story-template.yaml
     required_inputs:
@@ -36,6 +37,7 @@ stages:
     required_docs:
       - docs/story-creation.md
       - docs/data-contracts.md
+      - docs/adaptation-value-amplification.md
     required_templates:
       - workflow/visual-value-template.yaml
     required_inputs:
@@ -46,11 +48,15 @@ stages:
 
   script:
     required_docs:
+      - docs/story-creation.md
       - docs/script-creation.md
       - docs/implementation/scene-loop.md
+      - docs/implementation/agent-roles-and-prompts.md
       - docs/data-contracts.md
+      - docs/adaptation-value-amplification.md
     required_templates:
       - workflow/script-template.yaml
+      - workflow/scene-outline-template.yaml
       - workflow/video-manifest-template.md
     required_inputs:
       - story.md
@@ -110,7 +116,9 @@ stages:
     # produce that state.
     required_docs:
       - docs/script-creation.md
+      - docs/implementation/agent-roles-and-prompts.md
       - docs/data-contracts.md
+      - docs/adaptation-value-amplification.md
     required_templates:
       - workflow/video-manifest-template.md
     required_inputs:
@@ -123,7 +131,11 @@ stages:
     required_docs:
       - docs/implementation/image-prompting.md
       - docs/implementation/asset-bibles.md
+      - docs/implementation/agent-roles-and-prompts.md
+      - docs/data-contracts.md
+      - docs/adaptation-value-amplification.md
     required_templates:
+      - workflow/scene-outline-template.yaml
       - workflow/video-manifest-template.md
     required_inputs:
       - video_manifest.md
@@ -140,6 +152,7 @@ stages:
     required_docs:
       - docs/video-generation.md
       - docs/implementation/video-prompting.md
+      - docs/adaptation-value-amplification.md
       # The grounding contract has no provider-conditional required-playbook selector.
       # Treat the Kling execution playbook as an unconditional stage document
       # so every Kling request is present in the verified grounding readset.

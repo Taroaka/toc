@@ -24,7 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from toc.harness import load_structured_document  # noqa: E402
+from toc.harness import load_structured_document, parse_state_file  # noqa: E402
 from toc.image_request_snapshot import sha256_canonical_json  # noqa: E402
 
 
@@ -32,16 +32,9 @@ OUTPUT_ROOT = (REPO_ROOT / "output").resolve()
 
 
 def _parse_state(path: Path) -> dict[str, str]:
-    state: dict[str, str] = {}
     if not path.exists():
-        return state
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = raw.strip()
-        if not line or line == "---" or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        state[key.strip()] = value.strip()
-    return state
+        return {}
+    return parse_state_file(path)
 
 
 def _iter_manifest_cuts(manifest: dict[str, Any]) -> list[dict[str, Any]]:

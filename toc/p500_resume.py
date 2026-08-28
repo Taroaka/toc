@@ -16,16 +16,13 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from toc.harness import (
-    _order_keys,
     append_state_snapshot as _harness_append_state_snapshot,
-    artifact_inventory,
-    nested_state,
-    new_job_id,
     now_iso,
     parse_state_file,
-    pending_gates,
 )
 from toc.run_index import build_run_index_markdown, classify_run_file
+from toc.run_root_binding import bind_run_root
+from toc.state_store import read_current_state
 from toc.runtime_locks import FileLockUnavailable, sync_file_lock
 from toc.stage_evaluator import check_manifest_single
 from scripts.world_walk_source import (
@@ -39,7 +36,7 @@ class P500ResumeError(RuntimeError):
 
 
 _ACTIVE_P500_RUN: ContextVar[
-    tuple[str, tuple[int, int]] | None
+    tuple[str, tuple[int, int], int] | None
 ] = ContextVar("toc_p500_active_run", default=None)
 
 
@@ -195,6 +192,8 @@ class ResumePlan:
     upstream_sha256: dict[str, str]
     state_fingerprint: dict[str, Any]
     state_before_sha256: str
+    state_head_sequence: int
+    state_head_hash: str
     index_fingerprint: dict[str, Any]
     optional_upstream_fingerprints: dict[str, dict[str, Any]]
     resume_input_identity: dict[str, str]
@@ -752,24 +751,6 @@ def _descriptor_root_path(descriptor: int) -> Path:
     )
 
 
-def _parse_state_text(text: str) -> dict[str, str]:
-    merged: dict[str, str] = {}
-    for raw in text.splitlines():
-        line = raw.strip()
-        if (
-            not line
-            or line == "---"
-            or line.startswith("#")
-            or "=" not in line
-        ):
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if key:
-            merged[key] = value.strip().replace("\n", " ")
-    return merged
-
-
 def _read_bound_run_bytes(
     run_dir: Path,
     relative_path: str | Path,
@@ -787,21 +768,6 @@ def _read_bound_run_bytes(
         if missing_ok:
             return b""
         raise
-
-
-def _parse_bound_state(
-    run_dir: Path,
-    *,
-    identity: tuple[int, int],
-) -> dict[str, str]:
-    return _parse_state_text(
-        _read_bound_run_bytes(
-            run_dir,
-            "state.txt",
-            identity=identity,
-            missing_ok=True,
-        ).decode("utf-8")
-    )
 
 
 def _write_bound_run_bytes(
@@ -836,92 +802,12 @@ def append_state_snapshot(
 
     run_dir = Path(lexical_run)
     identity = active[1]
-    current_bytes = _read_bound_run_bytes(
+    with bind_run_root(
         run_dir,
-        "state.txt",
-        identity=identity,
-        missing_ok=True,
-    )
-    try:
-        current_text = current_bytes.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise P500ResumeError("state.txt is not valid UTF-8") from exc
-    merged = _parse_state_text(current_text)
-    if "job_id" not in merged or not merged["job_id"].strip():
-        merged["job_id"] = new_job_id()
-    if "status" not in merged or not merged["status"].strip():
-        merged["status"] = "INIT"
-    merged.setdefault(
-        "artifact.run_index",
-        os.fspath(run_dir / "p000_index.md"),
-    )
-    merged.update(
-        {
-            key: value.replace("\n", " ").strip()
-            for key, value in updates.items()
-        }
-    )
-    merged["timestamp"] = now_iso()
-    block = (
-        "\n".join(
-            f"{key}={merged[key]}" for key in _order_keys(merged)
-        )
-        + "\n---\n"
-    )
-    _write_bound_run_bytes(
-        run_dir,
-        "state.txt",
-        current_bytes + block.encode("utf-8"),
-        identity=identity,
-    )
-
-    _verify_real_directory_identity(run_dir, identity)
-    index_text = build_run_index_markdown(run_dir, state=merged)
-    _write_bound_run_bytes(
-        run_dir,
-        "p000_index.md",
-        index_text.encode("utf-8"),
-        identity=identity,
-    )
-    payload: dict[str, Any] = {
-        "generated_at": now_iso(),
-        "run_dir": os.fspath(run_dir),
-        "state_file": os.fspath(run_dir / "state.txt"),
-        "state_flat": merged,
-        "state": nested_state(merged),
-        "artifacts": artifact_inventory(run_dir, merged),
-        "pending_gates": pending_gates(merged),
-    }
-    eval_bytes = _read_bound_run_bytes(
-        run_dir,
-        "eval_report.json",
-        identity=identity,
-        missing_ok=True,
-    )
-    if eval_bytes:
-        try:
-            payload["eval_report"] = json.loads(
-                eval_bytes.decode("utf-8")
-            )
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            payload["eval_report"] = {
-                "error": "Failed to parse eval_report.json"
-            }
-    _write_bound_run_bytes(
-        run_dir,
-        "run_status.json",
-        (
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n"
-        ).encode("utf-8"),
-        identity=identity,
-    )
-    return merged
+        expected_identity=identity,
+        descriptor=active[2],
+    ):
+        return _harness_append_state_snapshot(state_path, updates)
 
 
 def _lexical_path_fingerprint(path: Path) -> dict[str, Any]:
@@ -1264,6 +1150,8 @@ def _plan_token(
     downstream_fingerprints: dict[str, dict[str, Any]],
     resume_input_identity: dict[str, str] | None = None,
     state_before_sha256: str | None = None,
+    state_head_sequence: int | None = None,
+    state_head_hash: str | None = None,
 ) -> str:
     normalized_run_identity: tuple[int, int] | None = None
     if run_dir_identity is not None:
@@ -1289,6 +1177,14 @@ def _plan_token(
         and re.fullmatch(r"[0-9a-f]{64}", state_before_sha256) is None
     ):
         raise P500ResumeError("state_before_sha256 is malformed")
+    if state_head_sequence is not None and (
+        type(state_head_sequence) is not int or state_head_sequence < 0
+    ):
+        raise P500ResumeError("state_head_sequence is malformed")
+    if state_head_hash is not None and re.fullmatch(
+        r"sha256:[0-9a-f]{64}", state_head_hash
+    ) is None:
+        raise P500ResumeError("state_head_hash is malformed")
     payload = {
         "run_dir": str(run_dir),
         "checkpoint_id": checkpoint_id,
@@ -1305,6 +1201,10 @@ def _plan_token(
         payload["resume_input_identity"] = normalized_input_identity
     if state_before_sha256 is not None:
         payload["state_before_sha256"] = state_before_sha256
+    if state_head_sequence is not None:
+        payload["state_head_sequence"] = state_head_sequence
+    if state_head_hash is not None:
+        payload["state_head_hash"] = state_head_hash
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
@@ -1336,7 +1236,8 @@ def build_resume_plan(
         for rel in PRESERVED_CANONICAL_FILES
         if rel not in {"state.txt", "p000_index.md"}
     }
-    state_before = parse_state_file(resolved / "state.txt")
+    state_replay = read_current_state(resolved / "state.txt")
+    state_before = dict(state_replay.state)
     state_before_sha256 = canonical_state_before_sha256(state_before)
     downstream = tuple(sorted(set(_iter_downstream_files(resolved))))
     state_fingerprint = _lexical_path_fingerprint(resolved / "state.txt")
@@ -1366,6 +1267,8 @@ def build_resume_plan(
         upstream_sha256=upstream_sha256,
         state_fingerprint=state_fingerprint,
         state_before_sha256=state_before_sha256,
+        state_head_sequence=state_replay.head.sequence,
+        state_head_hash=state_replay.head.event_hash,
         index_fingerprint=index_fingerprint,
         optional_upstream_fingerprints=optional_upstream_fingerprints,
         resume_input_identity=normalized_input_identity,
@@ -1379,6 +1282,8 @@ def build_resume_plan(
             upstream_sha256=upstream_sha256,
             state_fingerprint=state_fingerprint,
             state_before_sha256=state_before_sha256,
+            state_head_sequence=state_replay.head.sequence,
+            state_head_hash=state_replay.head.event_hash,
             index_fingerprint=index_fingerprint,
             optional_upstream_fingerprints=optional_upstream_fingerprints,
             downstream_files=downstream,
@@ -1539,6 +1444,14 @@ def _apply_resume_plan_locked(
                 "parsed state changed after the resume plan was built; "
                 "run dry-run again"
             )
+        if (
+            current.state_head_sequence != plan.state_head_sequence
+            or current.state_head_hash != plan.state_head_hash
+        ):
+            raise P500ResumeError(
+                "state event head changed after the resume plan was built; "
+                "run dry-run again"
+            )
         if current.index_fingerprint != plan.index_fingerprint:
             raise P500ResumeError(
                 "p000_index.md changed after the resume plan was built; "
@@ -1613,14 +1526,20 @@ def _apply_resume_plan_locked(
             moved.append(rel)
             _verify_real_directory_identity(run_dir, plan.run_dir_identity)
 
-        state = _parse_bound_state(
-            run_dir,
-            identity=plan.run_dir_identity,
-        )
+        replay = read_current_state(run_dir / "state.txt")
+        state = dict(replay.state)
         if canonical_state_before_sha256(state) != plan.state_before_sha256:
             raise P500ResumeError(
                 "state_before changed before checkpoint metadata was written; "
                 "run dry-run again"
+            )
+        if (
+            replay.head.sequence != plan.state_head_sequence
+            or replay.head.event_hash != plan.state_head_hash
+        ):
+            raise P500ResumeError(
+                "state event head changed before checkpoint metadata was "
+                "written; run dry-run again"
             )
         metadata = {
             **plan.to_dict(),
@@ -1648,10 +1567,9 @@ def _apply_resume_plan_locked(
             )
             state_committed = True
         except Exception:
-            committed_state = _parse_bound_state(
-                run_dir,
-                identity=plan.run_dir_identity,
-            )
+            committed_state = read_current_state(
+                run_dir / "state.txt"
+            ).state
             state_committed = (
                 committed_state.get("runtime.resume.p500.checkpoint")
                 == str(checkpoint_dir.relative_to(run_dir))
@@ -1765,6 +1683,7 @@ def apply_resume_plan(
             (
                 os.path.abspath(os.fspath(run_dir)),
                 plan.run_dir_identity,
+                run_descriptor,
             )
         )
         return _apply_resume_plan_locked(

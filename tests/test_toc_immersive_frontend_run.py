@@ -776,6 +776,49 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 "runtime.stage=outside\n---\n",
             )
 
+    def test_state_writer_uses_serialized_reader_under_materialization_lock(
+        self,
+    ) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_state_serialized_read_",
+            dir=output_root,
+        ) as td:
+            run_dir = Path(td) / "run"
+            run_dir.mkdir()
+            (run_dir / "state.txt").write_text(
+                "runtime.stage=prepared\n---\n",
+                encoding="utf-8",
+            )
+            run_identity = module.directory_identity_nofollow(run_dir)
+            strict_reader = module.read_regular_file_nofollow
+
+            def reject_strict_state_read(*args, **kwargs):
+                relative_path = Path(args[1])
+                if relative_path == Path("state.txt"):
+                    raise AssertionError(
+                        "active state reads must share append serialization"
+                    )
+                return strict_reader(*args, **kwargs)
+
+            with module._run_materialization_lock(
+                run_dir,
+                expected_identity=run_identity,
+            ):
+                with patch.object(
+                    module,
+                    "read_regular_file_nofollow",
+                    side_effect=reject_strict_state_read,
+                ):
+                    state = module.append_state_snapshot(
+                        run_dir / "state.txt",
+                        {"runtime.stage": "reviewing"},
+                    )
+
+            self.assertEqual(state["runtime.stage"], "reviewing")
+
     def test_subprocess_uses_pinned_run_root_without_chflags(self) -> None:
         module = load_frontend_run_module()
         output_root = REPO_ROOT / "output"
@@ -906,6 +949,27 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             [
                 command[command.index("--stage") + 1]
                 for command in commands[1:]
+            ],
+            ["asset", "scene_implementation"],
+        )
+
+    def test_prepare_grounding_can_defer_p450_until_repaired_stage_rereview(
+        self,
+    ) -> None:
+        module = load_frontend_run_module()
+        run_dir = Path("/tmp/frontend-grounding-semantic-repair")
+
+        with patch.object(module.subprocess, "run") as subprocess_run:
+            module.prepare_grounding(run_dir, verify_p450=False)
+
+        commands = [call.args[0] for call in subprocess_run.call_args_list]
+        self.assertFalse(
+            any("verify-pipeline.py" in str(command) for command in commands)
+        )
+        self.assertEqual(
+            [
+                command[command.index("--stage") + 1]
+                for command in commands
             ],
             ["asset", "scene_implementation"],
         )
@@ -1389,6 +1453,106 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 module._refresh_review_loop_artifacts(run_dir, stages)
 
         self.assertEqual(preflight.call_count, 1)
+
+    def test_materialization_disk_preflight_rejects_106_mib_with_recovery_guidance(self) -> None:
+        module = load_frontend_run_module()
+        disk_usage = shutil._ntuple_diskusage(
+            total=1024 * 1024 * 1024,
+            used=918 * 1024 * 1024,
+            free=106 * 1024 * 1024,
+        )
+
+        with (
+            patch.object(module.shutil, "disk_usage", return_value=disk_usage),
+            self.assertRaisesRegex(
+                RuntimeError,
+                r"storage preflight failed.*required 512 MiB.*available 106 MiB.*unused output runs",
+            ),
+        ):
+            module._require_materialization_free_space(Path("/tmp/example-run"))
+
+    def test_materialization_disk_preflight_allows_825_mib(self) -> None:
+        module = load_frontend_run_module()
+        disk_usage = shutil._ntuple_diskusage(
+            total=1024 * 1024 * 1024,
+            used=199 * 1024 * 1024,
+            free=825 * 1024 * 1024,
+        )
+
+        with patch.object(module.shutil, "disk_usage", return_value=disk_usage):
+            module._require_materialization_free_space(Path("/tmp/example-run"))
+
+    def test_main_runs_disk_preflight_before_materialization(self) -> None:
+        module = load_frontend_run_module()
+        materialize = Mock()
+
+        with (
+            patch.object(
+                module,
+                "_validated_fresh_cli_run_dir",
+                return_value=Path("/tmp/materialized-run"),
+            ),
+            patch.object(
+                module,
+                "directory_identity_nofollow",
+                return_value=(1, 2),
+            ),
+            patch.object(
+                module,
+                "_require_materialization_free_space",
+                side_effect=RuntimeError("synthetic storage preflight failed"),
+            ) as preflight,
+            patch.object(module, "materialize_run", materialize),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "toc-immersive-frontend-run.py",
+                    "--topic",
+                    "創作",
+                    "--run-dir",
+                    "/tmp/materialized-run",
+                    "--stop-target",
+                    "p680",
+                ],
+            ),
+            self.assertRaisesRegex(RuntimeError, "synthetic storage preflight failed"),
+        ):
+            module.main()
+
+        preflight.assert_called_once_with(Path("/tmp/materialized-run"))
+        materialize.assert_not_called()
+
+    def test_semantic_pack_failure_labels_enospc_and_bounds_stderr_tail(self) -> None:
+        module = load_frontend_run_module()
+        noisy_prefix = "LEAK_SENTINEL\n" + ("provider-noise-" * 1000)
+        failure = subprocess.CalledProcessError(
+            1,
+            ["build-semantic-review-pack.py"],
+            stderr=f"{noisy_prefix}\nOSError: [Errno 28] No space left on device",
+        )
+
+        with (
+            patch.object(
+                module,
+                "_run_materialization_subprocess",
+                side_effect=failure,
+            ),
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            module._build_semantic_review_packs(
+                Path("/tmp/example-run"),
+                ("scene_set", "scene_detail", "cut_blueprint"),
+            )
+
+        message = str(raised.exception)
+        self.assertIn("storage/ENOSPC", message)
+        self.assertIn("scene_set, scene_detail, cut_blueprint", message)
+        self.assertIn("exit code 1", message)
+        self.assertIn("[Errno 28] No space left on device", message)
+        self.assertIn("remove unused output runs", message)
+        self.assertNotIn("LEAK_SENTINEL", message)
+        self.assertLessEqual(len(message), 4600)
 
     def test_materialize_only_main_runs_semantic_pipeline_but_not_media_generation(self) -> None:
         module = load_frontend_run_module()
@@ -5964,3 +6128,794 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 if responsibility in str(beat.get("what_happens") or "")
             ]
             self.assertEqual(len(owners), 1, responsibility)
+
+    def test_ten_minute_cinderella_projects_only_owned_segment_beats_and_local_value_shifts(self) -> None:
+        module = load_frontend_run_module()
+        expected_roles_by_segment_beat = {
+            "C01-B01": ["protagonist"],
+            "C01-B02": ["protagonist", "stepmother"],
+            "C01-B03": ["protagonist", "stepsisters"],
+            "C01-B04": ["protagonist", "stepmother", "stepsisters"],
+            "C02-B01": ["stepsisters"],
+            "C02-B02": ["protagonist", "stepmother"],
+            "C02-B03": ["protagonist", "stepmother"],
+            "C02-B04": ["protagonist"],
+            "C03-B01": ["protagonist", "helper"],
+            "C03-B02": ["protagonist", "helper"],
+            "C03-B03": ["protagonist", "helper"],
+            "C03-B04": ["protagonist"],
+            "C04-B01": ["protagonist"],
+            "C04-B02": ["protagonist"],
+            "C04-B03": ["protagonist"],
+            "C04-B04": ["protagonist"],
+            "C05-B01": ["protagonist"],
+            "C05-B02": ["protagonist"],
+            "C05-B03": ["protagonist"],
+            "C05-B04": ["protagonist", "prince"],
+            "C06-B01": ["protagonist", "prince"],
+            "C06-B02": ["protagonist", "prince"],
+            "C06-B03": ["protagonist", "prince"],
+            "C06-B04": ["protagonist"],
+            "C07-B01": ["protagonist"],
+            "C07-B02": ["protagonist", "prince"],
+            "C07-B03": ["protagonist"],
+            "C07-B04": ["prince"],
+            "C08-B01": ["prince", "royal_envoy"],
+            "C08-B02": [
+                "protagonist",
+                "royal_envoy",
+                "stepmother",
+                "stepsisters",
+            ],
+            "C08-B03": [
+                "protagonist",
+                "royal_envoy",
+                "stepmother",
+                "stepsisters",
+            ],
+            "C08-B04": [
+                "protagonist",
+                "royal_envoy",
+                "stepmother",
+                "stepsisters",
+            ],
+        }
+        with patch.dict(os.environ, {"TOC_ENABLE_LEGACY_CINDERELLA_PROFILE": "1"}):
+            canonical_profile = module._story_profile(
+                "シンデレラ",
+                "シンデレラ",
+                variant_seed="ten-minute-segment-semantics",
+            )
+            profile = module._duration_aware_profile(
+                canonical_profile,
+                target_duration_seconds=600,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script, manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ",
+                Path(tmp),
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+
+        self.assertEqual(len(script["scenes"]), 15)
+        split_value_shifts: list[tuple[str, str]] = []
+        for runtime_index, (script_scene, manifest_scene) in enumerate(
+            zip(script["scenes"], manifest["scenes"], strict=True),
+            start=1,
+        ):
+            for projected_key in (
+                "location_sequence",
+                "scene_intent",
+                "scene_event",
+                "scene_character_state_timeline",
+            ):
+                self.assertEqual(
+                    manifest_scene[projected_key],
+                    script_scene[projected_key],
+                    f"scene{runtime_index * 10} {projected_key}",
+                )
+
+            canonical_index = int(profile["canonical_scene_indices"][runtime_index - 1])
+            segment_count = int(profile["scene_segment_counts"][runtime_index - 1])
+            if segment_count <= 1:
+                continue
+            segment_position = int(profile["scene_segment_positions"][runtime_index - 1])
+            segment_contract = module._cinderella_segment_contract(
+                canonical_index,
+                segment_position,
+                segment_count,
+            )
+            expected_beats = [
+                module._CINDERELLA_SEGMENT_BEATS[canonical_index][
+                    int(beat_id.rsplit("B", 1)[-1]) - 1
+                ]
+                for beat_id in segment_contract["beat_ids"]
+            ]
+            event_sequence = script_scene["scene_event"]["event_sequence"]
+            self.assertEqual(
+                [beat["what_happens"] for beat in event_sequence],
+                expected_beats,
+                f"scene{runtime_index * 10} must own exactly its segment beats",
+            )
+            for segment_beat_id, event_beat in zip(
+                segment_contract["beat_ids"], event_sequence, strict=True
+            ):
+                self.assertEqual(
+                    event_beat["required_roles"],
+                    expected_roles_by_segment_beat[segment_beat_id],
+                    f"scene{runtime_index * 10} {segment_beat_id} exact cast",
+                )
+            self.assertEqual(
+                [
+                    beat["summary"]
+                    for beat in script_scene["scene_generation"][
+                        "scene_authoring_context"
+                    ]["source_beats"]
+                ],
+                expected_beats,
+            )
+            self.assertEqual(
+                script_scene["scene_intent"]["visual_value_source"][
+                    "source_events"
+                ],
+                expected_beats,
+            )
+            later_sibling_beats = module._CINDERELLA_SEGMENT_BEATS[
+                canonical_index
+            ][
+                int(segment_contract["beat_ids"][-1].rsplit("B", 1)[-1]) :
+            ]
+            projected_scene_semantics = json.dumps(
+                {
+                    "scene_generation": script_scene["scene_generation"],
+                    "scene_intent": script_scene["scene_intent"],
+                    "scene_event": script_scene["scene_event"],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            for later_sibling_beat in later_sibling_beats:
+                self.assertNotIn(
+                    later_sibling_beat,
+                    projected_scene_semantics,
+                    f"scene{runtime_index * 10} must not complete a later sibling beat",
+                )
+
+            event_by_id = {
+                str(beat["beat_id"]): beat for beat in event_sequence
+            }
+            for cut_index, cut in enumerate(script_scene["cuts"]):
+                cut_contract = cut["cut_contract"]
+                source_contract = cut_contract["source_event_contract"]
+                source_beat_id = str(source_contract["primary_event_beat_id"])
+                source_beat = event_by_id[source_beat_id]
+                cut_roles = set(cut["cut_blueprint"]["required_roles"])
+                self.assertTrue(cut_roles, f"{cut['selector']} non-empty cut cast")
+                self.assertLessEqual(
+                    cut_roles,
+                    set(source_beat["required_roles"]),
+                    f"{cut['selector']} cut-local cast must come from its event cast",
+                )
+                self.assertEqual(
+                    source_contract["source_event_summary"],
+                    source_beat["what_happens"],
+                )
+                source_index = event_sequence.index(source_beat)
+                source_contract_text = json.dumps(
+                    source_contract,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                for later_event in event_sequence[source_index + 1 :]:
+                    self.assertNotIn(
+                        later_event["what_happens"],
+                        source_contract_text,
+                        f"{cut['selector']} source facts must not consume a later beat",
+                    )
+                cut_location = cut_contract["cut_context_packet"][
+                    "location_use"
+                ]["background"]
+                first_frame_local_text = " / ".join(
+                    str(cut["cut_blueprint"].get(field_name) or "")
+                    for field_name in (
+                        "first_frame_brief",
+                        "static_first_frame_rule",
+                        "visual_beat",
+                    )
+                )
+                motion_local_text = " / ".join(
+                    str(cut["cut_blueprint"].get(field_name) or "")
+                    for field_name in (
+                        "motion_brief",
+                        "motion_end_state",
+                    )
+                )
+                allowed_route_reveals = set(
+                    cut["cut_blueprint"]["allowed_new_reveal_elements"]
+                ).intersection(script_scene["location_sequence"]) - {cut_location}
+                for other_location in script_scene["location_sequence"]:
+                    if other_location == cut_location:
+                        continue
+                    self.assertNotIn(
+                        other_location,
+                        first_frame_local_text,
+                        f"{cut['selector']} first frame must stay inside {cut_location}",
+                    )
+                    if other_location not in allowed_route_reveals:
+                        self.assertNotIn(
+                            other_location,
+                            motion_local_text,
+                            f"{cut['selector']} motion has an unauthorized route reveal",
+                        )
+                if allowed_route_reveals:
+                    self.assertTrue(
+                        source_contract["source_concrete_events"][0][
+                            "use_next_cut_first_frame_as_last_frame"
+                        ],
+                        f"{cut['selector']} route reveal must bind to the next first frame",
+                    )
+                    self.assertLess(cut_index + 1, len(script_scene["cuts"]))
+                    next_cut = script_scene["cuts"][cut_index + 1]
+                    next_location = next_cut["cut_contract"][
+                        "cut_context_packet"
+                    ]["location_use"]["background"]
+                    self.assertIn(next_location, allowed_route_reveals)
+                    self.assertIn(next_location, motion_local_text)
+                    self.assertIn(
+                        next_location,
+                        next_cut["cut_blueprint"]["first_frame_brief"],
+                    )
+
+            canonical_route = canonical_profile["scene_location_sequences"][
+                canonical_index - 1
+            ]
+            route_positions = [
+                canonical_route.index(beat["concrete_event"]["where"])
+                for beat in event_sequence
+            ]
+            self.assertEqual(
+                route_positions,
+                sorted(route_positions),
+                f"scene{runtime_index * 10} event route",
+            )
+
+            value_shift = script_scene["scene_intent"]["value_shift"]
+            self.assertIn(expected_beats[0], value_shift["from"])
+            self.assertIn(expected_beats[-1], value_shift["to"])
+            split_value_shifts.append((value_shift["from"], value_shift["to"]))
+
+        self.assertEqual(len(split_value_shifts), len(set(split_value_shifts)))
+
+        scene_by_id = {
+            int(scene["scene_id"]): scene for scene in script["scenes"]
+        }
+        artifact = profile["artifact_name"]
+        self.assertTrue(
+            all(
+                beat["concrete_event"]["object_or_trace"]
+                == [f"{artifact}はまだ出さない"]
+                for beat in scene_by_id[40]["scene_event"]["event_sequence"]
+            )
+        )
+        scene50_events = scene_by_id[50]["scene_event"]["event_sequence"]
+        self.assertEqual(
+            scene50_events[0]["concrete_event"]["object_or_trace"],
+            [artifact],
+        )
+        self.assertIn(
+            "既にreveal済み",
+            scene50_events[1]["concrete_event"]["object_or_trace"][0],
+        )
+        transformation_cut = next(
+            cut
+            for cut in scene_by_id[50]["cuts"]
+            if artifact
+            in cut["cut_blueprint"]["allowed_new_reveal_elements"]
+        )
+        transformation_first_frame = transformation_cut["cut_contract"][
+            "first_frame_contract"
+        ]["event_fact_visible_in_still"]
+        self.assertNotIn(artifact, transformation_first_frame)
+        self.assertNotIn("完成したかぼちゃの馬車", transformation_first_frame)
+        transformation_motion = transformation_cut["cut_contract"][
+            "motion_contract"
+        ]
+        self.assertIn(artifact, transformation_motion["subject_motion"])
+        self.assertIn("馬車", transformation_motion["subject_motion"])
+        self.assertIn(artifact, transformation_motion["end_state"])
+        self.assertIn("馬車", transformation_motion["end_state"])
+        for scene_id in range(60, 130, 10):
+            for beat in scene_by_id[scene_id]["scene_event"]["event_sequence"]:
+                self.assertNotIn(
+                    "まだ出さない",
+                    " / ".join(beat["concrete_event"]["object_or_trace"]),
+                    f"scene{scene_id} must carry the already revealed artifact",
+                )
+        loss_owners = [
+            int(scene["scene_id"])
+            for scene in script["scenes"]
+            if any(
+                "ガラスの靴が脱げ" in str(beat["what_happens"])
+                for beat in scene["scene_event"]["event_sequence"]
+            )
+        ]
+        fitting_owners = [
+            int(scene["scene_id"])
+            for scene in script["scenes"]
+            if any(
+                "足に合うガラスの靴" in str(beat["what_happens"])
+                for beat in scene["scene_event"]["event_sequence"]
+            )
+        ]
+        self.assertEqual(loss_owners, [130])
+        self.assertEqual(fitting_owners, [150])
+
+        def event_proof(scene_id: int, beat_function: str) -> str:
+            beat = next(
+                event
+                for event in scene_by_id[scene_id]["scene_event"]["event_sequence"]
+                if event["beat_function"] == beat_function
+            )
+            return " / ".join(
+                str(beat.get(field_name) or "")
+                for field_name in (
+                    "visible_action",
+                    "visible_reaction",
+                    "motion_brief",
+                    "motion_end_state",
+                )
+            )
+
+        scene100_dance = event_proof(100, "pressure")
+        self.assertIn("踊り始め", scene100_dance)
+        self.assertIn("シンデレラ", scene100_dance)
+        self.assertIn("王子", scene100_dance)
+
+        scene110_clock_turn = event_proof(110, "payoff")
+        self.assertIn("時計", scene110_clock_turn)
+        self.assertIn("大階段へ向く", scene110_clock_turn)
+
+        scene120_dissolve = event_proof(120, "setup")
+        self.assertIn("魔法が解け始める", scene120_dissolve)
+        scene120_run = event_proof(120, "pressure")
+        self.assertIn("大階段を駆け下りる", scene120_run)
+        self.assertNotIn("ガラスの靴が脱げ", scene120_dissolve + scene120_run)
+
+        scene130_payoff = next(
+            event
+            for event in scene_by_id[130]["scene_event"]["event_sequence"]
+            if event["beat_function"] == "payoff"
+        )
+        scene130_pickup = event_proof(130, "payoff")
+        self.assertIn("王子", scene130_pickup)
+        self.assertIn("ガラスの靴", scene130_pickup)
+        self.assertIn("胸元", scene130_pickup)
+        self.assertIn(
+            "胸元",
+            scene130_payoff["visible_character_state"]["hands"],
+        )
+        self.assertIn(
+            "胸元",
+            scene130_payoff["visible_character_state"]["gaze"],
+        )
+
+        scene150_proof = " / ".join(
+            (
+                event_proof(150, "turn"),
+                event_proof(150, "payoff"),
+            )
+        )
+        self.assertIn("足に", scene150_proof)
+        self.assertIn("合", scene150_proof)
+        self.assertIn("確認", scene150_proof)
+        self.assertIn("証人", scene150_proof)
+
+        expected_authored_obligations = {
+            20: {
+                "setup": {"scene_pressure"},
+                "pressure": {"visible_value_shift"},
+            },
+            30: {
+                "turn": {"causal_handoff"},
+                "payoff": {"audience_context", "spatial_transition"},
+            },
+            130: {
+                "payoff": {
+                    "audience_context",
+                    "reaction_after_change",
+                    "spatial_transition",
+                    "symbolic_proof",
+                    "time_or_deadline_pressure",
+                },
+            },
+        }
+        for scene_id, expected_by_function in expected_authored_obligations.items():
+            event_by_function = {
+                str(beat["beat_function"]): beat
+                for beat in scene_by_id[scene_id]["scene_event"]["event_sequence"]
+            }
+            for function, expected_obligation_ids in expected_by_function.items():
+                self.assertTrue(
+                    expected_obligation_ids.issubset(
+                        event_by_function[function]["obligation_overrides"]
+                    ),
+                    f"scene{scene_id} {function} authored obligation overrides",
+                )
+
+    def test_ten_minute_cinderella_canonical_matrix_references_assigned_scene_beats(self) -> None:
+        module = load_frontend_run_module()
+        profile = self._legacy_cinderella_profile(
+            module,
+            target_seconds=600,
+            seed="ten-minute-canonical-matrix",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            script, _manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ",
+                run_dir,
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+            scene_by_id = {
+                str(scene["scene_id"]): scene
+                for scene in script["scenes"]
+            }
+            for row in script["canonical_event_coverage_matrix"][
+                "source_story_events"
+            ]:
+                assigned_scene_ids = [
+                    str(scene_id) for scene_id in row["assigned_scene_ids"]
+                ]
+                assigned_beat_ids = row["assigned_event_beat_ids"]
+                self.assertEqual(len(assigned_beat_ids), len(assigned_scene_ids))
+                for scene_id, beat_id in zip(
+                    assigned_scene_ids,
+                    assigned_beat_ids,
+                    strict=True,
+                ):
+                    actual_beat_ids = {
+                        str(beat["beat_id"])
+                        for beat in scene_by_id[scene_id]["scene_event"][
+                            "event_sequence"
+                        ]
+                    }
+                    self.assertIn(
+                        beat_id,
+                        actual_beat_ids,
+                        f"{row['source_event_id']} assigned to scene{scene_id}",
+                    )
+
+            (run_dir / "script.md").write_text(
+                module._md_yaml("Script", script),
+                encoding="utf-8",
+            )
+            findings = module._authoring_review_blocking_findings(run_dir, "script")
+
+        self.assertFalse(
+            any(
+                finding.startswith(
+                    "script.canonical_event_coverage_matrix_complete:"
+                )
+                for finding in findings
+            ),
+            findings,
+        )
+
+    def test_ten_minute_cinderella_timeline_uses_identity_and_event_participation(self) -> None:
+        module = load_frontend_run_module()
+        profile = self._legacy_cinderella_profile(
+            module,
+            target_seconds=600,
+            seed="ten-minute-character-semantics",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            script, _manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ",
+                Path(tmp),
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+
+        protagonist_asset_id = profile["protagonist_asset_id"]
+        protagonist_variant_ids = {
+            profile["protagonist_transformed_asset_id"],
+            profile["protagonist_post_midnight_asset_id"],
+        }
+        supporting_specs = [
+            spec
+            for spec in module._supporting_character_asset_specs(profile)
+            if str(spec.get("character_id") or "") not in protagonist_variant_ids
+        ]
+        supporting_source_id_by_asset = {
+            str(spec["character_id"]): str(spec["source_character_id"])
+            for spec in supporting_specs
+        }
+
+        for scene in script["scenes"]:
+            event_by_id = {
+                str(beat["beat_id"]): beat
+                for beat in scene["scene_event"]["event_sequence"]
+            }
+            participating_roles = {
+                str(role)
+                for beat in event_by_id.values()
+                for role in beat.get("required_roles", [])
+            }
+            expected_character_ids = {
+                *(
+                    [protagonist_asset_id]
+                    if "protagonist" in participating_roles
+                    else []
+                ),
+                *[
+                    str(spec["character_id"])
+                    for spec in supporting_specs
+                    if str(spec.get("source_character_id") or "")
+                    in participating_roles
+                ],
+            }
+            timeline_characters = scene["scene_character_state_timeline"][
+                "characters"
+            ]
+            actual_character_ids = {
+                str(character["character_id"])
+                for character in timeline_characters
+            }
+            self.assertEqual(
+                actual_character_ids,
+                expected_character_ids,
+                f"scene{scene['scene_id']} timeline participation",
+            )
+            self.assertTrue(actual_character_ids.isdisjoint(protagonist_variant_ids))
+            self.assertLessEqual(
+                sum(
+                    character["character_name"] == profile["protagonist_name"]
+                    for character in timeline_characters
+                ),
+                1,
+            )
+
+            protagonist_timeline = next(
+                (
+                    character
+                    for character in timeline_characters
+                    if character["character_id"] == protagonist_asset_id
+                ),
+                None,
+            )
+            protagonist_body_by_beat = (
+                {
+                    protagonist_timeline[state_key]["trigger_event_beat_id"]:
+                    protagonist_timeline[state_key]["body_state"]
+                    for state_key in ("start_state", "midpoint_state", "end_state")
+                }
+                if protagonist_timeline
+                else {}
+            )
+            character_bodies_by_beat: dict[str, dict[str, str]] = {}
+            for character in timeline_characters:
+                for state_key in ("start_state", "midpoint_state", "end_state"):
+                    state = character[state_key]
+                    character_bodies_by_beat.setdefault(
+                        str(state["trigger_event_beat_id"]), {}
+                    )[str(character["character_id"])] = str(state["body_state"])
+            for character in timeline_characters:
+                character_id = str(character["character_id"])
+                if character_id == protagonist_asset_id:
+                    continue
+                source_character_id = supporting_source_id_by_asset[character_id]
+                participating_beat_ids = {
+                    beat_id
+                    for beat_id, beat in event_by_id.items()
+                    if source_character_id
+                    in {str(role) for role in beat.get("required_roles", [])}
+                }
+                for state_key in ("start_state", "midpoint_state", "end_state"):
+                    state = character[state_key]
+                    beat_id = str(state["trigger_event_beat_id"])
+                    self.assertIn(beat_id, participating_beat_ids)
+                    beat = event_by_id[beat_id]
+                    character_name = str(character["character_name"])
+                    named_clauses = [
+                        clause.strip(" 、。")
+                        for value in (
+                            str(beat["visible_action"]),
+                            str(beat["visible_reaction"]),
+                        )
+                        for clause in re.split(
+                            r"[。；]|、(?=[^、。]{0,28}(?:は|が))",
+                            value,
+                        )
+                        if character_name in clause
+                    ]
+                    self.assertIn(character_name, str(state["body_state"]))
+                    self.assertTrue(
+                        any(
+                            clause in str(state["body_state"])
+                            for clause in named_clauses
+                        )
+                        or str(beat["what_happens"])
+                        in str(state["body_state"])
+                        or (
+                            "踊り始め" in str(beat["visible_action"])
+                            and "踊り始め" in str(state["body_state"])
+                        ),
+                        f"scene{scene['scene_id']} {character_id} {state_key}",
+                    )
+                    if beat_id in protagonist_body_by_beat:
+                        self.assertNotEqual(
+                            state["body_state"],
+                            protagonist_body_by_beat[beat_id],
+                            f"scene{scene['scene_id']} {character_id} {state_key}",
+                        )
+            if int(scene["scene_id"]) in {10, 100, 140}:
+                for beat_id, character_bodies in character_bodies_by_beat.items():
+                    if len(character_bodies) < 2:
+                        continue
+                    self.assertEqual(
+                        len(character_bodies.values()),
+                        len(set(character_bodies.values())),
+                        f"scene{scene['scene_id']} {beat_id} character-specific body states",
+                    )
+
+    def test_five_minute_cinderella_identity_timeline_binds_required_appearance_assets(self) -> None:
+        module = load_frontend_run_module()
+        profile = self._legacy_cinderella_profile(
+            module,
+            target_seconds=300,
+            seed="five-minute-appearance-binding",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            script, _manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ",
+                Path(tmp),
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+
+        protagonist_identity_id = profile["protagonist_asset_id"]
+        protagonist_appearance_ids = {
+            protagonist_identity_id,
+            profile["protagonist_transformed_asset_id"],
+            profile["protagonist_post_midnight_asset_id"],
+        }
+        for scene in script["scenes"]:
+            required_appearance_ids = {
+                str(character_id)
+                for cut in scene["cuts"]
+                for character_id in cut["cut_contract"]["asset_dependency"][
+                    "character_ids_required"
+                ]
+                if str(character_id) in protagonist_appearance_ids
+            }
+            protagonist_timelines = [
+                character
+                for character in scene["scene_character_state_timeline"][
+                    "characters"
+                ]
+                if character["character_id"] == protagonist_identity_id
+            ]
+            if not required_appearance_ids:
+                self.assertFalse(protagonist_timelines)
+                continue
+            self.assertEqual(len(protagonist_timelines), 1)
+            self.assertEqual(
+                set(protagonist_timelines[0]["appearance_asset_ids"]),
+                required_appearance_ids,
+                f"scene{scene['scene_id']} protagonist appearance binding",
+            )
+
+    def test_twenty_minute_cinderella_one_beat_segments_have_distinct_cut_motion(self) -> None:
+        module = load_frontend_run_module()
+        profile = self._legacy_cinderella_profile(
+            module,
+            target_seconds=1200,
+            seed="twenty-minute-distinct-cut-motion",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            script, _manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ",
+                Path(tmp),
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+
+        self.assertEqual(len(script["scenes"]), len(profile["scene_titles"]))
+        for scene in script["scenes"]:
+            motion_states = [
+                (
+                    str(cut["cut_blueprint"]["motion_brief"]),
+                    str(cut["cut_blueprint"]["motion_end_state"]),
+                )
+                for cut in scene["cuts"]
+            ]
+            for previous, current in zip(motion_states, motion_states[1:]):
+                self.assertNotEqual(
+                    current,
+                    previous,
+                    f"scene{scene['scene_id']} adjacent cut motion",
+                )
+
+    def test_twenty_minute_reviewed_cinderella_cut_dependencies_match_timeline_participation(self) -> None:
+        module = load_frontend_run_module()
+        for seed in (
+            "frontend_create_1200_1orv2dov",
+            "frontend_create_1200_zgsgg7ef",
+        ):
+            profile = module._duration_aware_profile(
+                module._story_profile(
+                    "シンデレラ",
+                    "シンデレラ",
+                    variant_seed=seed,
+                ),
+                target_duration_seconds=1200,
+            )
+            research = module._build_research(
+                "シンデレラ",
+                "シンデレラ",
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+            profile = module._profile_from_reviewed_research(profile, research)
+            with tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp)
+                story = module._build_story(
+                    "シンデレラ",
+                    run_dir,
+                    "2099-01-01T00:00:00+09:00",
+                    profile,
+                )
+                reviewed_profile = module._profile_from_reviewed_story(
+                    profile,
+                    story,
+                )
+                script, _manifest, _selectors = module._build_script_and_manifest(
+                    "シンデレラ",
+                    run_dir,
+                    "2099-01-01T00:00:00+09:00",
+                    reviewed_profile,
+                )
+
+            supporting_id_by_role = {
+                str(spec["source_character_id"]): str(spec["character_id"])
+                for spec in module._supporting_character_asset_specs(
+                    reviewed_profile
+                )
+                if str(spec.get("source_character_id") or "")
+            }
+            for scene_id, absent_role in ((110, "helper"), (230, "prince")):
+                scene = next(
+                    item
+                    for item in script["scenes"]
+                    if int(item["scene_id"]) == scene_id
+                )
+                timeline_asset_ids = {
+                    str(asset_id)
+                    for character in scene["scene_character_state_timeline"][
+                        "characters"
+                    ]
+                    for asset_id in (
+                        character["character_id"],
+                        *(character.get("appearance_asset_ids") or []),
+                    )
+                }
+                required_cut_character_ids = {
+                    str(character_id)
+                    for cut in scene["cuts"]
+                    for character_id in cut["cut_contract"]["asset_dependency"][
+                        "character_ids_required"
+                    ]
+                }
+                self.assertLessEqual(
+                    required_cut_character_ids,
+                    timeline_asset_ids,
+                    f"{seed} scene{scene_id} cut dependencies",
+                )
+                self.assertNotIn(
+                    supporting_id_by_role[absent_role],
+                    required_cut_character_ids,
+                    f"{seed} scene{scene_id} absent {absent_role}",
+                )

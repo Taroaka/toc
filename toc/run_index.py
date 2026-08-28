@@ -7,6 +7,9 @@ import re
 from pathlib import Path
 from typing import Iterable
 
+from toc.state_store import read_current_state, with_current_state
+from toc.run_root_binding import write_run_file_text
+
 try:
     from toc.review_loop import REVIEW_LOOP_SLOT_BY_CODE
 except ModuleNotFoundError:  # pragma: no cover - compatibility for validator fixture copies
@@ -591,19 +594,11 @@ PENDING_GATE_REVIEW_KEYS: tuple[tuple[str, str], ...] = (
 
 
 def _parse_state_file(state_path: Path) -> dict[str, str]:
-    if not state_path.exists():
+    try:
+        state_path.lstat()
+    except FileNotFoundError:
         return {}
-    merged: dict[str, str] = {}
-    for raw in state_path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line == "---" or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().replace("\n", " ")
-        if key:
-            merged[key] = value
-    return merged
+    return dict(read_current_state(state_path).state)
 
 
 def _pending_gates(state: dict[str, str]) -> list[str]:
@@ -1092,5 +1087,22 @@ def build_run_index_markdown(run_dir: Path, *, state: dict[str, str] | None = No
 
 def write_run_index(run_dir: Path, *, state: dict[str, str] | None = None) -> Path:
     out_path = run_dir / "p000_index.md"
-    out_path.write_text(build_run_index_markdown(run_dir, state=state), encoding="utf-8")
+    state_path = run_dir / "state.txt"
+
+    def publish(current_state: dict[str, str]) -> None:
+        write_run_file_text(
+            run_dir,
+            out_path.name,
+            build_run_index_markdown(run_dir, state=current_state),
+        )
+
+    try:
+        state_path.lstat()
+    except FileNotFoundError:
+        publish(dict(state or {}))
+    else:
+        with_current_state(
+            state_path,
+            lambda replay: publish(dict(replay.state)),
+        )
     return out_path

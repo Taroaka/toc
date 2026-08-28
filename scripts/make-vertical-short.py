@@ -21,6 +21,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from toc.harness import parse_state_file as _parse_canonical_state
+
 
 def extract_yaml_block(text: str) -> str:
     m = re.search(r"```yaml\s*\n(.*?)\n```", text, flags=re.DOTALL)
@@ -66,21 +72,9 @@ def parse_timestamp_range(ts_range: str) -> tuple[int, int]:
 
 
 def parse_state_file(state_path: Path) -> dict[str, str]:
-    merged: dict[str, str] = {}
     if not state_path.exists():
-        return merged
-    for raw in state_path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line == "---" or line.startswith("#"):
-            continue
-        if "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        k = k.strip()
-        v = v.strip().replace("\n", " ")
-        if k:
-            merged[k] = v
-    return merged
+        return {}
+    return _parse_canonical_state(state_path)
 
 
 def _resolve_artifact_path(run_dir: Path, value: str | None) -> Path | None:

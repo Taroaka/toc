@@ -371,9 +371,15 @@ class CodexAppServerClient:
             env=self._subprocess_env(),
             limit=self._jsonl_limit_bytes,
         )
-        self._reader_task = asyncio.create_task(self._read_loop())
+        proc = self.proc
+        assert proc.stdout and proc.stderr
+        self._reader_task = asyncio.create_task(
+            self._read_loop(proc.stdout)
+        )
         self._reader_task.add_done_callback(_consume_task_exception)
-        self._stderr_task = asyncio.create_task(self._drain_stderr())
+        self._stderr_task = asyncio.create_task(
+            self._drain_stderr(proc.stderr)
+        )
         await self.request(
             "initialize",
             {
@@ -412,11 +418,13 @@ class CodexAppServerClient:
         proc = self.proc
         self.proc = None
         if proc.returncode is None:
-            proc.terminate()
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=2)
             except asyncio.TimeoutError:
-                proc.kill()
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
                 await proc.wait()
         if self._reader_task:
             reader_task = self._reader_task
@@ -441,12 +449,18 @@ class CodexAppServerClient:
                 future.set_exception(self._transport_error)
         self._pending.clear()
 
-    async def _read_loop(self) -> None:
-        assert self.proc and self.proc.stdout
+    async def _read_loop(
+        self,
+        stdout: asyncio.StreamReader | None = None,
+    ) -> None:
+        if stdout is None:
+            proc = self.proc
+            assert proc and proc.stdout
+            stdout = proc.stdout
         frame_bytes = 0
         try:
             while True:
-                line = await self.proc.stdout.readline()
+                line = await stdout.readline()
                 if not line:
                     break
                 frame_bytes = len(line)
@@ -529,10 +543,16 @@ class CodexAppServerClient:
         self._record_transport_error(error)
         raise error
 
-    async def _drain_stderr(self) -> None:
-        assert self.proc and self.proc.stderr
+    async def _drain_stderr(
+        self,
+        stderr: asyncio.StreamReader | None = None,
+    ) -> None:
+        if stderr is None:
+            proc = self.proc
+            assert proc and proc.stderr
+            stderr = proc.stderr
         while True:
-            line = await self.proc.stderr.readline()
+            line = await stderr.readline()
             if not line:
                 break
             self._stderr_tail.append(line.decode("utf-8", errors="replace").rstrip())

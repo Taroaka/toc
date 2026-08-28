@@ -18,7 +18,7 @@ future cloud deployment. It corresponds to todo item 1 in `todo.txt`.
 | Execution model | L1 Run Orchestrator + L2 P-Bucket Supervisors + L3 task/review agents | Keeps the run gate-driven while moving long stage context out of the L1 context |
 | Storage | Filesystem object store + PostgreSQL metadata DB | Durable metadata |
 | Job queue | In-process async queue | Simple and sufficient for MVP |
-| State management | Append-only `state.txt` in project folder (no DB checkpoints) | Human-readable recovery |
+| State management | Append-only delta-event `state.txt` + derived `state.current.json` (no DB dependency) | Auditable history and bounded current-state reads |
 | Providers | LLM via LangChain; image=Codex built-in image generation (`codex_builtin_image` / gpt-image-2); video=Kling 3.0 (default) / Seedance (alt); TTS=ElevenLabs（Veo is disabled for safety） | Avoid vendor lock-in |
 | API boundary | Codex-primary assistant command (Claude Code slash command compatible) | Keep surface area small |
 | Review policy | Decide at run start and persist in `state.txt` | Stage grounding and orchestrators must share one approval contract |
@@ -97,6 +97,7 @@ graph TD
 - Request-bound success additionally requires exactly one distinct app-server `imageGeneration` item id. The imported output is written by validated atomic replace, and an existing file is reused only when its bytes and the complete snapshot/provenance tuple still match. A failed regeneration leaves the previous file in place. Resume preserves prior outputs, regenerates only stale/missing items, and a per-run create/resume lease prevents two jobs from mutating the same run concurrently.
 - Image workers share a cross-process file-backed slot pool (`TOC_IMAGE_GEN_GLOBAL_PARALLELISM`) so separate server/CLI processes honor one workspace-wide ceiling. Legacy generated-images fallback uses a separate single slot. Per-destination locks protect direct CLI generation from duplicate concurrent writes.
 - `image_prompt` semantic QA is materialized and executed as deterministic per-scene shards (cut entries plus the scene composite). Selector coverage must be exact once—zero, missing, duplicate, unexpected, or collection-gap coverage fails closed. Shards run with bounded `TOC_IMAGE_PROMPT_REVIEW_CONCURRENCY`; transport retry is limited to the failed shard, and only that scene's entries become blocked while passed scenes remain usable.
+- `scene_set` semantic QA is executed as deterministic per-scene shards instead of one all-scenes turn. Each shard receives one full compact scene-set projection plus an ordered whole-story index for causal order, reveal ownership, location/daypart continuity, and handoff checks. `TOC_SCENE_SET_REVIEW_CONCURRENCY` defaults to 6; transport retry and the one bounded malformed-output retry are limited to failed shards, so a valid shard is not rerun just because another reviewer response violated the output contract. The canonical aggregate remains bound to the complete stage scope and fails closed on any missing, duplicate, reordered, unexpected, malformed, semantic-failed, or transport-failed entry. A shard also records the canonical generation id, collection/input/scope hashes, and target entry projection hash; provider return and aggregate publication revalidate that generation under a per-run cross-process stage lock, so verdicts from different collection generations cannot be combined.
 - Startup preflight checks the Codex binary version, writable effective `CODEX_HOME`, `chatgpt.com` DNS, and HTTPS reachability for `backend-api/codex/responses`. The local server restart helper additionally runs a short no-op turn, because `thread/start` can pass while the later turn transport still fails.
 - Silent fallback to a temporary `toc-codex-home` is forbidden by default for production server paths. If fallback is intentionally needed, it must be enabled explicitly so diagnostics show `fallbackUsed=true`.
 - Semantic QA / producer repair app-server turns use a no-progress watchdog, not a fixed total work deadline. Codex app-server streams turn notifications while agent work is active, so semantic orchestration treats turn notifications, semantic report writes, producer report writes, and source artifact changes as progress. It keeps waiting while progress is observable, and records `review.semantic.<stage>.watchdog.status=no_progress_timeout` only when progress stops for the configured interval.
@@ -139,7 +140,9 @@ graph TD
 
 ## State management
 
-- 状態は `output/<topic>_<timestamp>/state.txt` に **追記型** で記録する。
+- 状態は `output/<topic>_<timestamp>/state.txt` に **atomic delta event** として追記する。同じkeyの最後の値がcurrent stateになる。
+- `state.current.json` はcanonical event headに束縛したderived materialized viewであり、削除・stale時は`state.txt`から再構築する。`run_status.json`と`p000_index.md`もderived projectionであり第二の正本にしない。
+- state writerはshared store APIに統一し、read-current / merge / append / current-view publishを同じlock内で行う。完全state snapshotの反復追記と、独自writerによる直接appendは禁止する。
 - 最新ブロックが現在状態、過去ブロックをコピーして擬似的にロールバック可能。
 - run 進行は固定の `p100` 〜 `p900` slot contract で管理する。
   - slot の意味は全 story で共通で、story ごとの差分は `slot.pXXX.status` / `slot.pXXX.requirement` / `slot.pXXX.skip_reason` / `slot.pXXX.note` で表す。

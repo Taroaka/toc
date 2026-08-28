@@ -10,12 +10,12 @@
 
 ## Repo Scope
 
-- 動画生成
-  - 本 repo は、調査・物語・台本・画像/動画/音声生成・最終レンダリングまでの動画生成フローを扱う。
+- 画像・動画生成
+  - 本 repo は、調査・物語・台本・複数画像の設計/生成/レビュー・動画/音声生成・最終レンダリングまでのビジュアル制作フローを扱う。
   - 正本: `docs/video-generation.md`
 - マーケティング（public site / LP / digital acquisition / SNS）
   - 本 repo では、ToC の公開サイト、ペルソナ別 LP、デジタル広告導線、SNS 配信、リード獲得、反応分析、改善ループを扱う。
-  - 第一対象は個人で、`副業を始めたい人` と `個人ブランドを構築したい人` を別ペルソナとして扱う。
+  - 第一対象は `副業に取り組む個人` と `小規模ビジネス運営者` で、広告、LP、CTA、analytics を別ペルソナとして扱う。個人ブランドは小規模ビジネスの use case とする。
   - 正本: `marketing/README.md`
 
 ## Entrypoints
@@ -40,7 +40,7 @@
 
 server 経由の生成でも生成前設計の semantic QA を短絡しない。scene/cut 設計、asset 計画、画像 prompt、動画 motion、音声テキストは、それぞれ上流 artifact の意味契約を満たす必要がある。構造チェックは関数 verifier で通し、意味判定は contextless semantic review agent の report を verifier が読む。server はファイル数や schema 成功だけで run を成功扱いにせず、意味レビュー用 artifact と検証可能な参照関係を残す。canonical artifact は `logs/review/semantic/<stage>.collection.md`, `.scope.json`, `.prompt.md`, `.report.md` と `review.semantic.<stage>.*` state keys で、frontend create の p680 経路では少なくとも `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt` を通す。生成済み asset / scene image / video clip / final render は semantic review stage とせず、deterministic output validator と frontend human review / final QA で判定する。semantic QA が通らない場合は、その stage の production-side agent に改善点を渡して修正し、同じ contextless reviewer が再レビューする repair loop を使う。修正中は次の process slot へ進めず、`review.semantic.<stage>.loop.status=repairing` と `review.semantic.<stage>.repair.status=in_progress` で semantic QA 修正中であることを state に残す。semantic QA / producer repair の timeout は固定の総作業時間制限ではなく no-progress watchdog として扱う。Codex app-server の turn notification、semantic report、producer report、修正対象 artifact のいずれかが更新されている間は改善中として待ち、観測可能な進捗が止まった場合だけ `review.semantic.<stage>.watchdog.status=no_progress_timeout` として blocked にする。
 
-server 経由で Codex app-server を使う箇所は、必ず `server/codex_app_server.py` の runtime contract / preflight を通す。`TOC_CODEX_BIN`, `CODEX_HOME`, generated image root, network/proxy env, fallback 使用有無を共通 diagnostics に残し、`chatgpt.com/backend-api/codex/responses` へ到達できない transport failure や writable `CODEX_HOME` を満たせない runtime setup failure を semantic QA の意味判定 failure と混ぜない。semantic report が作られていない transport failure では production-side repair loop に入らず、`review.semantic.<stage>.transport.status=failed` として blocked にする。`scene_detail` の per-scene shard review では transport timeout を semantic max attempts とは別枠で shard 単位 retry し、pass 済み shard は再実行しない。既定は `TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS=3` 相当。使い切った shard や `scene_detail` / `cut_blueprint` / `image_prompt` の semantic `failed_selectors` / `blocked_entries` が scene/cut image item に局所化できる場合は、その image request item だけを `blocked` / synthetic failed candidate として frontend に出し、他 scene の画像生成は続行する。局所化できない transport failure だけ `runtime.stage=semantic_review_blocked_transport` として画像生成前に止め、局所化できない semantic failure は `review.semantic.<stage>.localization.status=not_localized` と理由を state / app_server log に残す。意味 report による changes_requested の場合だけ修正 agent を起動し、修正中に app-server transport が落ちた場合は `review.semantic.<stage>.repair.status=blocked_transport` として止める。理由は、通信断を意味品質の失敗として扱うと、今回のように存在しない review 指摘を制作エージェントへ渡し、asset/scene 生成や p680 gate の判断を誤るため。
+server 経由で Codex app-server を使う箇所は、必ず `server/codex_app_server.py` の runtime contract / preflight を通す。`TOC_CODEX_BIN`, `CODEX_HOME`, generated image root, network/proxy env, fallback 使用有無を共通 diagnostics に残し、`chatgpt.com/backend-api/codex/responses` へ到達できない transport failure や writable `CODEX_HOME` を満たせない runtime setup failure を semantic QA の意味判定 failure と混ぜない。semantic report が作られていない transport failure では production-side repair loop に入らず、`review.semantic.<stage>.transport.status=failed` として blocked にする。`scene_set` / `scene_detail` の per-scene shard review では transport timeout を semantic max attempts とは別枠で shard 単位 retry し、pass 済み shard は同一 attempt 内で再実行しない。既定はそれぞれ `TOC_SCENE_SET_TRANSPORT_RETRY_ATTEMPTS=3` / `TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS=3` 相当。`scene_set` の terminal verdict 欠落や digest / reviewed_entries 不一致も該当 shard だけを1回再実行し、stage 全件の output-contract retry は重ねない。`scene_set` は対象 scene の compact projection と全体の ordered compact context を `TOC_SCENE_SET_REVIEW_CONCURRENCY=6` 相当で並列審査し、因果・reveal・location/daypart・handoff の基準を維持する。canonical collection は scope と exactly-once・同順、各 entry は exactly-one JSON object とし、欠損・重複・余分・順序違い・JSON fence 外テキスト・duplicate key・id 不一致は provider 起動前に fail-close する。各 shard verdict は canonical generation id、collection/input/scope hash、entry projection hash に束縛し、provider 前後と aggregate 公開時に再検証する。使い切った shard や `scene_detail` / `cut_blueprint` / `image_prompt` の semantic `failed_selectors` / `blocked_entries` が scene/cut image item に局所化できる場合は、その image request item だけを `blocked` / synthetic failed candidate として frontend に出し、他 scene の画像生成は続行する。局所化できない transport failure だけ `runtime.stage=semantic_review_blocked_transport` として画像生成前に止め、局所化できない semantic failure は `review.semantic.<stage>.localization.status=not_localized` と理由を state / app_server log に残す。意味 report による changes_requested の場合だけ修正 agent を起動し、修正中に app-server transport が落ちた場合は `review.semantic.<stage>.repair.status=blocked_transport` として止める。理由は、通信断を意味品質の失敗として扱うと、存在しない review 指摘を制作エージェントへ渡し、asset/scene 生成や p680 gate の判断を誤るため。
 
 p500/p600 の Codex built-in image generation は request-bound provenance を正規 route とする。`generation_job_id + item_id + turn_id + prompt_sha256 + reference_sha256s + savedPath + destination` を保存し、一致した画像だけを workspace output に copy する。正規 route では scene/cut image generation を bounded worker pool で並列化してよく、`TOC_IMAGE_GEN_PARALLELISM` の既定値は 6 とする。generated-images fallback は `turn/completed` より先に共有ディレクトリから時刻順で画像を拾うため、複数 request を並列実行すると「完了した別 request の画像」を現在の output に保存して asset ID と画像内容がずれる可能性がある。そのため fallback は正規 route ではなく、`TOC_IMAGE_GEN_PROVENANCE_POLICY=serial_fallback` を明示した legacy / recovery mode だけで使い、この場合は実効並列数を 1 に clamp する。画像保存 provenance / 並列制御の問題は semantic QA ではなく deterministic output validator と frontend human review の診断として扱う。
 
@@ -52,6 +52,7 @@ p500/p600 の Codex built-in image generation は 1 枚あたりの既定 timeou
 - 調査: `docs/information-gathering.md`
 - 感情設計: `docs/affect-design.md`
 - 物語化: `docs/story-creation.md`
+- 既存物語の価値を scene / cut の映画表現へ追跡する契約: `docs/adaptation-value-amplification.md`
 - 台本: `docs/script-creation.md`
 - 動画生成: `docs/video-generation.md`
 - 動画 prompt の設計投影・compiler・実行 gate: `docs/implementation/video-prompting.md`
@@ -77,8 +78,9 @@ p500/p600 の Codex built-in image generation は 1 枚あたりの既定 timeou
 ## State
 
 - human-facing run navigation: `output/<topic>_<timestamp>/p000_index.md`
-- canonical state: `output/<topic>_<timestamp>/state.txt`
-- derived state: `output/<topic>_<timestamp>/run_status.json`
+- canonical state history: `output/<topic>_<timestamp>/state.txt`（append-only delta event、同一 key は最後の値が current）
+- derived current-state cache: `output/<topic>_<timestamp>/state.current.json`（削除・stale時は canonical history から再構築）
+- derived state projection: `output/<topic>_<timestamp>/run_status.json`
 - grounding audit: `output/<topic>_<timestamp>/logs/grounding/<stage>.json`
 - grounding readset: `output/<topic>_<timestamp>/logs/grounding/<stage>.readset.json`
 - grounding audit result: `output/<topic>_<timestamp>/logs/grounding/<stage>.audit.json`
@@ -164,12 +166,12 @@ scripts/ai/session-bootstrap.sh
 | ステージ | 正本ドキュメント | Playbooks |
 |---------|----------------|-----------|
 | research | `docs/information-gathering.md` | `workflow/playbooks/research/` |
-| story | `docs/story-creation.md` `docs/affect-design.md` | `workflow/playbooks/scene/` |
-| script | `docs/script-creation.md` | `workflow/playbooks/script/` |
+| story | `docs/story-creation.md` `docs/affect-design.md` `docs/adaptation-value-amplification.md` | `workflow/playbooks/scene/` |
+| script | `docs/script-creation.md` `docs/adaptation-value-amplification.md` | `workflow/playbooks/script/` |
 | narration | `docs/implementation/video-integration.md` | `workflow/playbooks/script/` |
 | asset | `docs/implementation/asset-bibles.md` | `workflow/playbooks/image-generation/` |
 | scene_implementation | `docs/implementation/image-prompting.md` `docs/implementation/asset-bibles.md` | `workflow/playbooks/image-generation/` |
-| video_generation | `docs/video-generation.md` `docs/implementation/video-prompting.md` | `workflow/playbooks/video-generation/` |
+| video_generation | `docs/video-generation.md` `docs/implementation/video-prompting.md` `docs/adaptation-value-amplification.md` | `workflow/playbooks/video-generation/` |
 | render | `docs/implementation/video-integration.md` | `workflow/playbooks/video-generation/` |
 | qa | `docs/orchestration-and-ops.md` | `workflow/playbooks/video-generation/` |
 

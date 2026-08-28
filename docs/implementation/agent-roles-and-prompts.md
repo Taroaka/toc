@@ -105,6 +105,79 @@
 - 参照: `docs/script-creation.md`
 - Kling 分岐: `video_generation.tool` が `kling_3_0` / `kling_3_0_omni` の場合、動画 prompt 設計は `docs/video-generation.md` の一般論ではなく `workflow/playbooks/video-generation/kling.md` を優先参照する
 
+### Scene-set Contract Planner（p400 / planner）
+- 入力: review済み `research.md` / `story.md` / `visual_value.md`、adaptation source contract、stage grounding readset
+- 出力: `script.md` 内の `scene_set_authoring_contract_v1` と、凍結前の planner report
+- 責務:
+  - scene authoring より先に canonical event ownership、ordered beat、reveal ledger、role binding、time/location transition、handoff chain、source-specific evidenceを一つの契約へ束ねる
+  - `criterion_registry_version` / registry digest / source digestを契約へ束縛する
+  - source pointer と expected ID、重複・欠落・順序・unknown referenceを検証し、矛盾した契約を freezeしない
+  - cut、camera、lens、image prompt、motion promptをこの段階で作らない
+- 禁止:
+  - scene prose を先に作ってから event ownership / reveal / roleを後付け推定する
+  - generic fallback proseをsource-specific evidenceの代用にする
+  - scene contractの矛盾をscene authorの自由文で回避する
+- promptに必ず含めるもの: `docs/story-creation.md` の Scene acceptance section、`docs/data-contracts.md` の artifact/state/digest規則、`workflow/script-template.yaml`、`workflow/scene-outline-template.yaml`、criterion registry
+
+### Scene Author（p400 / scene slice author）
+- 入力: frozen contractの自scene slice、前後handoff slice、source readset、criterion projection
+- 出力: `scene_draft_v1`。canonical artifactはL2 supervisorだけがpublishする
+- 責務:
+  - `event_id` / `beat_id` / `evidence_id` / `role_id` / `character_id` / `handoff_anchor_id` / `transition_cue_id` / `reveal_transition_id`をexact referenceとして使用する
+  - required roleとvisible actor、具体的なaction / reaction / immediate consequence / non-replaceable evidenceを一つのevent sequenceへ接地する
+  - incoming handoffは前sceneのowned output、outgoing handoffは自sceneのowned outputとして記述する
+  - 契約で固定されたownership、reveal state、canonical order、source digestを変更しない
+- 禁止:
+  - contract IDの新規発明・改名・所有sceneの変更
+  - `review_only_visualizable_action` や generic prose だけで必須beatを満たすこと
+  - provider prompt、camera、lens、cut数をscene正本へ混ぜること
+  - author自身の `passed` 宣言を最終判定として扱うこと
+- 出力後は provider reviewer を呼ばず、deterministic `authoring_preflight` を先に通す。失敗時は該当sceneと隣接handoffだけを修正し、whole-set preflightを再実行する
+
+### Independent Contextless Reviewer（scene-set semantic）
+- 入力: frozen contract、contract digest、criterion registry、canonical scene drafts、source digest、preflight report
+- 出力: criterion ID / canonical reason key付きの独立report
+- 責務:
+  - authoring transcript、自己採点、会話履歴を信用せず、contractとartifactから因果・story-specificity・価値増幅・残存cross-scene矛盾を判定する
+  - deterministic-owned criterionはpreflightで検証済みか確認し、重複provider審査をしない
+  - deterministic-owned findingを検出したら `shift_left_escape` として記録し、producer repairではなくvalidator / fixture defectへ戻す
+  - contract / registry / source / preflight digestのscope mismatchをprovider前にfail-closeする
+- 禁止:
+  - authorと同じtranscriptで自己承認すること
+  - frozen contractを変更してfindingを消すこと
+  - source meaning / event ownershipの変更を自動採用すること
+
+### Contract-first prompt packet（会話履歴なしagent向け）
+
+planner / author / reviewer へ渡すprompt packetは、常に次の順序を維持する。親会話の説明や暗黙の前提を入力にしない。
+
+```yaml
+prompt_packet:
+  schema_version: scene_authoring_prompt_packet_v1
+  role: planner|author|independent_reviewer
+  stage_readset:
+    grounding_report: logs/grounding/script.json
+    readset_report: logs/grounding/script.readset.json
+    required_docs: []
+    required_templates: []
+  source_bindings:
+    research: {path: research.md, sha256: sha256:<hex>}
+    story: {path: story.md, sha256: sha256:<hex>}
+    visual_value: {path: visual_value.md, sha256: sha256:<hex>}
+  scene_set_contract:
+    path: script.md#/scene_set_authoring_contract
+    schema_version: scene_set_authoring_contract_v1
+    generation_id: scene-authoring-<id>
+    contract_digest: sha256:<hex>
+    criterion_registry_version: scene_acceptance_criteria_v1
+    criterion_registry_sha256: sha256:<hex>
+  scene_slice: "plannerでは空、author/reviewerでは対象sceneのexact slice"
+  acceptance_criteria: []
+  output_contract: scene_set_authoring_contract_v1|scene_draft_v1|scene_set_review_v1
+```
+
+`required_docs` / `required_templates` はstage groundingの実解決結果から埋め、prompt packetの文字列を手書きで追加しない。`contract_digest`またはsource digestが変わった場合は古いscene draft / preflight / review scopeを採用せず、新しいgenerationとして再authoringする。
+
 ### Narration Writer（TTS原稿）
 - 入力: `story.md` / `script.md` / `video_manifest.md`
 - 出力: `video_manifest.md` の `audio.narration.text` と `audio.narration.tts_text`

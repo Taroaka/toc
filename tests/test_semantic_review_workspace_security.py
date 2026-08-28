@@ -70,6 +70,166 @@ def _workspace_scope(cwd: Path) -> tuple[Path, dict[str, object]]:
 
 
 class SemanticReviewWorkspaceSecurityTests(unittest.TestCase):
+    def test_scene_scope_resolves_in_scope_nested_field_selectors(self) -> None:
+        selectors = (
+            "scene30.participants",
+            "scene30.scene_event.event_sequence[0]",
+            "scene120.role_coverage.required_roles",
+            "scene140.scene_intent.character_state.start",
+            "scene150.scene_intent.handoff_chain.incoming.visible_or_audible_form",
+        )
+
+        for selector in selectors:
+            expected_scene = selector.split(".", 1)[0].removeprefix("scene")
+            with self.subTest(selector=selector):
+                self.assertEqual(
+                    image_gen_app._semantic_failure_selector_scope_key(
+                        selector,
+                        scope_entry_ids=[f"scene:{expected_scene}"],
+                    ),
+                    f"scene:{expected_scene}",
+                )
+
+        self.assertIsNone(
+            image_gen_app._semantic_failure_selector_scope_key(
+                "scene40.participants",
+                scope_entry_ids=["scene:30"],
+            )
+        )
+        for selector in (
+            "scene3.1",
+            "scene3.1.participants",
+            "scene:3.1.scene_event.event_sequence[0]",
+        ):
+            with self.subTest(selector=selector):
+                self.assertEqual(
+                    image_gen_app._semantic_failure_selector_scope_key(
+                        selector,
+                        scope_entry_ids=["scene:3.1"],
+                    ),
+                    "scene:3.1",
+                )
+        self.assertIsNone(
+            image_gen_app._semantic_failure_selector_scope_key(
+                "scene30..participants",
+                scope_entry_ids=["scene:30"],
+            )
+        )
+        report = "\n".join(
+            [
+                "status: failed",
+                "reviewed_entries: [scene:30]",
+                "blocked_entries: [scene:30]",
+                "findings: [participants require repair]",
+                "failed_selectors: [scene30.participants]",
+                "reason_keys: [scene_set.role_coverage_missing]",
+                "notes: []",
+                "",
+            ]
+        )
+        self.assertEqual(
+            image_gen_app._semantic_negative_verdict_contract_errors(
+                report,
+                scope_entry_ids=["scene:30"],
+            ),
+            (),
+        )
+
+    def test_single_entry_scope_resolves_only_in_scope_artifact_field_selectors(
+        self,
+    ) -> None:
+        scope_entry_ids = ["story:foundation"]
+        source_artifacts = ["research.md", "story.md"]
+
+        for selector in (
+            "story.md:script.scenes[scene_id=2].story_event_obligations",
+            "story.md:script.scenes[scene_id=3].location.segments",
+            "story.md:script.scenes[scene_id=2, 3, 4, 5, 9, 10, 11, 12, 13, 14, 15].character_ids",
+        ):
+            with self.subTest(selector=selector):
+                self.assertEqual(
+                    image_gen_app._semantic_failure_selector_scope_key(
+                        selector,
+                        scope_entry_ids=scope_entry_ids,
+                        source_artifacts=source_artifacts,
+                    ),
+                    "story:foundation",
+                )
+
+        self.assertIsNone(
+            image_gen_app._semantic_failure_selector_scope_key(
+                "video_manifest.md:scenes[scene_id=3].location.segments",
+                scope_entry_ids=scope_entry_ids,
+                source_artifacts=source_artifacts,
+            )
+        )
+        self.assertIsNone(
+            image_gen_app._semantic_failure_selector_scope_key(
+                "story.md:script.scenes[scene_id=3]..location",
+                scope_entry_ids=scope_entry_ids,
+                source_artifacts=source_artifacts,
+            )
+        )
+        self.assertIsNone(
+            image_gen_app._semantic_failure_selector_scope_key(
+                "story.md:script.scenes[scene_id=3].location.segments",
+                scope_entry_ids=["scene:10", "scene:20"],
+                source_artifacts=source_artifacts,
+            )
+        )
+
+    def test_negative_story_verdict_accepts_in_scope_field_selectors(self) -> None:
+        selectors = [
+            "story.md:script.scenes[scene_id=2].story_event_obligations",
+            "story.md:script.scenes[scene_id=3].location.segments",
+            "story.md:script.scenes[scene_id=2, 3, 4, 5, 9, 10, 11, 12, 13, 14, 15].character_ids",
+        ]
+        report = "\n".join(
+            [
+                "status: failed",
+                "reviewed_entries: [story:foundation]",
+                "blocked_entries: [story:foundation]",
+                "findings: [story fields require repair]",
+                "failed_selectors: "
+                + json.dumps(selectors, ensure_ascii=False),
+                "reason_keys: [story_contract_mismatch]",
+                "notes: []",
+                "",
+            ]
+        )
+
+        self.assertEqual(
+            image_gen_app._semantic_negative_verdict_contract_errors(
+                report,
+                scope_entry_ids=["story:foundation"],
+                source_artifacts=["research.md", "story.md"],
+            ),
+            (),
+        )
+
+    def test_negative_story_verdict_preserves_commas_inside_field_selector(self) -> None:
+        report = "\n".join(
+            [
+                "status: failed",
+                "reviewed_entries: [story:foundation]",
+                "blocked_entries: [story:foundation]",
+                "findings: [location fields require repair]",
+                "failed_selectors: [story.md:script.scenes[scene_id=2, 3].location]",
+                "reason_keys: [story_contract_mismatch]",
+                "notes: []",
+                "",
+            ]
+        )
+
+        self.assertEqual(
+            image_gen_app._semantic_negative_verdict_contract_errors(
+                report,
+                scope_entry_ids=["story:foundation"],
+                source_artifacts=["story.md"],
+            ),
+            (),
+        )
+
     def _write_failed_repair_pack(
         self,
         run_dir: Path,
@@ -226,6 +386,59 @@ class SemanticReviewWorkspaceSecurityTests(unittest.TestCase):
 
         return build
 
+    def test_semantic_repair_target_selectors_normalize_scene_aliases_without_merging_kinds(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            stage = "scene_set"
+            report_path = (
+                run_dir
+                / image_gen_app.semantic_review_relpaths(stage)["report"]
+            )
+            report_path.parent.mkdir(parents=True)
+            compact_scene_aliases = [
+                f"scene{index * 10}" for index in range(1, 16)
+            ]
+            colon_scene_aliases = [
+                f"scene:{index * 10}" for index in range(1, 16)
+            ]
+            report_path.write_text(
+                "status: failed\n"
+                "failed_selectors: ["
+                + ", ".join(
+                    [
+                        *compact_scene_aliases,
+                        "scene30.participants",
+                        "scene3.1.participants",
+                        "scene20_cut1",
+                        "asset20",
+                        "entry20",
+                    ]
+                )
+                + "]\n"
+                "blocked_entries: ["
+                + ", ".join(colon_scene_aliases)
+                + "]\n",
+                encoding="utf-8",
+            )
+
+            selectors = image_gen_app._semantic_repair_target_selectors(
+                run_dir,
+                stage,
+            )
+
+        self.assertEqual(
+            selectors,
+            [
+                *colon_scene_aliases,
+                "scene:3.1",
+                "scene20_cut1",
+                "asset20",
+                "entry20",
+            ],
+        )
+
     def test_bound_ordinary_review_uses_private_cwd_and_imports_valid_report(
         self,
     ) -> None:
@@ -247,6 +460,15 @@ class SemanticReviewWorkspaceSecurityTests(unittest.TestCase):
 
                 async def run_turn(self, *, cwd: Path, **_kwargs):
                     provider_cwds.append(Path(cwd))
+                    progress_callback = _kwargs.get("progress_callback")
+                    if not callable(progress_callback):
+                        raise AssertionError("semantic review progress callback is missing")
+                    progress_callback(
+                        {
+                            "method": "turn/started",
+                            "params": {"turnId": "turn-1"},
+                        }
+                    )
                     _scope_path, scope = _workspace_scope(Path(cwd))
                     return _agent_transcript(
                         digest=str(scope["semantic_review_input_digest"]),
@@ -280,6 +502,10 @@ class SemanticReviewWorkspaceSecurityTests(unittest.TestCase):
                     )
 
             self.assertTrue(result.passed, result.errors)
+            activity_path = run_dir / image_gen_app._semantic_turn_activity_relpath(
+                image_gen_app.semantic_review_relpaths(stage)["report"]
+            )
+            self.assertTrue(activity_path.is_file())
             self.assertTrue(provider_cwds)
             self.assertTrue(
                 all(
@@ -382,6 +608,44 @@ class SemanticReviewWorkspaceSecurityTests(unittest.TestCase):
                 run_dir,
                 stage="scene_detail",
             )
+            canonical_paths = image_gen_app.semantic_review_relpaths(
+                "scene_detail"
+            )
+            canonical_collection = run_dir / canonical_paths["collection"]
+            canonical_prompt = run_dir / canonical_paths["prompt"]
+            collection_section = "## scene:10\ntrusted entry\n"
+            canonical_collection.write_text(
+                "# collection\n\n" + collection_section,
+                encoding="utf-8",
+            )
+            canonical_prompt.write_text(
+                "# canonical review prompt\n",
+                encoding="utf-8",
+            )
+            scope_payload = json.loads(
+                canonical_scope.read_text(encoding="utf-8")
+            )
+            collection_sha256 = hashlib.sha256(
+                canonical_collection.read_bytes()
+            ).hexdigest()
+            projection_sha256 = hashlib.sha256(
+                collection_section.encode("utf-8")
+            ).hexdigest()
+            scope_payload.update(
+                {
+                    "entry_count": 1,
+                    "entry_ids": ["scene:10"],
+                    "review_generation_id": "a" * 32,
+                    "review_generation_collection_sha256": collection_sha256,
+                    "entry_projection_sha256s": {
+                        "scene:10": projection_sha256
+                    },
+                }
+            )
+            canonical_scope.write_text(
+                json.dumps(scope_payload, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
             provider_cwds: list[Path] = []
 
             class FakeClient:
@@ -404,6 +668,21 @@ class SemanticReviewWorkspaceSecurityTests(unittest.TestCase):
                     return None
 
             with bind_run_root(run_dir, expected_identity=identity):
+                image_gen_app._refresh_semantic_review_input_digest(
+                    run_dir=run_dir,
+                    scope_path=canonical_scope,
+                    collection_path=canonical_collection,
+                    prompt_path=canonical_prompt,
+                    report_path=canonical_report,
+                )
+                canonical_generation = (
+                    image_gen_app._capture_scene_semantic_review_generation(
+                        run_dir=run_dir,
+                        stage="scene_detail",
+                        collection_path=canonical_collection,
+                        scope_path=canonical_scope,
+                    )
+                )
                 with patch(
                     "server.image_gen_app.create_codex_app_server_client",
                     FakeClient,
@@ -417,9 +696,14 @@ class SemanticReviewWorkspaceSecurityTests(unittest.TestCase):
                             entry_id="scene:10",
                             entry_index=1,
                             total_entries=1,
-                            collection_section="## scene:10\ntrusted entry\n",
+                            collection_section=collection_section,
+                            canonical_collection_path=canonical_collection,
                             canonical_scope_path=canonical_scope,
                             canonical_report_path=canonical_report,
+                            canonical_generation=canonical_generation,
+                            canonical_entry_projection_sha256=(
+                                projection_sha256
+                            ),
                             attempt=1,
                             max_attempts=1,
                             final_attempt=True,
@@ -514,6 +798,354 @@ class SemanticReviewWorkspaceSecurityTests(unittest.TestCase):
                 )
             )
             self.assertTrue(all(not cwd.exists() for cwd in provider_cwds))
+
+    def test_bound_producer_repair_distinguishes_canonical_and_staged_review_hashes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            stage = "scene_set"
+            self._write_failed_repair_pack(run_dir, stage=stage)
+            review_relpaths = image_gen_app.semantic_review_relpaths(stage)
+            review_prompt_path = run_dir / review_relpaths["prompt"]
+            review_prompt_path.write_text(
+                f"# review prompt\n\nCanonical run: {run_dir}\n",
+                encoding="utf-8",
+            )
+            scope_path = run_dir / review_relpaths["scope"]
+            scope = json.loads(scope_path.read_text(encoding="utf-8"))
+            scope["canonical_workspace_path"] = str(run_dir)
+            scope["prompt_sha256"] = hashlib.sha256(
+                review_prompt_path.read_bytes()
+            ).hexdigest()
+            scope["scope_binding_sha256"] = semantic_review_scope_binding_sha256(
+                scope
+            )
+            scope["semantic_review_input_digest"] = semantic_review_input_digest(
+                stage=stage,
+                entry_ids=scope["entry_ids"],
+                collection_sha256=scope["collection_sha256"],
+                prompt_sha256=scope["prompt_sha256"],
+                source_artifact_digests=scope["source_artifact_digests"],
+                scope_binding_sha256=scope["scope_binding_sha256"],
+            )
+            scope_path.write_text(
+                json.dumps(scope, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / review_relpaths["report"]).write_text(
+                "status: failed\n"
+                f"semantic_review_input_digest: {scope['semantic_review_input_digest']}\n"
+                "reviewed_entries: [scene_1]\n"
+                "blocked_entries: [scene_1]\n"
+                "findings: [scene meaning is wrong]\n"
+                "failed_selectors: [scene_1]\n"
+                "reason_keys: [semantic_timeline_mismatch]\n"
+                "notes: []\n",
+                encoding="utf-8",
+            )
+            identity = (run_dir.stat().st_dev, run_dir.stat().st_ino)
+
+            with bind_run_root(run_dir, expected_identity=identity) as binding:
+                repair_paths = image_gen_app.write_semantic_repair_prompt(
+                    run_dir,
+                    stage,
+                    round_number=1,
+                    max_attempts=2,
+                    errors=["scene meaning is wrong"],
+                    expected_root_identity=identity,
+                )
+                committed_prompt = image_gen_app.read_committed_semantic_repair_prompt(
+                    run_dir,
+                    stage,
+                    round_number=1,
+                    expected_root_identity=identity,
+                )
+                workspace = image_gen_app._prepare_bound_semantic_repair_workspace(
+                    run_dir=run_dir,
+                    binding=binding,
+                    stage=stage,
+                    round_number=1,
+                    committed_prompt=committed_prompt,
+                )
+                try:
+                    staged_contract_text = workspace.submission_prompt.split(
+                        "## Trusted Staged Immutable Review Artifacts",
+                        1,
+                    )[1]
+                    staged_contract = json.loads(
+                        staged_contract_text.split("```json", 1)[1].split(
+                            "```",
+                            1,
+                        )[0]
+                    )
+                    staged_hashes = {
+                        record["path"]: record["sha256"]
+                        for record in staged_contract["artifacts"]
+                    }
+                    for relative in review_relpaths.values():
+                        staged_sha256 = hashlib.sha256(
+                            (workspace.root / relative).read_bytes()
+                        ).hexdigest()
+                        self.assertEqual(
+                            staged_hashes[relative.as_posix()],
+                            staged_sha256,
+                        )
+                    for key in ("scope", "prompt"):
+                        relative = review_relpaths[key]
+                        canonical_sha256 = hashlib.sha256(
+                            (run_dir / relative).read_bytes()
+                        ).hexdigest()
+                        staged_sha256 = hashlib.sha256(
+                            (workspace.root / relative).read_bytes()
+                        ).hexdigest()
+                        self.assertNotEqual(canonical_sha256, staged_sha256)
+
+                    self.assertIn(
+                        "canonical orchestrator binding",
+                        workspace.submission_prompt,
+                    )
+                    self.assertIn(
+                        "must not be compared to path-rebased staged-copy bytes",
+                        workspace.submission_prompt,
+                    )
+                    self.assertIn(
+                        "Trusted Staged Immutable Review Artifacts",
+                        workspace.submission_prompt,
+                    )
+                    self.assertEqual(
+                        set(staged_hashes),
+                        {
+                            relative.as_posix()
+                            for relative in review_relpaths.values()
+                        },
+                    )
+                    self.assertNotIn(
+                        repair_paths["prompt"].relative_to(run_dir).as_posix(),
+                        staged_hashes,
+                    )
+                    self.assertNotIn(
+                        repair_paths["report"].relative_to(run_dir).as_posix(),
+                        staged_hashes,
+                    )
+                    self.assertNotIn("script.md", staged_hashes)
+                finally:
+                    workspace.cleanup()
+
+    def test_bound_producer_repair_rejects_mutated_staged_review_artifact(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            self._write_failed_repair_pack(run_dir)
+            identity = (run_dir.stat().st_dev, run_dir.stat().st_ino)
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, *, cwd: Path, text: str, **_kwargs):
+                    digest_line = next(
+                        line
+                        for line in text.splitlines()
+                        if line.startswith("- repair_input_digest:")
+                    )
+                    digest = digest_line.split(":", 1)[1].strip().strip("`")
+                    scope = Path(cwd) / image_gen_app.semantic_review_relpaths(
+                        "scene_set"
+                    )["scope"]
+                    scope.chmod(0o600)
+                    scope.write_text("provider mutation\n", encoding="utf-8")
+                    (Path(cwd) / "script.md").write_text(
+                        "# Script\n\nuntrusted repaired meaning\n",
+                        encoding="utf-8",
+                    )
+                    report = Path(cwd) / image_gen_app.semantic_repair_relpaths(
+                        "scene_set", 1
+                    )["report"]
+                    report.write_text(
+                        "status: done\n"
+                        f"repair_input_digest: {digest}\n"
+                        "changed_artifacts: [script.md]\n",
+                        encoding="utf-8",
+                    )
+                    return []
+
+                async def stop(self):
+                    return None
+
+            with bind_run_root(run_dir, expected_identity=identity):
+                with patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    FakeClient,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "immutable workspace input changed",
+                    ):
+                        asyncio.run(
+                            image_gen_app._run_semantic_review_producer_repair(
+                                "job-1",
+                                run_dir=run_dir,
+                                stage="scene_set",
+                                round_number=1,
+                                max_attempts=2,
+                                errors=("scene meaning is wrong",),
+                            )
+                        )
+
+            self.assertIn(
+                "old scene meaning",
+                (run_dir / "script.md").read_text(encoding="utf-8"),
+            )
+
+    def test_bound_producer_repair_uses_validated_diff_when_report_overstates_changes_or_lists_itself(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            self._write_failed_repair_pack(run_dir)
+            identity = (run_dir.stat().st_dev, run_dir.stat().st_ino)
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, *, cwd: Path, text: str, **_kwargs):
+                    digest_line = next(
+                        line
+                        for line in text.splitlines()
+                        if line.startswith("- repair_input_digest:")
+                    )
+                    digest = digest_line.split(":", 1)[1].strip().strip("`")
+                    (Path(cwd) / "script.md").write_text(
+                        "# Script\n\nrepaired scene meaning\n",
+                        encoding="utf-8",
+                    )
+                    report = Path(cwd) / image_gen_app.semantic_repair_relpaths(
+                        "scene_set", 1
+                    )["report"]
+                    report_relative = report.relative_to(Path(cwd)).as_posix()
+                    report.write_text(
+                        "status: done\n"
+                        f"repair_input_digest: {digest}\n"
+                        "changed_artifacts: "
+                        f"[script.md, video_manifest.md, {report_relative}]\n"
+                        "findings_addressed: [scene meaning]\n",
+                        encoding="utf-8",
+                    )
+                    return []
+
+                async def stop(self):
+                    return None
+
+            with bind_run_root(run_dir, expected_identity=identity):
+                with patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    FakeClient,
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review_producer_repair(
+                            "job-1",
+                            run_dir=run_dir,
+                            stage="scene_set",
+                            round_number=1,
+                            max_attempts=2,
+                            errors=("scene meaning is wrong",),
+                        )
+                    )
+
+            self.assertIn(
+                "repaired scene meaning",
+                (run_dir / "script.md").read_text(encoding="utf-8"),
+            )
+            self.assertFalse((run_dir / "video_manifest.md").exists())
+
+    def test_bound_producer_repair_rejects_unreported_validated_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            self._write_failed_repair_pack(run_dir)
+            (run_dir / "video_manifest.md").write_text(
+                "# Manifest\n\nold scene meaning\n",
+                encoding="utf-8",
+            )
+            identity = (run_dir.stat().st_dev, run_dir.stat().st_ino)
+
+            class FakeClient:
+                def __init__(self, **_kwargs):
+                    pass
+
+                async def start_thread(self, **_kwargs):
+                    return "thread-1"
+
+                async def run_turn(self, *, cwd: Path, text: str, **_kwargs):
+                    digest_line = next(
+                        line
+                        for line in text.splitlines()
+                        if line.startswith("- repair_input_digest:")
+                    )
+                    digest = digest_line.split(":", 1)[1].strip().strip("`")
+                    (Path(cwd) / "script.md").write_text(
+                        "# Script\n\nrepaired scene meaning\n",
+                        encoding="utf-8",
+                    )
+                    (Path(cwd) / "video_manifest.md").write_text(
+                        "# Manifest\n\nrepaired scene meaning\n",
+                        encoding="utf-8",
+                    )
+                    report = Path(cwd) / image_gen_app.semantic_repair_relpaths(
+                        "scene_set", 1
+                    )["report"]
+                    report.write_text(
+                        "status: done\n"
+                        f"repair_input_digest: {digest}\n"
+                        "changed_artifacts: [script.md]\n"
+                        "findings_addressed: [scene meaning]\n",
+                        encoding="utf-8",
+                    )
+                    return []
+
+                async def stop(self):
+                    return None
+
+            with bind_run_root(run_dir, expected_identity=identity):
+                with patch(
+                    "server.image_gen_app.create_codex_app_server_client",
+                    FakeClient,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "does not include every validated diff",
+                    ):
+                        asyncio.run(
+                            image_gen_app._run_semantic_review_producer_repair(
+                                "job-1",
+                                run_dir=run_dir,
+                                stage="scene_set",
+                                round_number=1,
+                                max_attempts=2,
+                                errors=("scene meaning is wrong",),
+                            )
+                        )
+
+            self.assertIn(
+                "old scene meaning",
+                (run_dir / "script.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "old scene meaning",
+                (run_dir / "video_manifest.md").read_text(encoding="utf-8"),
+            )
 
     def test_bound_producer_repair_rejects_stale_private_report_digest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

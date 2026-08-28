@@ -1,237 +1,267 @@
-# ToC Go-to-Market Operating Guide
+# ToC 販売準備の3スレッド運用ガイド
 
-更新日: 2026-08-08
+更新日: 2026-08-10
 
-この文書は、ToC を販売するための議論と repo 更新を 3 本の AI スレッドで並行して進める際の責務、成果物、同期方法を定義する。positioning の正本は `marketing/README.md` とし、この文書はそれを上書きしない。
+この文書は、ToC を販売するための議論とリポジトリ更新を、3本の AI スレッドで並行して進める際の責任範囲、成果物、共有方法を定める。マーケティング方針の正本は `marketing/README.md` とし、この文書はそれを上書きしない。
 
-## Objective
+## 目的
 
 ```text
 あなたの想いを、映像に。
-  -> 正しい顧客が自分事として理解する
-  -> 実在する proof で信じる
-  -> 自分の動画案を入力する
-  -> 適合する相手と商談する
-  -> 納品可能な条件で受注する
-  -> 最初の動画と継続制作で価値を確認する
+  -> 必要としている顧客が、自分のためのサービスだと理解する
+  -> 実在する制作例を見て、価値を信じられる
+  -> 自分が作りたい画像・動画の案を入力する
+  -> ToC が役立つ相手と商談する
+  -> 安全に納品できる条件で受注する
+  -> 最初の画像セットまたは動画と、その後の継続制作で価値を確かめる
 ```
 
-raw views や lead 数だけを成功にしない。persona 別に、qualified consultation、proposal、closed won / lost、delivery、first / second video まで学ぶ。
+閲覧数や見込み顧客数だけを成功としない。顧客層ごとに、条件に合う相談、提案、受注・失注とその理由、納品、最初と二回目の制作まで記録して学ぶ。
 
-## Shared decisions
+## 3スレッドに共通する決定
 
-次は全 workstream に影響する shared decision であり、Workstream 1 が正本を更新した後に下流へ反映する。
+次の項目は全スレッドに影響するため、スレッド1が正本を更新した後に、スレッド2・3へ反映する。
 
-- Purpose / customer-facing brand line
-- category / primary personas / beachhead persona
-- offer facts / delivery boundary / pricing display policy
-- 公開可能な claim と必要な proof
-- common CTA と persona-specific CTA
-- qualified lead / disqualification の定義
+- ToC の存在目的と、顧客に最初に伝える言葉
+- 商品の位置づけ、主な顧客層、最初に集中する顧客層
+- 提供内容、納品範囲、料金の見せ方
+- 公開できる主張と、それに必要な根拠
+- 共通の行動ボタンと、顧客層別の行動ボタン
+- 商談対象とする条件、対象外とする条件
 
-下流スレッドは市場反応を evidence として返せるが、shared decision を独自に上書きしない。
+スレッド2・3は市場の反応を根拠として返せるが、共通の決定を独自に上書きしない。
 
-## Workstream 1: Positioning and Offer
+現在の対象顧客:
 
-### Question
+- 副業に取り組む個人
+- 小規模ビジネス運営者
+- 個人ブランドは独立した顧客層ではなく、運営者本人の知識と信用が事業価値になる小規模ビジネスの利用例とする
+- 2つの顧客層で、広告、紹介ページ、行動ボタン、効果測定を分ける
+- 最初の販売・集客は `副業に取り組む個人 × 動画制作` に集中する
+- 最初に深く届ける顧客像は、`自分の知識や経験を、顔出しなしの動画にしたい副業個人` とする
+- この顧客像は副業に取り組む個人全体の定義ではなく、最初の広告、紹介ページ、実例、商談を具体化するための絞り込みとする
+- 小規模ビジネス運営者は次の販売市場として保持し、必要な事業向け実例と商品連携の条件が揃ってから販売検証を始める
+
+現在の制作範囲:
+
+- ToC の提供能力は、画像一括生成と動画制作の2つとする
+- 画像一括生成は `必要な画像をまとめて生成`、動画制作は `構成・画像・映像・音声・編集まで完成` と定義する
+- 画像一括生成は、単に枚数が多いことではなく、必要な画像を設計し、生成し、選び、再利用できることを価値にする
+- 同じ企画や素材を次の制作へ再利用できることは、第三の制作形式ではなく、2つに共通する強みとする
+- 共通の言葉 `あなたの想いを、映像に。` の直後に、`一枚の画像から、一本の動画まで。` を置く
+- 顧客層と制作形式は別の観点として扱い、画像を必要とする人を第三の顧客層にしない
+
+## スレッド1: 立ち位置と提供内容
+
+### 答える問い
 
 `最初に誰の、どの切実な問題を、何として、いくらで解決するのか。`
 
-### Owns
+### 編集を担当する範囲
 
 - `marketing/README.md`
 - `marketing/go-to-market.md`
-- offer / positioning 用の新規 marketing 正本
+- `marketing/positioning-and-offer.md`
+- `marketing/first-offer.md`
+- 立ち位置と提供内容に関する新しいマーケティング正本
 
-`marketing/LP/` と `marketing/SNS/` は参照のみとし、変更要求は各 owner へ handoff する。
+`marketing/LP/` と `marketing/SNS/` は参照だけにする。変更が必要な場合は、担当スレッドへの引き継ぎとして記録する。
 
-### Discuss and decide
+### 議論して決めること
 
-1. 最初に本気で取りに行く beachhead persona
-2. その persona が今すぐ解消したい job / obstacle
-3. system delivery の納品物、導入範囲、顧客作業、保守・更新境界
-4. 導入費、外部 API 費、optional service の価格仮説と表示方法
-5. 最初の購入行動を consultation / diagnosis / demo / first-video package のどれにするか
-6. qualification / disqualification 条件
-7. objection と、それを解消する実在 proof
-8. 証拠が揃うまで使わない claim
+1. どの知識・経験の分野から最初に本気で獲得するか
+2. 顔出しなしの動画制作で、顧客が今すぐ解消したい具体的な困りごと
+3. `顔出しなし動画・最初の一本導入` の納品物、導入範囲、顧客側の作業、保守・更新の境界
+4. 顧客候補5人への聞き取りと試験納品を踏まえた、導入費、外部 AI サービスの費用、追加支援の価格案と見せ方
+5. 最初の購入行動を、相談、課題整理、実演、初回制作のどれにするか
+6. 商談対象とする条件、対象外とする条件
+7. 顧客の不安と、それを解消する実在の根拠
+8. 根拠が揃うまで使わない表現
 
-### Outputs
+### 成果物
 
-- beachhead decision
-- offer specification
-- message hierarchy
-- claim-to-proof matrix
-- qualification / disqualification contract
-- price hypothesis and sales boundary
-- Workstream 2 / 3 への approved decision handoff
+- 最初に集中する顧客層の決定
+- 提供内容と納品範囲
+- 顧客へ伝える順序
+- 各主張に対応する根拠の一覧
+- 商談対象とする条件、対象外とする条件
+- 価格案と販売時の境界
+- スレッド2・3へ渡す承認済みの決定
 
-### First task
+### 最初の作業
 
-`副業` と `個人ブランド` のどちらを最初の beachhead にするかを、problem urgency、支払意思、proof availability、到達可能性、納品適合性で比較して一つ選ぶ。
+最初の顧客像は `自分の知識や経験を、顔出しなしの動画にしたい副業個人`、制作形式は `動画制作` とする。最初の商品案は `顔出しなし動画・最初の一本導入` とし、完成した一本と次も作れる制作の仕組みを一緒に渡す。次に、顧客候補5人への聞き取りと試験納品を行い、動画の長さ、修正回数、納期、対応環境、操作説明、保守、価格を確定する。
 
-### Non-goals
+### 担当しないこと
 
-- LP section copy や site implementation
+- 紹介ページの文章やサイト実装
 - SNS 投稿や広告出稿
-- production quality gate の変更
-- 未計測の速度・収益・成果保証
+- 制作品質の合格基準の変更
+- 計測していない速度、収益、成果の保証
 
-## Workstream 2: Brand, Site, and Conversion
+## スレッド2: ブランド、サイト、問い合わせ導線
 
-### Question
+### 答える問い
 
-`訪問者が一瞬で自分事化し、信じ、迷わず一行の動画案を渡せる体験は何か。`
+`訪問者が一瞬で自分のためのサービスだと理解し、信じ、迷わず一行の画像・動画案を渡せる体験は何か。`
 
-### Owns
+### 編集を担当する範囲
 
 - `marketing/LP/`
 
-`marketing/README.md` と `marketing/SNS/` は参照のみとする。公開 site の実装 repo や `server/web/` を変更する場合は、文書設計を確定した後に別 task として扱う。
+`marketing/README.md` と `marketing/SNS/` は参照だけにする。公開サイトの実装用リポジトリや `server/web/` を変更する場合は、文書上の設計を確定した後に別の作業として扱う。
 
-### Discuss and decide
+### 議論して決めること
 
-1. common home の 0 秒 / 3 秒 / 10 秒 message
-2. common brand Hero と persona-specific Hero の役割分担
-3. original idea -> completed video を見せる Hero proof
-4. claim と proof の対応、不足 proof の一覧
-5. CTA、idea-first form、thanks / follow-up までの state flow
-6. objection の順序と、説明より先に見せる証拠
-7. 1 秒 / 3 秒 / 10 秒 comprehension test
-8. Workstream 1 で承認済みの qualification を form state / funnel event へ投影する方法
+1. 共通サイトで、0秒・3秒・10秒の順に伝える内容
+2. 共通サイトの最上部と、顧客層別ページの最上部の役割分担
+3. 一行のアイデアが、画像セットや完成動画になることを見せる実例
+4. 主張と根拠の対応、および不足している根拠
+5. 行動ボタン、一行入力フォーム、送信完了、連絡までの画面の流れ
+6. 顧客の不安を見せる順序と、説明より先に見せる証拠
+7. 1秒・3秒・10秒で何が伝わったかを確認するテスト
+8. スレッド1が承認した商談対象の条件を、入力項目と計測項目へ反映する方法
 
-### Outputs
+### 成果物
 
-- canonical copy / page section contract
-- persona message consistency matrix
-- proof requirement matrix
-- CTA / form flow
-- approved qualification を反映した event / KPI projection
-- implementation acceptance checklist
+- 正式な文章とページ構成
+- 顧客層ごとの言葉が矛盾していないかを確認する表
+- 必要な実例と根拠の一覧
+- 行動ボタンと入力フォームの流れ
+- 商談対象の条件を反映した計測項目と評価指標
+- 実装完了を判断する確認表
 
-### First task
+### 最初の作業
 
-共通ホームは `あなたの想いを、映像に。` を H1、persona LP は既存の persona-specific H1 を維持して brand line を signature とする役割分担を確定する。その上で、実在する一つの brief と完成動画を Hero proof に選ぶ。
+共通サイトでは `あなたの想いを、映像に。` を最初の見出しとし、その直後に `一枚の画像から、一本の動画まで。` を置く。顧客層別ページはそれぞれ専用の見出しを持ち、実在する画像一括生成と完成動画を、別々の実例として見せる。
 
-### Non-goals
+最初の副業向けページでは、`顔を出さずに、あなたの知識と経験を動画に。` を言葉の案として検証する。広い顧客層の説明と、最初に狙う具体的な顧客像を混同しない。
 
-- category、価格、offer facts の独自変更
+### 担当しないこと
+
+- 商品の位置づけ、価格、提供内容の独自変更
 - SNS 運用、広告出稿
-- production frontend / generation pipeline の変更
-- proof のない視聴効果・速度・収益の主張
-- 2 persona を一つの広告や LP へ統合すること
+- 制作用画面や生成処理の変更
+- 根拠のない視聴効果、速度、収益の主張
+- 2つの顧客層を一つの広告や紹介ページへまとめること
 
-## Workstream 3: Proof, Acquisition, and Sales Learning
+## スレッド3: 実例、集客、販売からの学び
 
-### Question
+### 答える問い
 
-`どの persona / obstacle / proof / CTA が、関心ではなく有償需要につながるのか。`
+`どの顧客層に、どの困りごとと実例を示し、どの行動を促すと、関心だけでなく有料の需要につながるのか。`
 
-### Owns
+### 編集を担当する範囲
 
 - `marketing/SNS/`
 
-`marketing/README.md` と `marketing/LP/` は参照のみとし、positioning / offer / LP copy の変更要求は evidence とともに owner へ返す。
+`marketing/README.md` と `marketing/LP/` は参照だけにする。立ち位置、提供内容、紹介ページの文章を変えたい場合は、根拠とともに担当スレッドへ返す。
 
-### Discuss and decide
+### 議論して決めること
 
-1. persona 別の acquisition hypothesis
-2. `1 persona / 1 obstacle / 1 proof / 1 CTA` の content package
-3. diverse proof backlog と original intent / creator acceptance の記録
-4. organic、直接商談、paid acquisition の開始条件
-5. qualified lead / consultation / proposal / won-lost の記録方法
-6. source / campaign / content を form submit 時に CRM へ一方向で引き継ぎ、受注・失注まで集計する privacy-safe attribution
-7. price reaction、objection、lost reason の upstream handoff
-8. 毎週の continue / revise / stop 判断
+1. 顧客層ごとの集客案
+2. `一つの顧客層・一つの困りごと・一つの実例・一つの行動ボタン` で構成する発信
+3. 多様な画像・動画の実例候補と、最初の制作意図、制作者の採用判断の記録
+4. 無料発信、直接商談、有料集客を始める条件
+5. 条件に合う見込み顧客、相談、提案、受注・失注を記録する方法
+6. 流入元、企画、投稿をフォーム送信時に顧客管理記録へ一方向で保存し、個人情報を守りながら受注・失注まで集計する方法
+7. 価格への反応、顧客の不安、失注理由を上流へ返す方法
+8. 毎週、継続・修正・中止を判断する基準
 
-### Outputs
+### 成果物
 
-- 6 週間の persona-specific experiment calendar
-- proof backlog and proof packages
-- end-to-end funnel / CRM stage contract
-- weekly learning log
-- acquisition baseline by persona
-- offer / LP owner へ返す objections、price response、won-lost evidence
+- 6週間の顧客層別の検証予定
+- 実例候補の一覧と、公開用にまとめた実例
+- 閲覧から受注までの記録項目と、顧客管理の段階
+- 毎週の学びの記録
+- 顧客層ごとの集客開始時点の数値
+- スレッド1・2へ返す顧客の不安、価格への反応、受注・失注の根拠
 
-### First task
+### 最初の作業
 
-既存の proof を persona / obstacle / initial brief / completed output / human work / revision / creator acceptance で棚卸しする。同時に、legacy mythology calendar と現行 product acquisition plan を分離し、商談・提案・受注・失注まで追える計測契約を作る。
+既存の実例を、顧客層、制作形式、困りごと、最初の依頼内容、依頼数、生成数、採用数、完成物、人間の作業、修正、制作者の採用判断ごとに整理する。同時に、過去の神話向け投稿予定と、現在の商品集客計画を分離し、商談、提案、受注・失注まで追える記録方法を作る。
 
-### Non-goals
+### 担当しないこと
 
-- Purpose、offer、primary persona の独自変更
-- qualification / disqualification 定義の独自変更。変更案は商談 evidence とともに Workstream 1 へ返す
-- LP / site 本体の編集
-- offer owner の合意なしで価格を確定すること
-- raw views、登録者、lead 数だけを成功とすること
-- 根拠のない売上・速度・収益保証
+- ToC の存在目的、提供内容、主な顧客層の独自変更
+- 商談対象とする条件、対象外とする条件の独自変更。変更案は商談で得た根拠とともにスレッド1へ返す
+- 紹介ページやサイト本体の編集
+- スレッド1の合意なしに価格を確定すること
+- 閲覧数、登録者数、見込み顧客数だけを成功とすること
+- 根拠のない売上、速度、収益の保証
 
-Web analytics と CRM を結合するために raw PII、CRM record ID、hashed email、契約情報を analytics platform へ返さない。form submit 時に persona、source、campaign、content、UTM、landing path を CRM record へ一方向で保存し、CRM から外へ戻すのは集計値だけとする。
+ウェブ解析と顧客管理記録を結ぶ際は、氏名、メールアドレス、顧客管理番号、契約情報を解析サービスへ返さない。フォーム送信時に、顧客層、流入元、企画名、投稿名、広告識別情報、訪問したページを顧客管理記録へ一方向で保存し、外部へ戻すのは個人を特定できない集計値だけにする。
 
-## File ownership and handoff
+## ファイルの担当と引き継ぎ
 
-| Workstream | Writable canonical scope | Reads from | Hands off to |
-|------------|--------------------------|------------|--------------|
-| 1. Positioning / Offer | `marketing/README.md`, `marketing/go-to-market.md` | product readiness、market evidence | approved positioning / offer decisions |
-| 2. Brand / Conversion | `marketing/LP/` | Workstream 1 decisions、Workstream 3 objections | destination / proof / conversion contract |
-| 3. Proof / Acquisition / Sales Learning | `marketing/SNS/` | Workstream 1 decisions、Workstream 2 destination | response / consultation / won-lost evidence |
+| スレッド | 編集する正本 | 受け取る情報 | 次へ渡す情報 |
+|----------|--------------|--------------|----------------|
+| 1. 立ち位置と提供内容 | `marketing/README.md`, `marketing/go-to-market.md`, `marketing/positioning-and-offer.md`, `marketing/first-offer.md` | 商品の準備状況、市場から得た根拠 | 承認した立ち位置と提供内容 |
+| 2. ブランドと問い合わせ導線 | `marketing/LP/` | スレッド1の決定、スレッド3が得た顧客の不安 | 行き先ページ、必要な実例、問い合わせ導線 |
+| 3. 実例、集客、販売からの学び | `marketing/SNS/` | スレッド1の決定、スレッド2が作る行き先ページ | 反応、相談、受注・失注から得た根拠 |
 
-他 workstream の canonical file を変えたい場合は直接編集せず、次を owner へ渡す。
+他のスレッドが担当する正本を変えたい場合は直接編集せず、次の形式で担当スレッドへ渡す。
 
 ```text
-Requested decision:
-Evidence:
-Affected persona / page / channel:
-Expected benefit:
-Risk if unchanged:
-Files that may need projection:
+変更してほしい決定:
+その根拠:
+影響する顧客層、ページ、発信先:
+期待できる効果:
+変更しない場合の問題:
+反映が必要になりそうなファイル:
 ```
 
-## Sync cadence
+## 共有の頻度と内容
 
-3 スレッドは常時並列で進め、定期同期では次の5点だけを共有する。
+3スレッドは並行して進め、定期的な共有では次の5点だけを伝える。
 
-1. 確定した decision
-2. 新しく得た evidence
-3. invalidated hypothesis
-4. blocker / owner
-5. 次に判定する一つの実験
+1. 確定したこと
+2. 新しく得た根拠
+3. 成り立たないと分かった仮説
+4. 作業を止めている問題と、その解決担当
+5. 次に確かめる一つの検証
 
-意思決定の流れは次を守る。
+意思決定は次の順で循環させる。
 
 ```text
-Positioning / offer
-  -> LP / conversion projection
-  -> proof / acquisition / sales execution
-  -> measured response and won-lost learning
-  -> positioning or conversion revision request
+立ち位置と提供内容
+  -> 紹介ページと問い合わせ導線への反映
+  -> 実例を使った集客と販売
+  -> 計測した反応と受注・失注からの学び
+  -> 立ち位置または問い合わせ導線の変更依頼
 ```
 
-## Starter prompts for three Codex tasks
+## 3つの Codex タスクへ渡す開始指示
 
-### Task 1
+### タスク1
 
 ```text
-ToC の Workstream 1: Positioning and Offer を担当してください。
-最初に marketing/README.md と marketing/go-to-market.md を読み、所有範囲だけを編集してください。
-副業と個人ブランドのどちらを最初の beachhead にするかを比較し、納品可能な offer、価格仮説、qualification、claim-to-proof を固めてください。
-marketing/LP/ と marketing/SNS/ は直接編集せず、必要変更を owner への handoff として記述してください。
+ToC のスレッド1「立ち位置と提供内容」を担当してください。
+最初に marketing/README.md、marketing/go-to-market.md、marketing/positioning-and-offer.md、marketing/first-offer.md を読み、自分の担当範囲だけを編集してください。
+主な顧客は「副業に取り組む個人」と「小規模ビジネス運営者」です。最初の販売・集客は「副業に取り組む個人 × 動画制作」に集中します。その中で最初に深く届ける顧客像は「自分の知識や経験を、顔出しなしの動画にしたい副業個人」です。最初の商品案は「顔出しなし動画・最初の一本導入」で、完成した一本と次も作れる制作の仕組みを一緒に渡します。顧客候補5人への聞き取りと試験納品を踏まえ、納品範囲と価格を固めてください。この顧客像は副業個人全体の定義ではありません。小規模ビジネスは次の販売市場として保持し、個人ブランドはその利用例として扱います。
+ユーザーへの説明は分かりやすい日本語で書き、内部用の英語を文章の途中へ入れないでください。専門概念が必要な場合は、最初に意味を日本語で説明してください。
+marketing/LP/ と marketing/SNS/ は直接編集せず、必要な変更を担当スレッドへの引き継ぎとして記述してください。
 ```
 
-### Task 2
+### タスク2
 
 ```text
-ToC の Workstream 2: Brand, Site, and Conversion を担当してください。
-marketing/README.md と marketing/go-to-market.md を上位正本として読み、marketing/LP/ だけを編集してください。
-「あなたの想いを、映像に。」を common home の 0 秒認知から、proof、persona 選択、一行入力、Workstream 1 で承認済みの qualification の form / event 投影まで一貫させてください。
-offer facts を独自に変更せず、必要な変更は Workstream 1 へ handoff してください。
+ToC のスレッド2「ブランド、サイト、問い合わせ導線」を担当してください。
+marketing/README.md と marketing/go-to-market.md を上位の正本として読み、marketing/LP/ だけを編集してください。
+「あなたの想いを、映像に。」を共通サイトの最初の認知から、実例、顧客層の選択、一行入力、スレッド1が承認した商談条件の入力項目・計測項目への反映まで一貫させてください。
+直後に「一枚の画像から、一本の動画まで。」を置き、顧客層と、画像一括生成・動画制作という制作形式を別の観点として扱ってください。
+最初の副業向けページは「自分の知識や経験を、顔出しなしの動画にしたい副業個人」に合わせ、「顔を出さずに、あなたの知識と経験を動画に。」という言葉を検証してください。この顧客像を副業個人全体の定義にはしないでください。
+ユーザーへの説明は分かりやすい日本語で書き、内部用の英語を文章の途中へ入れないでください。専門概念が必要な場合は、最初に意味を日本語で説明してください。
+提供内容を独自に変更せず、必要な変更はスレッド1へ引き継いでください。
 ```
 
-### Task 3
+### タスク3
 
 ```text
-ToC の Workstream 3: Proof, Acquisition, and Sales Learning を担当してください。
-marketing/README.md と marketing/go-to-market.md を上位正本として読み、marketing/SNS/ だけを編集してください。
-persona 別 proof を棚卸しし、承認済み qualification を使って、6週間の獲得実験、qualified lead、商談、提案、受注・失注、継続制作まで追える学習ループを設計してください。
-Purpose、offer、LP copy は独自に変更せず、反応データを owner への handoff として返してください。
+ToC のスレッド3「実例、集客、販売からの学び」を担当してください。
+marketing/README.md と marketing/go-to-market.md を上位の正本として読み、marketing/SNS/ だけを編集してください。
+顧客層と制作形式ごとに、既存の実例を整理してください。画像の実例は、依頼数、生成数、採用数、不採用数、別案の数を分けます。スレッド1が承認した商談条件を使い、6週間の集客検証、条件に合う見込み顧客、商談、提案、受注・失注、継続制作まで追える学びの仕組みを設計してください。
+最初の集客と実例は「自分の知識や経験を、顔出しなしの動画にしたい副業個人」に集中し、知識・経験の分野、顔出しへの抵抗、制作が止まった理由、支払う意思を記録してください。この顧客像を副業個人全体の定義にはしないでください。
+ユーザーへの説明は分かりやすい日本語で書き、内部用の英語を文章の途中へ入れないでください。専門概念が必要な場合は、最初に意味を日本語で説明してください。
+ToC の存在目的、提供内容、紹介ページの文章は独自に変更せず、反応データを担当スレッドへ引き継いでください。
 ```

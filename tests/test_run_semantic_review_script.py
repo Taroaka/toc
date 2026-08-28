@@ -25,6 +25,60 @@ def load_run_semantic_review_module():
 
 
 class RunSemanticReviewScriptTests(unittest.TestCase):
+    def test_run_review_resolves_default_attempts_for_stage(self) -> None:
+        module = load_run_semantic_review_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            result = SemanticReviewStatus(status="passed", entry_count=1, errors=())
+
+            async def passed_review(*_args, **_kwargs):
+                return result
+
+            with (
+                patch.object(
+                    module,
+                    "semantic_review_max_attempts",
+                    return_value=3,
+                ) as resolve_attempts,
+                patch.object(module, "_run_review_once", passed_review),
+            ):
+                code = asyncio.run(
+                    module.run_review(
+                        run_dir,
+                        "scene_set",
+                        timeout_seconds=30,
+                    )
+                )
+
+        self.assertEqual(code, 0)
+        resolve_attempts.assert_called_once_with("scene_set")
+
+    def test_cli_max_attempts_default_remains_none_until_stage_is_known(self) -> None:
+        module = load_run_semantic_review_module()
+
+        async def completed_review(*_args, **_kwargs):
+            return 0
+
+        with (
+            patch.object(module, "run_review", side_effect=completed_review) as run_review,
+            patch.object(
+                module.sys,
+                "argv",
+                [
+                    str(SCRIPT_PATH),
+                    "--run-dir",
+                    "/tmp/semantic-review-run",
+                    "--stage",
+                    "scene_set",
+                ],
+            ),
+        ):
+            code = module.main()
+
+        self.assertEqual(code, 0)
+        self.assertIsNone(run_review.call_args.kwargs["max_attempts"])
+
     def test_producer_repair_refuses_uncommitted_prompt_before_starting_provider(self) -> None:
         module = load_run_semantic_review_module()
         with tempfile.TemporaryDirectory() as tmp:

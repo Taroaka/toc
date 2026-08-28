@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -121,6 +123,15 @@ def _good_story_yaml() -> str:
 
 
 class TestStageGrounding(unittest.TestCase):
+    def test_adaptation_value_design_is_grounded_for_authoring_and_generation(self) -> None:
+        contract = yaml.safe_load((REPO_ROOT / "workflow" / "stage-grounding.yaml").read_text(encoding="utf-8"))
+        for stage in ("story", "visual_value", "script", "manifest", "scene_implementation", "video_generation"):
+            with self.subTest(stage=stage):
+                self.assertIn(
+                    "docs/adaptation-value-amplification.md",
+                    contract["stages"][stage]["required_docs"],
+                )
+
     def test_research_grounding_ready_without_run_inputs(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0000"

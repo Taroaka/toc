@@ -341,7 +341,12 @@ def collect_entries(
             )
             if isinstance(entries, list) and (entries or stage != "cut_blueprint"):
                 return entries
-        except Exception:
+        except Exception as exc:
+            validation_error = (
+                getattr(locals().get("module"), "SceneAcceptanceValidationError", None)
+            )
+            if isinstance(validation_error, type) and isinstance(exc, validation_error):
+                raise
             if stage in {"research", "story"}:
                 raise
             # Fall back to the conservative built-in collector so pack generation

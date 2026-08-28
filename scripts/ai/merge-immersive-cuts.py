@@ -23,6 +23,7 @@ from toc.immersive_manifest import (
     scene_numeric_id,
     story_scene_ids,
 )
+from toc.harness import append_state_snapshot
 
 
 CANONICAL_SEMANTIC_KEYS = frozenset(
@@ -144,14 +145,7 @@ def replace_yaml_block(text: str, new_yaml: str) -> str:
 
 def append_state_block(state_path: Path, kv: dict[str, str]) -> None:
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{k}={v}" for k, v in kv.items()]
-    block = "\n".join(lines) + "\n---\n"
-    if state_path.exists():
-        state_path.write_text(
-            state_path.read_text(encoding="utf-8") + block, encoding="utf-8"
-        )
-        return
-    state_path.write_text(block, encoding="utf-8")
+    append_state_snapshot(state_path, kv)
 
 
 def _canonical_semantic_paths(value: object, *, path: str = "$manifest") -> list[str]:

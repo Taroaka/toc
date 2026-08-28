@@ -15,8 +15,18 @@ scene_outline_metadata:
   source_visual_value: "output/<topic>_<timestamp>/visual_value.md"
   created_at: "<ISO8601>"
   method_used: "cinematic_scene_contract"
-  version: 2
+  version: 3
   scene_count: 0
+  # 新規 artifact は script.md の凍結済み契約から exact projection する。
+  # 会話履歴や reviewer transcript は入力にしない。legacy markerなしは読み取り互換。
+  scene_acceptance_contract:
+    schema_version: "scene_set_authoring_contract_v1"
+    source_script: "output/<topic>_<timestamp>/script.md#/scene_set_authoring_contract"
+    generation_id: "scene-authoring-<id>"
+    contract_digest: "sha256:<hex>"
+    criterion_registry_version: "scene_acceptance_criteria_v1"
+    criterion_registry_sha256: "sha256:<hex>"
+    readset_digest: "sha256:<hex>"
 
 scene_design_rules:
   scene_count_strategy: "maximal_meaningful"
@@ -110,6 +120,16 @@ canonical_event_coverage_matrix:
       adaptation_change_reason: ""
       human_approval_required: false
 
+# scene_set_authoring_contract の全体を複製しない。各 scene は frozen contract の slice と
+# digestだけを参照し、scene prose / cut design が ownership や reveal state の別authoring rootにならない。
+scene_set_authoring_contract_ref:
+  schema_version: "scene_set_authoring_contract_ref_v1"
+  path: "script.md#/scene_set_authoring_contract"
+  generation_id: "scene-authoring-<id>"
+  contract_digest: "sha256:<hex>"
+  criterion_registry_sha256: "sha256:<hex>"
+  source_digest: "sha256:<hex>"
+
 scene_decision_log:
   - decision_id: "scene_decision_001"
     action: "add_scene|merge_scene|split_scene|delete_scene|reorder_scene"
@@ -123,6 +143,50 @@ scene_decision_log:
 
 scenes:
   - scene_id: 1
+    # frozen scene_set_authoring_contract の read-only projection。agentはID/ownership/digestを変更しない。
+    scene_contract_slice:
+      schema_version: "scene_contract_slice_v1"
+      scene_id: 1
+      generation_id: "scene-authoring-<id>"
+      contract_digest: "sha256:<hex>"
+      scene_slice_digest: "sha256:<hex>"
+      canonical_event_ids: []
+      required_beat_specs:
+        - beat_id: "scene1_beat_01"
+          source_event_ids: []
+          required_role_ids: []
+          required_character_ids: []
+          required_evidence_ids: []
+          required_non_replaceable_element_ids: []
+      role_bindings: []
+      reveal_state_before: {}
+      allowed_reveal_transition_ids: []
+      reveal_state_after: {}
+      time_location_transition:
+        time_of_day: ""
+        continuity_from_previous: ""
+        transition_cue_required: false
+        transition_cue_ids: []
+        location_sequence: []
+      incoming_handoff_anchor_id: "story_opening"
+      outgoing_handoff_anchor_id: "handoff_1_2"
+      causal_proof_contract:
+        cause_beat_id: "scene1_beat_01"
+        action_beat_id: "scene1_beat_01"
+        result_state_id: "state_after_scene1"
+        required_evidence_ids: []
+      non_replaceable_elements: []
+    # validatorが計算するblock。scene author / reviewerは手入力でpassedにしない。
+    authoring_preflight:
+      schema_version: "scene_authoring_preflight_v1"
+      status: "pending"
+      generation_id: "scene-authoring-<id>"
+      contract_digest: "sha256:<hex>"
+      scene_slice_digest: "sha256:<hex>"
+      source_digest: "sha256:<hex>"
+      preflight_digest: ""
+      checks: []
+      blocking_reason_keys: []
     # story.md の同一 scene からの read-only projection。open string で、新規 artifact では非空必須。
     # contract marker がない Legacy の missing/empty だけ、読み込み時に "" として扱い、時間帯 prompt fragment を生成しない。
     # 例: 朝、昼、夕方、夜、夜明け前、真夜中。ここで再 authoring せず、visual_world.setting へも重複保持しない。

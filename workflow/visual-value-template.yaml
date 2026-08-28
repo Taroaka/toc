@@ -1,5 +1,7 @@
 visual_value_metadata:
   template_status: "TEMPLATE_ONLY_REPLACE_ALL_REPLACE_ME_AND_EXAMPLE_ONLY_VALUES"
+  # 既存物語 adaptation の場合のみ、次のコメントを外す。original_story では key 自体を出力しない。
+  # adaptation_value_contract: "required_v1"
   topic: "REPLACE_ME_TOPIC"
   source_research: "REPLACE_ME_RUN_DIR/research.md"
   source_story: "REPLACE_ME_RUN_DIR/story.md"
@@ -9,6 +11,25 @@ visual_value_metadata:
     - "REPLACE_ME_* values are unfinished placeholders and must not survive into visual_value.md."
     - "EXAMPLE_ONLY_* values show shape only; replace or delete them before treating the file as stage output."
     - "Do not copy example IDs such as EXAMPLE_ONLY_scene01 into production selectors."
+
+# ここからは既存物語 adaptation の場合のみ出力する。
+# story.md の value_id を全編の映画言語へ翻訳する方針。原作を変更する権限は持たない。
+adaptation_intent:
+  schema_version: "adaptation_intent_v1"
+  source_value_ids:
+    - "REPLACE_ME_STORY_VALUE_ID"
+  effect_fidelity_goal: "REPLACE_ME: 原作で評価された観客効果を映像でどう再体験させるか"
+  adaptation_angle: "REPLACE_ME: 原作価値を変えず、この映像化で何を再発見させるか"
+  visual_principles:
+    - "REPLACE_ME: 構図、空間、光で価値を増幅する全編原則"
+  performance_principles:
+    - "REPLACE_ME: 感情名ではなく身体反応・抑制・解放で演じる原則"
+  sound_principles:
+    - "REPLACE_ME: 環境音、沈黙、音の先行・残響を使う原則"
+  editorial_principles:
+    - "REPLACE_ME: hold、reaction、reveal、余韻を扱う編集原則"
+  forbidden_generic_treatments:
+    - "REPLACE_ME: 豪華さや美麗さだけで原作価値を代替する処理"
 
 global_visual_identity:
   visual_style: "REPLACE_ME: 実写、シネマティック等。この run 固有の一貫した画作りを書く"
@@ -40,6 +61,28 @@ scene_visual_values:
       - "REPLACE_ME: 次 scene / 後半で再利用する視覚要素"
     p400_script_notes:
       - "REPLACE_ME: script / cut skeleton 作成時に守ること"
+    # このsceneで原作価値をどう観客体験へ増幅するか。抽象的な「映画的に」は禁止。
+    scene_value_amplification:
+      schema_version: "scene_value_amplification_v1"
+      source_value_refs:
+        - "REPLACE_ME_STORY_VALUE_ID"
+      why_this_scene_matters: "REPLACE_ME: 原作全体に対してこのsceneが不可欠な理由"
+      audience_state_before: "REPLACE_ME: scene開始時の観客の期待・理解・感情"
+      audience_state_after: "REPLACE_ME: scene終了時に生じる不可逆な体験差"
+      emotional_contradiction: "REPLACE_ME: 同時に存在する相反感情や圧力"
+      cinematic_gain:
+        performance: "REPLACE_ME: 呼吸、視線、抑制、身体反応の具体差"
+        blocking_and_space: "REPLACE_ME: 距離、遮蔽、孤立、接近、退路の変化"
+        camera_and_composition: "REPLACE_ME: 誰の認識に寄り添い、何をいつ見せないか"
+        edit_and_rhythm: "REPLACE_ME: hold、cut、reaction、reveal、余韻の設計"
+        sound: "REPLACE_ME: 環境音、沈黙、音の先行・残響の働き"
+      iconic_moment_target: "REPLACE_ME: 観客が再体験・再発見する一瞬"
+      must_preserve_story_facts:
+        - "REPLACE_ME: このsceneで変えてはいけない原作事実"
+      must_not_reduce_to:
+        - "REPLACE_ME: 説明絵、美麗な壁紙、generic montage等への縮退"
+      success_evidence:
+        - "REPLACE_ME: 台詞や設計文なしでも価値増幅が成立したと分かる証拠"
 
 anchor_cut_candidates:
   - selector: "REPLACE_ME_sceneXX_cutYY"

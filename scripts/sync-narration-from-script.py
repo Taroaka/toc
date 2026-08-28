@@ -1045,8 +1045,6 @@ def _sync_narration_unlocked(*, script_path: Path, manifest_path: Path) -> tuple
         script_path: script_path.read_bytes(),
         manifest_path: manifest_path.read_bytes(),
     }
-    state_existed = state_path.exists()
-    original_state_bytes = state_path.read_bytes() if state_existed else b""
     try:
         if script_request_updates:
             script_path.write_text(new_script_text, encoding="utf-8")
@@ -1071,10 +1069,6 @@ def _sync_narration_unlocked(*, script_path: Path, manifest_path: Path) -> tuple
     except Exception:
         for path, original_bytes in original_file_bytes.items():
             path.write_bytes(original_bytes)
-        if state_existed:
-            state_path.write_bytes(original_state_bytes)
-        else:
-            state_path.unlink(missing_ok=True)
         raise
     return updated, skipped
 

@@ -41,7 +41,7 @@ from toc.grounding import (
     resolve_stage_grounding,
     review_policy_state_entries,
 )
-from toc.harness import _order_keys, nested_state, new_job_id, pending_gates
+from toc.harness import new_job_id, sync_run_status
 from toc.review_loop import (
     REVIEW_LOOP_CRITIC_COUNT,
     REVIEW_LOOP_SPECS,
@@ -57,7 +57,8 @@ from toc.review_loop import (
     review_input_snapshot_relpath,
     review_input_snapshot_issues,
 )
-from toc.run_index import build_run_index_markdown
+from toc.run_root_binding import bind_run_root
+from toc.state_store import append_state_delta, read_current_state
 from toc.stage_evaluator import check_manifest_single
 from scripts.world_walk_source import (
     PathIdentity,
@@ -1003,28 +1004,14 @@ def _secure_remove_path(run_dir: Path, relative: str | Path) -> bool:
         return True
 
 
-def _parse_state_text(text: str) -> dict[str, str]:
-    merged: dict[str, str] = {}
-    for raw in text.splitlines():
-        line = raw.strip()
-        if (
-            not line
-            or line == "---"
-            or line.startswith("#")
-            or "=" not in line
-        ):
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if key:
-            merged[key] = value.strip().replace("\n", " ")
-    return merged
-
-
 def _parse_state(run_dir: Path) -> dict[str, str]:
-    return _parse_state_text(
-        _secure_read_text(run_dir, "state.txt", missing_ok=True)
-    )
+    with _using_run_root(run_dir) as root:
+        with bind_run_root(
+            run_dir,
+            expected_identity=root.identity,
+            descriptor=root.descriptor,
+        ):
+            return dict(read_current_state(run_dir / "state.txt").state)
 
 
 def _artifact_absolute(run_dir: Path, relative: str | Path) -> str:
@@ -1065,57 +1052,11 @@ def _artifact_inventory_safe(
     return inventory
 
 
-def _write_run_index_safe(
-    run_dir: Path,
-    state: dict[str, str],
-) -> None:
-    _assert_safe_run_tree(run_dir)
-    markdown = build_run_index_markdown(run_dir, state=state)
-    _assert_safe_run_tree(run_dir)
-    _secure_write_text(
-        run_dir,
-        "p000_index.md",
-        markdown,
-        overwrite=True,
-    )
-
-
 def _sync_run_status_safe(
     run_dir: Path,
     state: dict[str, str],
 ) -> None:
-    _write_run_index_safe(run_dir, state)
-    payload: dict[str, Any] = {
-        "generated_at": now_iso(),
-        "run_dir": os.fspath(_lexical_absolute(run_dir)),
-        "state_file": _artifact_absolute(run_dir, "state.txt"),
-        "state_flat": state,
-        "state": nested_state(state),
-        "artifacts": _artifact_inventory_safe(run_dir, state),
-        "pending_gates": pending_gates(state),
-    }
-    if _secure_is_regular(run_dir, "eval_report.json"):
-        try:
-            payload["eval_report"] = json.loads(
-                _secure_read_text(run_dir, "eval_report.json")
-            )
-        except json.JSONDecodeError:
-            payload["eval_report"] = {
-                "error": "Failed to parse eval_report.json"
-            }
-    _secure_write_text(
-        run_dir,
-        "run_status.json",
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-        overwrite=True,
-    )
-    _write_run_index_safe(run_dir, state)
+    sync_run_status(run_dir, state)
 
 
 def normalize_timestamp(value: str) -> str:
@@ -1377,41 +1318,36 @@ def _refresh_active_source_receipt(
 
 def append_state_block(state_path: Path, kv: dict[str, str]) -> None:
     run_dir = state_path.parent
-    with _using_run_root(run_dir):
+    with _using_run_root(run_dir) as root:
         try:
             relative = _lexical_absolute(state_path).relative_to(
                 _lexical_absolute(run_dir)
             )
         except ValueError as exc:
             raise ValueError("state path escapes run root") from exc
-        existing = _secure_read_text(
+        if relative != Path("state.txt"):
+            raise ValueError("state append must target state.txt")
+        timestamp = now_iso()
+        with bind_run_root(
             run_dir,
-            relative,
-            missing_ok=True,
-        )
-        merged = _parse_state_text(existing)
-        if "job_id" not in merged or not merged["job_id"].strip():
-            merged["job_id"] = new_job_id()
-        if "status" not in merged or not merged["status"].strip():
-            merged["status"] = "INIT"
-        merged.setdefault(
-            "artifact.run_index",
-            _artifact_absolute(run_dir, "p000_index.md"),
-        )
-        cleaned = {
-            key: str(value).replace("\n", " ").strip()
-            for key, value in kv.items()
-        }
-        merged.update(cleaned)
-        merged["timestamp"] = now_iso()
-        lines = [f"{key}={merged[key]}" for key in _order_keys(merged)]
-        block = "\n".join(lines) + "\n---\n"
-        _secure_write_text(
-            run_dir,
-            relative,
-            existing + block,
-            overwrite=True,
-        )
+            expected_identity=root.identity,
+            descriptor=root.descriptor,
+        ):
+            replay = append_state_delta(
+                state_path,
+                kv,
+                event_type="state.immersive_ride.updated",
+                occurred_at=timestamp,
+                committed_at=timestamp,
+                defaults={
+                    "job_id": new_job_id(),
+                    "status": "INIT",
+                    "artifact.run_index": _artifact_absolute(
+                        run_dir, "p000_index.md"
+                    ),
+                },
+            )
+        merged = dict(replay.state)
         _sync_run_status_safe(run_dir, merged)
 
 

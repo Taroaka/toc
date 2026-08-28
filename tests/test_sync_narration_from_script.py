@@ -37,7 +37,7 @@ class TestSyncNarrationFromScript(unittest.TestCase):
             cwd=REPO_ROOT,
         )
 
-    def test_state_write_failure_rolls_back_all_authoring_artifacts_byte_exactly(self) -> None:
+    def test_precommit_state_failure_rolls_back_authoring_artifacts_byte_exactly(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_sync_narration_transaction_") as td:
             run_dir = Path(td)
             script_path = run_dir / "script.md"
@@ -77,12 +77,11 @@ scenes:
 
             original_append = SYNC_MODULE.append_state_snapshot
 
-            def fail_after_partial_state_write(path: Path, values: dict[str, str]) -> None:
-                del values
-                path.write_bytes(b"partial-state-write")
+            def fail_before_state_commit(path: Path, values: dict[str, str]) -> None:
+                del path, values
                 raise RuntimeError("simulated state persistence failure")
 
-            SYNC_MODULE.append_state_snapshot = fail_after_partial_state_write
+            SYNC_MODULE.append_state_snapshot = fail_before_state_commit
             try:
                 with self.assertRaisesRegex(RuntimeError, "state persistence failure"):
                     SYNC_MODULE.sync_narration(

@@ -1,6 +1,7 @@
 import json
 import hashlib
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +29,8 @@ from toc.semantic_review_loop import (
     _semantic_collection_excerpt,
     semantic_repair_relpaths,
     semantic_repair_timeout_seconds,
+    scene_set_review_concurrency,
+    scene_set_transport_retry_attempts,
     scene_detail_review_concurrency,
     scene_detail_transport_retry_attempts,
     read_committed_semantic_repair_prompt,
@@ -278,6 +281,16 @@ def rewrite_generic_pack_revision(
 
 
 class TestSemanticReview(unittest.TestCase):
+    def test_failed_selector_parser_preserves_commas_inside_nested_brackets(self) -> None:
+        selector = "story.md:script.scenes[scene_id=2, 3].location"
+        parsed = semantic_review_loop._semantic_review_failed_selectors(
+            f"status: failed\nfailed_selectors: [{selector}]\n"
+        )
+
+        self.assertIn(selector, parsed)
+        self.assertNotIn("story.md:script.scenes[scene_id=2", parsed)
+        self.assertNotIn("3].location", parsed)
+
     def test_parse_report_status_accepts_plain_and_backtick_lines(self) -> None:
         self.assertEqual(parse_judgment_report_status("status: passed\n"), "passed")
         self.assertEqual(parse_judgment_report_status("- status: `failed`\n"), "failed")
@@ -412,6 +425,94 @@ class TestSemanticReview(unittest.TestCase):
             issues = semantic_review_currentness_issues(run_dir, "asset_plan")
             self.assertFalse(semantic_review_sources_are_current(run_dir, "asset_plan"))
             self.assertTrue(any("SHA-256 mismatch" in issue for issue in issues), issues)
+
+    def test_digest_report_accepts_quoted_scalar_forms(self) -> None:
+        for quote in ('"', "'", "`"):
+            with self.subTest(quote=quote), tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+                run_dir = Path(td)
+                write_digest_bound_pack(run_dir)
+                report_path = run_dir / semantic_review_relpaths("asset_plan")["report"]
+                report = report_path.read_text(encoding="utf-8")
+                digest = re.search(r"semantic_review_input_digest: (sha256:[0-9a-f]{64})", report)
+                assert digest is not None
+                report_path.write_text(
+                    report.replace(
+                        f"semantic_review_input_digest: {digest.group(1)}",
+                        f"semantic_review_input_digest: {quote}{digest.group(1)}{quote}",
+                    ),
+                    encoding="utf-8",
+                )
+
+                result = check_semantic_review(run_dir, "asset_plan")
+
+                self.assertTrue(result.passed, result.errors)
+
+    def test_digest_report_rejects_unpaired_or_mismatched_quotes(self) -> None:
+        for wrapper in ('"{}', "'{}\"", "`{}'"):
+            with self.subTest(wrapper=wrapper), tempfile.TemporaryDirectory(
+                prefix="semantic_review_"
+            ) as td:
+                run_dir = Path(td)
+                write_digest_bound_pack(run_dir)
+                report_path = run_dir / semantic_review_relpaths("asset_plan")[
+                    "report"
+                ]
+                report = report_path.read_text(encoding="utf-8")
+                digest = re.search(
+                    r"semantic_review_input_digest: (sha256:[0-9a-f]{64})",
+                    report,
+                )
+                assert digest is not None
+                report_path.write_text(
+                    report.replace(
+                        f"semantic_review_input_digest: {digest.group(1)}",
+                        "semantic_review_input_digest: "
+                        + wrapper.format(digest.group(1)),
+                    ),
+                    encoding="utf-8",
+                )
+
+                result = check_semantic_review(run_dir, "asset_plan")
+
+                self.assertFalse(result.passed)
+                self.assertTrue(
+                    any("input_digest" in error for error in result.errors),
+                    result.errors,
+                )
+
+    def test_semantic_repair_snapshot_accepts_paired_quoted_digest(self) -> None:
+        for quote in ('"', "'", "`"):
+            with self.subTest(quote=quote), tempfile.TemporaryDirectory(
+                prefix="semantic_review_"
+            ) as td:
+                run_dir = Path(td)
+                write_generic_pack(run_dir, "scene_set", status="failed")
+                report_path = run_dir / semantic_review_relpaths("scene_set")[
+                    "report"
+                ]
+                report = report_path.read_text(encoding="utf-8")
+                digest = re.search(
+                    r"semantic_review_input_digest: (sha256:[0-9a-f]{64})",
+                    report,
+                )
+                assert digest is not None
+                report_path.write_text(
+                    report.replace(
+                        f"semantic_review_input_digest: {digest.group(1)}",
+                        f"semantic_review_input_digest: {quote}{digest.group(1)}{quote}",
+                    ),
+                    encoding="utf-8",
+                )
+
+                paths = write_semantic_repair_prompt(
+                    run_dir,
+                    "scene_set",
+                    round_number=1,
+                    max_attempts=3,
+                    errors=("scene contract failed",),
+                )
+
+                self.assertTrue(paths["prompt"].exists())
 
     def test_digest_bound_currentness_rejects_unsafe_source_and_unbound_report(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
@@ -999,9 +1100,27 @@ class TestSemanticReview(unittest.TestCase):
             self.assertIn("every ordered `location.sequence[]` item", prompt)
             self.assertIn("Do not invent a transition", prompt)
 
-    def test_semantic_repair_defaults_to_two_review_attempts(self) -> None:
+    def test_semantic_repair_defaults_to_three_review_attempts_for_scene_set(self) -> None:
+        with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS": ""}):
+            self.assertEqual(semantic_review_max_attempts("scene_set"), 3)
+
+    def test_semantic_repair_defaults_to_two_review_attempts_for_other_stages(self) -> None:
+        with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS": ""}):
+            self.assertEqual(semantic_review_max_attempts("story"), 2)
+
+    def test_semantic_repair_no_arg_default_remains_backward_compatible(self) -> None:
         with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS": ""}):
             self.assertEqual(semantic_review_max_attempts(), 2)
+
+    def test_semantic_repair_valid_env_overrides_stage_default(self) -> None:
+        with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS": "4"}):
+            self.assertEqual(semantic_review_max_attempts("scene_set"), 4)
+            self.assertEqual(semantic_review_max_attempts("story"), 4)
+
+    def test_semantic_repair_malformed_env_falls_back_to_stage_default(self) -> None:
+        with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS": "bad"}):
+            self.assertEqual(semantic_review_max_attempts("scene_set"), 3)
+            self.assertEqual(semantic_review_max_attempts("story"), 2)
 
     def test_semantic_review_timeout_default_allows_long_contextless_reviews(self) -> None:
         with patch.dict("os.environ", {"TOC_SEMANTIC_REVIEW_TIMEOUT_SECONDS": ""}):
@@ -1015,6 +1134,18 @@ class TestSemanticReview(unittest.TestCase):
         with patch.dict("os.environ", {"TOC_SCENE_DETAIL_REVIEW_CONCURRENCY": ""}):
             self.assertEqual(scene_detail_review_concurrency(), 6)
 
+    def test_scene_set_review_concurrency_defaults_to_six(self) -> None:
+        with patch.dict("os.environ", {"TOC_SCENE_SET_REVIEW_CONCURRENCY": ""}):
+            self.assertEqual(scene_set_review_concurrency(), 6)
+
+    def test_scene_set_review_concurrency_uses_own_env_with_floor(self) -> None:
+        with patch.dict("os.environ", {"TOC_SCENE_SET_REVIEW_CONCURRENCY": "4"}):
+            self.assertEqual(scene_set_review_concurrency(), 4)
+        with patch.dict("os.environ", {"TOC_SCENE_SET_REVIEW_CONCURRENCY": "0"}):
+            self.assertEqual(scene_set_review_concurrency(), 1)
+        with patch.dict("os.environ", {"TOC_SCENE_SET_REVIEW_CONCURRENCY": "bad"}):
+            self.assertEqual(scene_set_review_concurrency(), 6)
+
     def test_scene_detail_review_concurrency_uses_env_with_floor(self) -> None:
         with patch.dict("os.environ", {"TOC_SCENE_DETAIL_REVIEW_CONCURRENCY": "3"}):
             self.assertEqual(scene_detail_review_concurrency(), 3)
@@ -1026,6 +1157,13 @@ class TestSemanticReview(unittest.TestCase):
     def test_scene_detail_transport_retry_attempts_defaults_to_three(self) -> None:
         with patch.dict("os.environ", {"TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS": ""}):
             self.assertEqual(scene_detail_transport_retry_attempts(), 3)
+
+    def test_scene_set_transport_retry_attempts_defaults_to_three(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"TOC_SCENE_SET_TRANSPORT_RETRY_ATTEMPTS": ""},
+        ):
+            self.assertEqual(scene_set_transport_retry_attempts(), 3)
 
     def test_scene_detail_transport_retry_attempts_uses_env_with_floor(self) -> None:
         with patch.dict("os.environ", {"TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS": "2"}):
@@ -1107,7 +1245,7 @@ passed scene forty text
         report = """status: failed
 reviewed_entries: [scene:10, scene:20, scene:40]
 blocked_entries: [scene:10]
-failed_selectors: [scene20]
+failed_selectors: [scene20.participants]
 reason_keys: [semantic_contract_missing]
 """
 
@@ -1116,6 +1254,73 @@ reason_keys: [semantic_contract_missing]
         self.assertIn("failed scene ten text", excerpt)
         self.assertIn("failed scene twenty text", excerpt)
         self.assertNotIn("passed scene forty text", excerpt)
+
+    def test_semantic_repair_collection_excerpt_indexes_every_failed_section_within_budget(self) -> None:
+        selectors = [f"scene:{index:02d}" for index in range(1, 41)]
+        collection = "# Semantic Review Collection: scene_set\n\n" + "\n\n".join(
+            f"## {selector}\n\nsummary for {selector} " + ("detail " * 500)
+            for selector in selectors
+        )
+        report = (
+            "status: failed\n"
+            f"failed_selectors: [{', '.join(selectors)}]\n"
+            "blocked_entries: []\n"
+        )
+
+        excerpt = _semantic_collection_excerpt(collection, report, max_chars=6000)
+
+        self.assertLessEqual(len(excerpt), 6000)
+        self.assertIn("Failed selector collection index", excerpt)
+        for selector in selectors:
+            self.assertIn(f"`{selector}`", excerpt)
+            self.assertIn(f"summary for {selector}", excerpt)
+
+    def test_semantic_repair_collection_index_prefers_entry_summary(self) -> None:
+        collection = """# Semantic Review Collection: scene_set
+
+## scene:01
+
+```json
+{
+  "id": "scene:01",
+  "source_path": "script.md",
+  "summary": "trust shifts to suspicion at the local turn",
+  "scene_event": {"verbose": "later detail"}
+}
+```
+"""
+        report = "status: failed\nfailed_selectors: [scene:01]\nblocked_entries: []\n"
+
+        excerpt = _semantic_collection_excerpt(collection, report, max_chars=1000)
+
+        self.assertIn(
+            "- `scene:01` -> trust shifts to suspicion at the local turn",
+            excerpt,
+        )
+
+    def test_scene_set_repair_prompt_carries_cross_artifact_scene_contract(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:
+            run_dir = Path(td)
+            write_generic_pack(run_dir, "scene_set", status="failed")
+
+            repair_paths = write_semantic_repair_prompt(
+                run_dir,
+                "scene_set",
+                round_number=1,
+                max_attempts=5,
+                errors=("semantic review status must be passed, got failed",),
+            )
+            prompt = repair_paths["prompt"].read_text(encoding="utf-8")
+
+        self.assertIn("stable narrative identity vs appearance variants", prompt)
+        self.assertIn("exact participants and subject-specific timelines", prompt)
+        self.assertIn("local per-scene value shift", prompt)
+        self.assertIn("monotonic declared location route", prompt)
+        self.assertIn("single earliest reveal/proof owner", prompt)
+        self.assertIn("actual role coverage", prompt)
+        self.assertIn("earliest-source-first synchronization", prompt)
+        self.assertIn("`story.md` -> `script.md` -> `video_manifest.md`", prompt)
+        self.assertIn("neighboring incoming/outgoing handoffs", prompt)
 
     def test_write_semantic_repair_prompt_lists_inline_failed_selectors(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:

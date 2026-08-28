@@ -30,7 +30,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from toc.grounding import resolve_review_policy, review_policy_state_entries, run_stage_grounding
-from toc.harness import append_state_snapshot
+from toc.harness import append_state_snapshot, parse_state_file
 
 
 @dataclass
@@ -70,24 +70,6 @@ def write_text(path: Path, content: str, force: bool) -> bool:
 
 def append_state_block(state_path: Path, kv: dict[str, str]) -> None:
     append_state_snapshot(state_path, kv)
-
-
-def parse_state_file(state_path: Path) -> dict[str, str]:
-    if not state_path.exists():
-        return {}
-    merged: dict[str, str] = {}
-    for raw in state_path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line == "---" or line.startswith("#"):
-            continue
-        if "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        k = k.strip()
-        v = v.strip().replace("\n", " ")
-        if k:
-            merged[k] = v
-    return merged
 
 
 def maybe_run_stage_grounding(run_dir: Path, stage: str, *, flow: str) -> None:

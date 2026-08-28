@@ -30,6 +30,7 @@ from toc.immersive_manifest import (
     story_scene_ids,
 )
 from toc.runtime_locks import sync_file_lock
+from toc.harness import append_state_snapshot
 from toc.script_narration import materialize_elevenlabs_tts_text, normalize_stability_profile, normalize_voice_tags
 
 
@@ -54,12 +55,7 @@ def replace_yaml_block(text: str, new_yaml: str) -> str:
 
 def append_state_block(state_path: Path, kv: dict[str, str]) -> None:
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{k}={v}" for k, v in kv.items()]
-    block = "\n".join(lines) + "\n---\n"
-    if state_path.exists():
-        state_path.write_text(state_path.read_text(encoding="utf-8") + block, encoding="utf-8")
-        return
-    state_path.write_text(block, encoding="utf-8")
+    append_state_snapshot(state_path, kv)
 
 
 def _normalized_id(value: Any) -> str | None:

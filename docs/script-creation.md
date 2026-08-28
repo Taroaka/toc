@@ -2072,6 +2072,10 @@ cut_contract:
       must_not_add: []
 ```
 
+### Existing-story value amplification
+
+既存物語 adaptation では、各 `scene_intent.scene_value_amplification` が story / visual value の同じ `value_id` を参照し、各 `cut_contract.expressive_contract` がその scene 増幅の一機能だけを担当する。`expressive_contract` は review / compilation source であり、内部 ID や抽象的な設計文を provider prompt へ直接流さない。key、enum、良い例・悪い例は [既存物語の価値増幅契約](adaptation-value-amplification.md) を正本とする。
+
 ### Cut Count and Split Rules
 
 - `by_distinct_semantic_obligations` は、同じ story fact をまとめた後の unique な non-duration `cut_assignments[].obligation_id(s)` 数にする。

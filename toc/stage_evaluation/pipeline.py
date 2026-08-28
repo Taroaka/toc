@@ -10,6 +10,12 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
+from toc.adaptation_value_contract import (
+    manifest_adaptation_issues,
+    script_adaptation_issues,
+    source_value_ids as adaptation_source_value_ids,
+    story_adaptation_issues,
+)
 from toc.harness import load_structured_document, parse_state_file
 from toc.story_duration import MINIMUM_EFFECTIVE_RATIO, audit_duration, normalize_target_duration
 
@@ -26,6 +32,11 @@ from .common import (
 
 SemanticReviewAppender = Callable[..., None]
 DurationProbe = Callable[[Path], float | None]
+
+
+def _declares_adaptation_contract(data: dict[str, Any], metadata_key: str) -> bool:
+    metadata = data.get(metadata_key)
+    return isinstance(metadata, dict) and "adaptation_value_contract" in metadata
 
 def compact_research_pack_ok(
     *,
@@ -208,6 +219,16 @@ def check_story(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, 
     details["chosen_candidate_id"] = chosen_id
 
     add_check(checks, "story.structured", bool(data), "story.md contains structured YAML output")
+    if _declares_adaptation_contract(data, "story_metadata"):
+        adaptation_issues = story_adaptation_issues(data)
+        add_check(
+            checks,
+            "story.adaptation_value_contract",
+            not adaptation_issues,
+            "declared adaptation source contract has stable values and preservation boundaries"
+            + (f" (issues: {', '.join(adaptation_issues[:8])})" if adaptation_issues else ""),
+            kind="rubric",
+        )
     add_check(checks, "story.candidates", 2 <= len(candidates) <= 4, f"selection has 2-4 candidates (got {len(candidates)})", kind="rubric")
     add_check(checks, "story.choice", non_empty(chosen_id), "chosen_candidate_id is set", kind="rubric")
     add_check(checks, "story.rationale", non_empty(rationale), "selection rationale is present", kind="rubric")
@@ -306,6 +327,26 @@ def check_script_single(
             + (f" (missing: {', '.join(missing_time_of_day[:8])})" if missing_time_of_day else ""),
             kind="rubric",
         )
+    if _declares_adaptation_contract(data, "script_metadata"):
+        story_data = load_structured_document(run_dir / "story.md")[1] if (run_dir / "story.md").exists() else {}
+        visual_value_data = (
+            load_structured_document(run_dir / "visual_value.md")[1]
+            if (run_dir / "visual_value.md").exists()
+            else {}
+        )
+        adaptation_issues = script_adaptation_issues(
+            data,
+            source_value_ids=adaptation_source_value_ids(story_data),
+            visual_value=visual_value_data,
+        )
+        add_check(
+            checks,
+            "script.adaptation_value_contract",
+            not adaptation_issues,
+            "declared adaptation value contract reaches every scene and cut with valid source value references"
+            + (f" (issues: {', '.join(adaptation_issues[:8])})" if adaptation_issues else ""),
+            kind="rubric",
+        )
     details: dict[str, Any] = {}
     require_scene_semantic = target_number in {410, 420} or target_number >= 500
     append_semantic_review(checks, details, run_dir=run_dir, stage="scene_set", required=require_scene_semantic)
@@ -348,6 +389,9 @@ def check_script_scene_series(
     append_grounding_checks(checks, run_dir=run_dir, stage="script")
 
     all_no_todo = True
+    adaptation_issues: list[str] = []
+    story_data = load_structured_document(run_dir / "story.md")[1] if (run_dir / "story.md").exists() else {}
+    visual_value_data = load_structured_document(run_dir / "visual_value.md")[1] if (run_dir / "visual_value.md").exists() else {}
     for path in script_paths:
         if not path.exists():
             all_no_todo = False
@@ -355,8 +399,36 @@ def check_script_scene_series(
         text = path.read_text(encoding="utf-8")
         if profile == "standard" and has_todo(text):
             all_no_todo = False
+        _scene_text, data = load_structured_document(path)
+        scene_data = data.get("scene") if isinstance(data.get("scene"), dict) else data
+        scenes = as_list(data.get("scenes")) or as_list(nested_get(data, ["script", "scenes"], []))
+        if not scenes and isinstance(scene_data, dict):
+            scenes = [scene_data]
+        scene_series_metadata = data.get("scene_script_metadata")
+        if isinstance(scene_series_metadata, dict) and "adaptation_value_contract" in scene_series_metadata:
+            normalized_data = {
+                **data,
+                "script_metadata": scene_series_metadata,
+                "scenes": scenes,
+            }
+            adaptation_issues.extend(
+                script_adaptation_issues(
+                    normalized_data,
+                    source_value_ids=adaptation_source_value_ids(story_data),
+                    visual_value=visual_value_data,
+                )
+            )
     if profile == "standard":
         add_check(checks, "script.scene_no_todo", all_no_todo, "scene scripts do not contain TODO/TBD markers", kind="rubric")
+    if adaptation_issues:
+        add_check(
+            checks,
+            "script.scene_series_adaptation_value_contract",
+            False,
+            "scene-series artifacts that declare adaptation_value_contract preserve the source-to-scene-to-cut lineage"
+            f" (issues: {', '.join(adaptation_issues[:8])})",
+            kind="rubric",
+        )
 
     details: dict[str, Any] = {"scene_count": len(scene_dirs)}
     require_scene_semantic = target_number in {410, 420} or target_number >= 500
@@ -471,6 +543,22 @@ def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[
         return make_stage("manifest", path.name, checks), updates
 
     text, data = load_structured_document(path)
+    if _declares_adaptation_contract(data, "video_metadata"):
+        story_data = load_structured_document(run_dir / "story.md")[1] if (run_dir / "story.md").exists() else {}
+        script_data = load_structured_document(run_dir / "script.md")[1] if (run_dir / "script.md").exists() else None
+        adaptation_issues = manifest_adaptation_issues(
+            data,
+            source_value_ids=adaptation_source_value_ids(story_data),
+            script=script_data,
+        )
+        add_check(
+            checks,
+            "manifest.adaptation_value_contract",
+            not adaptation_issues,
+            "declared adaptation value contract is an exact script projection through every scene and cut"
+            + (f" (issues: {', '.join(adaptation_issues[:8])})" if adaptation_issues else ""),
+            kind="rubric",
+        )
     append_grounding_checks(checks, run_dir=run_dir, stage="manifest")
     manifest_phase = str(data.get("manifest_phase") or "production").strip().lower()
     add_check(checks, "manifest.phase", manifest_phase == "production", f"video_manifest.md is production phase (got {manifest_phase or '(unset)'})", kind="rubric")
@@ -494,16 +582,44 @@ def check_manifest_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, 
 
     nested_ok = True
     phase_ok = True
+    adaptation_issues: list[str] = []
+    adaptation_declared = False
+    story_data = load_structured_document(run_dir / "story.md")[1] if (run_dir / "story.md").exists() else {}
     for path in manifest_paths:
         text, data = load_structured_document(path)
         local_checks: list[dict[str, Any]] = []
         if str(data.get("manifest_phase") or "production").strip().lower() != "production":
             phase_ok = False
+        if _declares_adaptation_contract(data, "video_metadata"):
+            adaptation_declared = True
+            script_path = path.parent / "script.md"
+            script_data = load_structured_document(script_path)[1] if script_path.exists() else {}
+            scene_script_metadata = script_data.get("scene_script_metadata")
+            if isinstance(scene_script_metadata, dict):
+                scene_data = script_data.get("scene") if isinstance(script_data.get("scene"), dict) else script_data
+                scenes = as_list(script_data.get("scenes")) or ([scene_data] if isinstance(scene_data, dict) else [])
+                script_data = {**script_data, "script_metadata": scene_script_metadata, "scenes": scenes}
+            adaptation_issues.extend(
+                manifest_adaptation_issues(
+                    data,
+                    source_value_ids=adaptation_source_value_ids(story_data),
+                    script=script_data,
+                )
+            )
         _manifest_checks(local_checks, text, data, profile=profile, flow="scene-series", path_label=path.name)
         if not all(check["passed"] for check in local_checks):
             nested_ok = False
     add_check(checks, "manifest.scene_phase", phase_ok, "scene manifests are in production phase", kind="rubric")
     add_check(checks, "manifest.scene_contracts", nested_ok, "scene manifests satisfy render contract checks", kind="rubric")
+    if adaptation_declared:
+        add_check(
+            checks,
+            "manifest.scene_series_adaptation_value_contract",
+            not adaptation_issues,
+            "scene-series manifests that declare adaptation_value_contract preserve exact script projection"
+            + (f" (issues: {', '.join(adaptation_issues[:8])})" if adaptation_issues else ""),
+            kind="rubric",
+        )
 
     updates = {"eval.manifest.score": f"{score_from_checks(checks):.4f}"}
     return make_stage("manifest", "scenes/*/video_manifest.md", checks, details={"scene_count": len(scene_dirs)}), updates
@@ -650,4 +766,3 @@ def check_video_scene_series(
     append_grounding_checks(checks, run_dir=run_dir, stage="video")
     append_semantic_review(checks, details, run_dir=run_dir, stage="video_motion", required=target_number >= 820)
     return make_stage("video", "scenes/*/video.mp4", checks, details=details), {}
-

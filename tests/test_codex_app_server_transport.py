@@ -130,6 +130,125 @@ def test_app_server_accepts_multi_megabyte_image_notification() -> None:
         asyncio.run(run_case(Path(tmp)))
 
 
+def test_stop_tolerates_process_exiting_before_terminate() -> None:
+    class AlreadyExitedProcess:
+        returncode = None
+
+        def __init__(self) -> None:
+            self.wait_calls = 0
+
+        def terminate(self) -> None:
+            raise ProcessLookupError
+
+        async def wait(self) -> int:
+            self.wait_calls += 1
+            self.returncode = 0
+            return 0
+
+    async def run_case() -> None:
+        client = CodexAppServerClient(cwd=Path("/tmp"))
+        proc = AlreadyExitedProcess()
+        client.proc = proc  # type: ignore[assignment]
+
+        await client.stop()
+
+        assert client.proc is None
+        assert proc.wait_calls == 1
+
+    asyncio.run(run_case())
+
+
+def test_stop_tolerates_process_exiting_before_kill() -> None:
+    class ExitsDuringShutdownProcess:
+        returncode = None
+
+        def __init__(self) -> None:
+            self.terminate_calls = 0
+            self.kill_calls = 0
+            self.wait_calls = 0
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+            raise ProcessLookupError
+
+        async def wait(self) -> int:
+            self.wait_calls += 1
+            self.returncode = 0
+            return 0
+
+    async def force_shutdown_timeout(awaitable, *, timeout: float) -> None:
+        assert timeout == 2
+        awaitable.close()
+        raise asyncio.TimeoutError
+
+    async def run_case() -> None:
+        client = CodexAppServerClient(cwd=Path("/tmp"))
+        proc = ExitsDuringShutdownProcess()
+        client.proc = proc  # type: ignore[assignment]
+
+        with patch(
+            "server.codex_app_server.asyncio.wait_for",
+            new=force_shutdown_timeout,
+        ):
+            await client.stop()
+
+        assert client.proc is None
+        assert proc.terminate_calls == 1
+        assert proc.kill_calls == 1
+        assert proc.wait_calls == 1
+
+    asyncio.run(run_case())
+
+
+def test_stop_keeps_stderr_stream_stable_while_process_reference_is_cleared() -> None:
+    class DelayedStderr:
+        def __init__(self, released: asyncio.Event) -> None:
+            self.released = released
+            self.reads = 0
+
+        async def readline(self) -> bytes:
+            self.reads += 1
+            if self.reads == 1:
+                await self.released.wait()
+                return b"late warning\n"
+            return b""
+
+    class ExitingProcess:
+        returncode = None
+
+        def __init__(self, released: asyncio.Event) -> None:
+            self.stderr = DelayedStderr(released)
+            self.released = released
+
+        def terminate(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            self.released.set()
+            await asyncio.sleep(0)
+            return 0
+
+    async def run_case() -> None:
+        released = asyncio.Event()
+        client = CodexAppServerClient(cwd=Path("/tmp"))
+        proc = ExitingProcess(released)
+        client.proc = proc  # type: ignore[assignment]
+        client._stderr_task = asyncio.create_task(
+            client._drain_stderr(proc.stderr)  # type: ignore[arg-type]
+        )
+
+        await client.stop()
+
+        assert client.proc is None
+        assert client._stderr_summary() == "late warning"
+
+    asyncio.run(run_case())
+
+
 def test_app_server_reader_failure_interrupts_turn_waiter() -> None:
     class BrokenStdout:
         async def readline(self) -> bytes:

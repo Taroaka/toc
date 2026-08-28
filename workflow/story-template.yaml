@@ -1,6 +1,8 @@
 # Minimal story output template (from docs/story-creation.md)
 story_metadata:
   topic: "string"
+  # 既存の評価済み物語を映像化する場合のみ、次のコメントを外す。original_story では key 自体を出力しない。
+  # adaptation_value_contract: "required_v1"
   # scene time-of-day 新契約の明示マーカー。Historical time の有無で代用しない。
   scene_time_of_day_contract: "required_v1"
   # time_of_day から導いた光源/明るさ/影/色温度の review evidence 契約。
@@ -10,6 +12,28 @@ story_metadata:
   source_research: "output/<topic>_<timestamp>/research.md"
   created_at: "ISO8601"
   pattern_used: "hidden_truth|counterintuitive|mystery|hero|emotional"
+
+# ここからは既存物語 adaptation の場合のみ出力する。
+# 原作の「何が起きるか」だけでなく、「なぜ観客に価値があるか」を下流まで追跡する正本。
+# creative invention や映像手段はここへ書かず、原作価値と変更禁止境界だけを固定する。
+adaptation_source_contract:
+  schema_version: "adaptation_source_contract_v1"
+  mode: "existing_story"
+  source_story_promise: "REPLACE_ME: この作品を知る観客から失ってはいけない中心的な約束"
+  core_values:
+    - value_id: "REPLACE_ME_STABLE_VALUE_ID"
+      statement: "REPLACE_ME: 原作で評価されている人間的・感情的・主題的価値"
+      audience_effect: "REPLACE_ME: その価値が成立したとき観客に起こす感情・認識"
+      source_event_refs:
+        - "REPLACE_ME: research/story の根拠 event ID"
+  non_negotiable_events:
+    - "REPLACE_ME: 圧縮はできても消去・逆転できない出来事"
+  non_negotiable_meanings:
+    - "REPLACE_ME: 出来事を残しても解釈を歪めてはいけない意味"
+  iconic_moments:
+    - "REPLACE_ME: 観客が再体験を期待する象徴的瞬間"
+  forbidden_value_distortions:
+    - "REPLACE_ME: 現代化・スペクタクル化で起こりやすい原作価値の改悪"
 
 subagent_trace:
   - subagent_id: "story-candidate-audit-001"

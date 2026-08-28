@@ -88,7 +88,31 @@ output/<topic>_<timestamp>/state.txt
 output/<topic>_<timestamp>/p000_index.md
 ```
 
-更新方式は **追記型**（最新のブロックが現在状態）。
+更新方式は **append-only delta event** とする。各 transaction block は変更された key と transaction metadata だけを持ち、block 単体を完全 snapshot とみなさない。current state は先頭から全 committed block を順に適用し、同じ key の最後の値を採用した結果である。
+
+```text
+# toc.state.delta.v1 {event envelope JSON}
+timestamp=ISO8601
+slot.p410.status=in_progress
+review.semantic.scene_set.status=reviewing
+---
+```
+
+storage contract:
+
+- `state.txt` は唯一の canonical state history。履歴を置換、truncate、過去bytesへrestoreしない。
+- 一つの process update に含まれる複数 key は、一つの atomic delta event として commit する。
+- state key taxonomy と value の string contract は従来どおり維持する。storage移行だけを理由に business key を二重化しない。
+- explicit empty string は key clear の有効な値であり、削除と解釈しない。
+- writer は shared state store APIだけを使用し、read-current、merge、append、current-view publishを同じtransaction lock内で行う。
+- 各delta envelopeの`state_hash`は、そのevent適用後のcurrent state全体digest。`event_hash`の入力にも含め、末尾eventだけを読むbounded I/Oで派生view本文をcanonical historyへ暗号学的に束縛する。
+- `state.current.json` は canonical log head の `sequence / event hash / committed bytes / log inode・mtime・ctime / run-root identity / state_hash` に束縛した derived materialized view。current state digestと直近128件のderived event indexを持つが、processは直接編集しない。明示event IDのretry判定はこのindexを権威として使わず、常にcanonical logをstream scanしてexact判定する。
+- `run_status.json` と `p000_index.md` は current view から再生成する表示用derived artifactであり、state mutationの入力正本にしない。
+- current view がmissing / stale / corruptならcanonical logをreplayして再構築する。legacy runの最初のrebuildだけfull history readを許容する。
+- legacy full / partial blockはglobal last-write-winsでreplayし、その後へdelta eventを追加できる。delta開始後にlegacy writerがblockを追加することは禁止する。
+- p500 resumeなどのpseudo rollbackは過去eventを削除せず、downstream keyをneutralizeする一つのnamed delta eventとして記録する。
+- plan tokenはparsed state digestに加えcanonical event headの`sequence / hash`へ束縛する。
+- event commit後にprojectionまたはartifact coordinationが失敗してもcanonical logを巻き戻さず、recovery journal / compensating event / projection rebuildで収束させる。
 
 ```text
 timestamp=ISO8601
@@ -1354,7 +1378,7 @@ semantic QA は生成前の設計 artifact に対する横断契約であり、s
 - 生成済み output stage の `asset_output`, `scene_image`, `video_clip`, `render` は canonical semantic review stage ではない。実画像・動画・最終 render の良否は deterministic output validator と frontend human review / final QA が判定する
 - semantic review が `passed` でない場合、改善点をその stage の production-side agent に渡して canonical artifact を修正し、同じ contextless semantic review agent が再レビューする。これは画像生成だけの例外処理ではなく、下記の canonical semantic review stages すべてに適用する。修正中は process slot を次工程へ進めず、`review.semantic.<stage>.loop.status=repairing` と `review.semantic.<stage>.repair.status=in_progress` で semantic QA 修正中であることを state に残す。再レビューが `passed` になった時だけ次工程へ進み、最大試行回数でも通らない場合は当該 semantic QA slot を `failed` にする
 - semantic QA / producer repair の timeout は固定の総作業時間制限ではなく no-progress watchdog とする。Codex app-server の turn notification、semantic report、producer report、修正対象 artifact のいずれかが更新されている間は改善中として待つ。観測可能な進捗が止まった場合だけ `review.semantic.<stage>.watchdog.status=no_progress_timeout` とし、これは意味判定 failure ではなく transport/runtime block として扱う
-- `scene_detail` の per-scene shard review で transport timeout が起きた場合、semantic failure / producer repair には入れず、該当 shard だけを `TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS` 回まで再実行する。既定は 3 回。pass 済み shard は再実行しない。retry で復帰した shard は `review.semantic.scene_detail.shards.<scene>.transport.status=recovered` にする。使い切った shard が scene に局所化できる場合は、その scene に属する `image_generation_requests.md` item だけを `blocked` / synthetic failed candidate として frontend に表示し、他 scene の画像生成は続行する。`scene_detail`, `cut_blueprint`, `image_prompt` の semantic `failed_selectors` / `blocked_entries` が scene/cut image item に局所化できる場合も同じく該当 image item だけを blocked にし、他 scene の画像生成は続行する。局所化できない transport failure は `runtime.stage=semantic_review_blocked_transport` で画像生成前に停止し、局所化できない semantic failure は `review.semantic.<stage>.localization.status=not_localized` と理由を state / app_server log に残す
+- `scene_set` / `scene_detail` の per-scene shard review で transport timeout が起きた場合、semantic failure / producer repair には入れず、該当 shard だけを再実行する。`scene_set` は `TOC_SCENE_SET_TRANSPORT_RETRY_ATTEMPTS`、`scene_detail` は `TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS` を使い、既定はいずれも 3 回。pass 済み shard は同一 review attempt 内で再実行しない。terminal verdict 欠落や digest / reviewed_entries 不一致などの output-contract failure も、`scene_set` では該当 shard だけを1回再実行し、stage 全件の外側 retry は重ねない。`scene_set` の各 shard は対象 scene の compact projection と全 scene の ordered compact context を読み、因果順、reveal ownership、location route、participants / role coverage、daypart continuity、handoff を局所 entry と全体順序の両方から判定する。canonical collection の heading は scope entry と exactly once かつ同順で一致し、各 section は exactly one JSON fence、fence 外は空白のみ、duplicate key のない JSON object、`payload.id` は heading と同じ string を満たさなければ provider 起動前に `semantic_review_selector_coverage_invalid` で fail-close する。collection 欠落・読込不能も failed aggregate と `coverage.status=invalid` を残す。canonical scope は `review_generation_id`, `review_generation_collection_sha256`, `entry_projection_sha256s` を持ち、shard scope は同じ generation id、canonical collection/input/scope hash、対象 entry projection hash を束縛する。provider 前後と canonical aggregate 公開前後で一致を再検証し、同一 run/stage の publication は cross-process lock で直列化する。並列上限 `TOC_SCENE_SET_REVIEW_CONCURRENCY` の既定は 6。retry で復帰した shard は `review.semantic.<stage>.shards.<scene>.transport.status=recovered` にする。使い切った `scene_detail` shard が scene に局所化できる場合は、その scene に属する `image_generation_requests.md` item だけを `blocked` / synthetic failed candidate として frontend に表示し、他 scene の画像生成は続行する。`scene_detail`, `cut_blueprint`, `image_prompt` の semantic `failed_selectors` / `blocked_entries` が scene/cut image item に局所化できる場合も同じく該当 image item だけを blocked にし、他 scene の画像生成は続行する。局所化できない transport failure は `runtime.stage=semantic_review_blocked_transport` で画像生成前に停止し、局所化できない semantic failure は `review.semantic.<stage>.localization.status=not_localized` と理由を state / app_server log に残す
 - 局所継続の正本は state の allow flag 単体ではなく、`logs/review/semantic/partial_media_projection.json`（`toc.partial_media_projection.v1`）と `partial_media_generation_receipt.json`（`toc.partial_media_generation_receipt.v2`）の組である。projection は current scene request revision / snapshot hash、current semantic scope / report hash、stage ごとの selector 対応、blocked / survivor item、synthetic failed candidate を digest に束縛する。receipt は同じ projection digest / request revision に加えて、実際に provider へ送った `provider_submitted_item_ids`、current provenance を再利用して provider へ送らなかった `reused_item_ids`、検証済み output を持つ `generated_item_ids`、current request を満たした全 survivor の `satisfied_item_ids`、送らなかった blocked item を別々の真値集合として束縛する。submitted と reused は互いに素で、その和集合、generated、satisfied はいずれも current survivor と完全一致しなければならない。verifier は両 artifact を current source から再導出して state の4集合も含め完全一致を確認し、blocked destination に regular file、symlink、broken symlink、FIFO、socket、directory のいずれかが残る場合、survivor output / provenance が欠ける場合、全 item が blocked の場合は fail-close にする。p680 terminal gate 自体には semantic / output failure の例外リストを設けず、valid projection / receipt を評価した全 emitted check / stage と overall が pass の場合だけ合格とする
 - `image_prompt` semantic review は scene ごとの shard（その scene の cut entries + scene composite）で実行する。canonical scope の全 selector は exactly once で shard に割り当てる。zero / missing / duplicate / unexpected selector、collection section の欠落、reviewer の `reviewed_entries` 不一致は `semantic_review_selector_coverage_invalid` として fail-closed にする。並列上限は `TOC_IMAGE_PROMPT_REVIEW_CONCURRENCY`、transport retry は失敗 shard のみを対象にし、`review.semantic.image_prompt.shards.<scene>.*` に局所状態を保存する。
 
@@ -1394,7 +1418,7 @@ Pack / runner commands:
 - `python scripts/build-semantic-review-pack.py --run-dir <run_dir> --stage <stage>`
 - `python scripts/run-semantic-review.py --run-dir <run_dir> --stage <stage>`
 
-`scripts/run-semantic-review.py` は既定で repair loop を有効にするが、既定の最大試行回数は 1 回なので通常は修正再試行しない。検証用途では `--no-repair-loop` も使える。最大試行回数は `--max-attempts` または `TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS` で指定できる。
+`scripts/run-semantic-review.py` は既定で repair loop を有効にする。最大試行回数の既定は `scene_set` が 3 回、その他の stage が 2 回で、`--max-attempts` または有効な `TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS` を明示した場合はその値を優先する。不正な環境変数値は stage 別の既定へ戻す。検証用途では `--no-repair-loop` も使える。
 `--timeout-seconds` と `--repair-timeout-seconds` は総作業時間の上限ではなく、semantic report、repair report、source artifact、app-server activity marker が更新されない場合の no-progress watchdog として扱う。改善中の artifact 更新や app-server 通知が観測されている間は semantic loop を継続し、無進捗の場合だけ `review.semantic.<stage>.watchdog.status=no_progress_timeout` を state に残して停止する。
 
 実装者の責務:
@@ -2945,6 +2969,19 @@ video_generation:
 
 各 issue は `blocking: true`、`group`、`message`、`value` を持つ。provider prompt を直接修正して消すのではなく、対応する canonical start / motion / environment / emotion / end field を具体化して再 compile する。
 
+## Existing-story adaptation value lineage
+
+新規の既存物語 adaptation は `adaptation_value_contract: required_v1` を metadata に宣言し、次の一方向 lineage を保持する。
+
+```text
+adaptation_source_contract.core_values[].value_id
+  -> adaptation_intent.source_value_ids[]
+  -> scene_value_amplification.source_value_refs[]
+  -> cut_contract.expressive_contract.source_value_refs[]
+```
+
+key と意味の正本は `docs/adaptation-value-amplification.md`、形の正本は各 `workflow/*template*`、局所 shape / enum / reference integrity は `toc/adaptation_value_contract.py` とする。marker がない legacy artifact は、この契約の欠落だけでは fail させない。
+
 ## Video Prompt Materialization / Stale Gate
 
 frontend/server、CLI、scene storyboard は、provider 実行前に同じ compiler output を対象 cut / render unit の `video_generation.api_prompt_payload` へ保存し、`video_generation_requests.md` に exact prompt と metadata を投影する。CLI の materialize-only は manifest payload と review artifact を保存するが approval ではなく、未承認 item を自動で `approved` にしない。
@@ -2995,3 +3032,90 @@ video_request_materialization:
 `approved_by` / `approved_at` は誰がいつ承認操作をしたかを残す audit metadata であり、request identity ではない。metadata が存在しても `status` と 3 つの approval identity binding が current でなければ生成しない。
 
 不在、pending / missing approval、obsolete version、hash mismatch、design digest drift、setting / reference bytes / execution-option drift は stale request として拒否する。editable `prompt_authoring_source` や review Markdown を provider call 時に再解釈しない。修正は canonical design または authoring source へ戻し、payload と review projection を再 materialize / 再 review / 再承認する。
+
+## Scene acceptance contract（authoring 前倒し）
+
+scene-set の意味品質を後段 reviewer だけに任せないため、新規 artifact は script authoring 前に `scene_set_authoring_contract_v1` を作成する。これは scene prose や reviewer report の要約ではなく、全 scene の deterministic ownership と参照整合を凍結する実行正本である。
+
+### Artifact と marker
+
+```yaml
+scene_set_authoring_contract:
+  schema_version: scene_set_authoring_contract_v1
+  generation_id: scene-authoring-<id>
+  criterion_registry_version: scene_acceptance_criteria_v1
+  criterion_registry_sha256: sha256:<hex>
+  source_bindings:
+    authoring_source_ledger:
+      path: logs/authoring/staging/<generation_id>/source_ledger.json
+      sha256: sha256:<raw-file-hex>
+    story: {path: story.md, sha256: sha256:<raw-file-hex>}
+    visual_value: {path: visual_value.md, sha256: sha256:<raw-file-hex>}
+  source_refs:
+    - source_ref_id: source-event-01
+      artifact: authoring_source_ledger
+      artifact_sha256: sha256:<raw-file-hex>
+      pointer: /events/0
+      expected_id: source_event_01
+  canonical_events: []
+  evidence_catalog: []
+  reveal_ledger: []
+  handoff_chain: []
+  transition_cues: []
+  scenes: []
+authoring_preflight:
+  status: pending
+  contract_digest: ""
+  criterion_registry_digest: ""
+  source_digest: ""
+  preflight_digest: ""
+  checks: []
+  blocking_reason_keys: []
+```
+
+`script.md` は契約全体を持ち、`scene_outline` / scene draft は `contract_digest` と `scene_slice_digest` を持つ該当 scene の projection だけを持つ。`video_manifest.md` は契約全体を複製せず、canonical script path、contract digest、scene slice digest、preflight digestを投影する。これにより、複数 artifact が event ownership や reveal state の別々の authoring rootになることを防ぐ。
+
+`source_refs[].artifact` は file path ではなく `source_bindings` の key を exact reference する。未登録 key、binding と異なる digest、提供されていない参照先は fail-close とする。隣接 scene で時刻または `location_sequence` が変わる場合は transition cue を必須にし、cue の `from_*` / `to_*` は両 scene の時刻・場所と完全一致させる。
+
+marker がない legacy artifact は読み取り互換とする。ただし、marker が存在する場合は `schema_version`、未知 ID、duplicate key、source pointer、digest、cross-field invariant を fail-close で検証する。部分的な新契約を legacy fallback へ静かに降格してはならない。
+
+### Authoring の責務境界
+
+| 層 | 正本 | hard gate / 判定 |
+| --- | --- | --- |
+| planner | `scene_set_authoring_contract_v1` | event ownership、順序、reveal、role、handoff、time/location、source ref |
+| scene author | `scene_draft_v1` と contract slice | 契約 ID を参照した具体 event / evidence / visible action |
+| authoring preflight | `authoring_preflight`（derived） | exact ID coverage、state、equality、closure。provider call不要 |
+| independent reviewer | frozen contract + canonical artifact | causal proof、story-specificity、価値増幅、残存 cross-scene 意味矛盾 |
+
+planner の contract が矛盾する場合は scene prose を継ぎ足して回避せず planner へ戻す。author は `owner_scene_id`、canonical order、reveal owner、source digestを変更できない。source meaning や event ownership を変える修正は human approval に送る。
+
+### Digest / state / invalidation
+
+contract / scene slice / preflight / registry digest は domain-separated canonical JSON の SHA-256 とし、`sha256:<lowercase hex>` 形式で保存する。一方、`source_bindings.*.sha256` と `source_refs[].artifact_sha256` は JSON を含め常に保存 file の raw bytes を hash し、空白・改行・duplicate-key表現を含むbyte差分を stale とする。contract digest から derived `authoring_preflight` を除外し、scene slice digest は contract digest と scene ID を含める。preflight digest は generation、contract、criterion registry、source、ordered scene draft digest、check resultを束ねる。source / contract / registry / generation が変わった場合、旧 preflight と semantic review scope は stale として無効化する。
+
+run の append-only state には少なくとも次を残す。
+
+設計初期の表記 `artifact.scene_set_authoring_contract.digest` は非canonicalな文書aliasであり、stateへ二重書きしない。実装上の正本は次の `authoring.scene_set.*` keyである。
+
+```text
+authoring.scene_set.contract.status=validated
+authoring.scene_set.contract.path=logs/authoring/staging/<generation_id>/contract.json
+authoring.scene_set.contract.digest=sha256:<hex>
+authoring.scene_set.generation_id=scene-authoring-<id>
+authoring.scene_set.preflight.status=passed|invalidated|failed
+authoring.scene_set.preflight.digest=sha256:<hex>
+authoring.scene_set.preflight.source_digest=sha256:<hex>
+authoring.scene_set.preflight.criterion_registry_digest=sha256:<hex>
+review.semantic.scene_set.shift_left_escape.status=detected
+review.semantic.scene_set.shift_left_escape.count=0
+review.semantic.scene_set.shift_left_escape.reason_keys=
+review.semantic.scene_set.shift_left_escape.preflight_digest=sha256:<hex>
+review.semantic.scene_set.shift_left_escape.routing=authoring_contract_defect
+```
+
+`shift_left_escape.count` は final reviewer が deterministic-owned criterion を発見した件数であり、passへの変換や producer repair の根拠にはしない。preflight が pass するまで cut coverage、image request、video manifest production materializationを開始しない。known-bad fixture は provider call 0回で停止し、corrected fixture は preflight後にのみ downstreamへ進む。
+
+### Criterion registry との束縛
+
+authoring prompt、validator、final reviewer は同じ `criterion_id` と canonical reason keyを参照する。registry entry は最低限 `owner`（`deterministic` / `authoring_semantic` / `independent_semantic`）、`first_enforced_stage`、`semantic_recheck_stages`、`provider_repair_allowed`、必要入力、authoring instruction、reviewer instructionを持つ。deterministic criterion は scene_detail / cut_blueprint でprovider再審査せず、scope digestのcurrentnessだけを検証する。

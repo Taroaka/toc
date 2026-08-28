@@ -4,7 +4,7 @@
 
 ## 1. Principle
 
-ToC の収益化は、YouTube 広告収益や民話制作代行を中心に置かない。個人が ToC を使って動画を作り、副業の検証または個人ブランドの構築を継続できる提供形態を中心に設計する。
+ToC の収益化は、YouTube 広告収益や民話制作代行を中心に置かない。副業に取り組む個人と小規模ビジネス運営者が、画像・動画制作を継続できる system delivery を中心に設計する。
 
 ```text
 content / ad
@@ -22,11 +22,11 @@ content / ad
 
 ### Side business
 
-The user pays to reduce the time, learning, and operational burden required to test video ideas. Do not sell guaranteed income.
+The user pays to reduce the time, learning, and operational burden required to test image / video ideas. Do not sell guaranteed income.
 
-### Personal brand
+### Small business operator
 
-The user pays to turn expertise and worldview into consistent, repeatable video publishing. Do not sell generic AI output as a brand solution.
+The user pays to turn product、service、knowledge、and business judgment into consistent, reusable image / video assets. Personal brand is one owner-led business use case; do not sell generic AI output as a business solution.
 
 ## 3. Offer architecture
 
@@ -62,7 +62,7 @@ Required pages:
 
 - common home
 - side-business LP
-- personal-brand LP
+- small-business LP
 - examples / proof
 - how it works
 - contact / idea intake
@@ -83,10 +83,10 @@ Before selling side-business value:
 - show how lower production burden increases the ability to test
 - do not claim or imply guaranteed revenue
 
-Before selling brand value:
+Before selling small-business value:
 
-- show brand brief, series consistency, and human approval
-- demonstrate that different creators do not collapse into the same style
+- show business brief、intended audience、use case、reuse、and human approval
+- demonstrate that the output preserves business-specific knowledge and does not collapse into generic AI content
 
 ## 6. Acquisition sequence
 
@@ -97,7 +97,7 @@ Before selling brand value:
 5. Validate native form and end-to-end attribution
 6. Test organic packaging for each persona
 7. Turn winning hooks into persona-specific Meta creatives
-8. Optimize for qualified consultation, proposal, closed won, and first-video start
+8. Optimize for qualified consultation, proposal, closed won, and first-output start by output mode
 9. Validate unit economics and continued use before scaling ad spend
 
 Paid acquisition is not ready to scale until:
@@ -112,8 +112,8 @@ Thread 3 records price response and objections but does not independently set th
 
 ## 7. Reply principles
 
-- repeat the visitor's video idea, not a generic sales greeting
+- repeat the visitor's image / video idea, not a generic sales greeting
 - clarify audience, desired outcome, format, and available time
 - never promise views, revenue, or brand growth
 - explain what ToC handles and what the user must decide
-- route side-business and personal-brand leads to different follow-up questions
+- route side-business and small-business leads to different follow-up questions; classify personal brand as a small-business use case

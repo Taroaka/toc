@@ -6,7 +6,14 @@ import datetime as dt
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from toc.harness import append_state_snapshot
 
 
 def now_iso() -> str:
@@ -27,12 +34,7 @@ def sanitize_topic(topic: str) -> str:
 
 def append_state_block(state_path: Path, kv: dict[str, str]) -> None:
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{k}={v}" for k, v in kv.items()]
-    block = "\n".join(lines) + "\n---\n"
-    if state_path.exists():
-        state_path.write_text(state_path.read_text(encoding="utf-8") + block, encoding="utf-8")
-        return
-    state_path.write_text(block, encoding="utf-8")
+    append_state_snapshot(state_path, kv)
 
 
 def tmux_send_two_calls(target: str, message: str) -> None:

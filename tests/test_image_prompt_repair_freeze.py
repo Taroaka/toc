@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import tempfile
 import unittest
@@ -31,6 +32,7 @@ from toc.semantic_review import (
     semantic_review_input_digest,
     semantic_review_scope_binding_sha256,
 )
+from toc.run_root_binding import RunRootBindingError, bind_run_root
 
 
 def _plan(moment: str) -> dict[str, object]:
@@ -438,6 +440,88 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
             self.assertEqual(payload["policy_version"], "image_api_prompt_v2")
             self.assertEqual(payload["drawable_prompt_ir"]["dependencies"]["time_of_day"], "夕方")
             self.assertIn("このシーンの時間帯は夕方", payload["prompt"])
+
+    def test_recompile_rejects_replaced_bound_run_root_without_touching_replacement(
+        self,
+    ) -> None:
+        """A recompile must remain pinned to its original run inode throughout.
+
+        This swaps the named run root after the compiler has received the visual
+        plan but before the recompiled manifest can be published.  The decoy
+        replacement is intentionally complete enough to look like a real run;
+        it must remain byte-for-byte untouched.
+        """
+
+        with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
+            run_dir = Path(td) / "run"
+            run_dir.mkdir()
+            _write_v2_revision_fixture(run_dir)
+            original_manifest = (run_dir / "video_manifest.md").read_bytes()
+            original_identity = os.stat(run_dir, follow_symlinks=False)
+
+            parked_run = Path(td) / "parked-run"
+            replacement = Path(td) / "replacement-run"
+            replacement.mkdir()
+            replacement_manifest = replacement / "video_manifest.md"
+            replacement_manifest.write_text(
+                "replacement manifest must not change\n",
+                encoding="utf-8",
+            )
+            replacement_sentinel = replacement / "sentinel.txt"
+            replacement_sentinel.write_text(
+                "replacement sentinel must not change\n",
+                encoding="utf-8",
+            )
+            expected_replacement_manifest = replacement_manifest.read_bytes()
+            expected_replacement_sentinel = replacement_sentinel.read_bytes()
+
+            original_compile = image_gen_app.compile_image_api_prompt_v2
+            swapped = False
+
+            def compile_then_replace_root(*args: object, **kwargs: object) -> dict[str, object]:
+                nonlocal swapped
+                payload = original_compile(*args, **kwargs)
+                os.rename(run_dir, parked_run)
+                os.rename(replacement, run_dir)
+                swapped = True
+                return payload
+
+            try:
+                with self.assertRaisesRegex(
+                    RunRootBindingError,
+                    "bound run (directory )?identity changed",
+                ):
+                    with bind_run_root(
+                        run_dir,
+                        expected_identity=(
+                            original_identity.st_dev,
+                            original_identity.st_ino,
+                        ),
+                    ):
+                        with patch(
+                            "server.image_gen_app.compile_image_api_prompt_v2",
+                            side_effect=compile_then_replace_root,
+                        ):
+                            image_gen_app._recompile_image_prompt_payloads_from_plans(
+                                run_dir
+                            )
+            finally:
+                if swapped:
+                    os.rename(run_dir, replacement)
+                    os.rename(parked_run, run_dir)
+
+            self.assertEqual(
+                (replacement / "video_manifest.md").read_bytes(),
+                expected_replacement_manifest,
+            )
+            self.assertEqual(
+                (replacement / "sentinel.txt").read_bytes(),
+                expected_replacement_sentinel,
+            )
+            self.assertEqual(
+                (run_dir / "video_manifest.md").read_bytes(),
+                original_manifest,
+            )
 
     def test_freeze_binds_exact_manifest_markdown_and_snapshot_revision(self) -> None:
         with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
@@ -1543,6 +1627,64 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
         self.assertTrue(commands[1][1].endswith("review-image-prompt-story-consistency.py"))
         self.assertIn(str(run_dir / "video_manifest.md"), commands[1])
         self.assertIn(str(run_dir / "image_prompt_story_review.md"), commands[1])
+
+    def test_sync_uses_precompiled_selectors_without_recompiling_manifest(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
+            run_dir = Path(td)
+            _write_v2_revision_fixture(run_dir)
+            with (
+                patch(
+                    "server.image_gen_app._recompile_image_prompt_payloads_from_plans",
+                ) as recompile,
+                patch(
+                    "server.image_gen_app.subprocess.run",
+                    return_value=Mock(returncode=0, stdout="", stderr=""),
+                ),
+            ):
+                image_gen_app._synchronize_image_prompt_repair_outputs(
+                    run_dir,
+                    precompiled_selectors=["scene1_cut1"],
+                )
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        recompile.assert_not_called()
+        self.assertEqual(
+            state["review.semantic.image_prompt.repair.request_sync.compiled_count"],
+            "1",
+        )
+        self.assertEqual(
+            state["review.semantic.image_prompt.repair.request_sync.compiled_selectors"],
+            "scene1_cut1",
+        )
+
+    def test_failed_request_sync_restores_precompiled_manifest_revision(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
+            run_dir = Path(td)
+            _write_v2_revision_fixture(run_dir)
+            manifest_path = run_dir / "video_manifest.md"
+            approved_manifest = manifest_path.read_bytes()
+
+            def fail_after_manifest_write(*_args: object, **_kwargs: object) -> Mock:
+                manifest_path.write_text("stale request revision\n", encoding="utf-8")
+                return Mock(returncode=1, stdout="", stderr="request failed")
+
+            with (
+                patch(
+                    "server.image_gen_app._recompile_image_prompt_payloads_from_plans",
+                ) as recompile,
+                patch(
+                    "server.image_gen_app._run_bound_subprocess",
+                    side_effect=fail_after_manifest_write,
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "request failed"):
+                    image_gen_app._synchronize_image_prompt_repair_outputs(
+                        run_dir,
+                        precompiled_selectors=["scene1_cut1"],
+                    )
+
+            recompile.assert_not_called()
+            self.assertEqual(manifest_path.read_bytes(), approved_manifest)
 
 
 if __name__ == "__main__":

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import fcntl
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -18,11 +20,14 @@ from toc.image_request_snapshot import (
 from toc import partial_media
 from toc.run_root_binding import (
     RunRootBindingError,
+    RunFilePostAppendError,
     append_run_file_text,
+    append_run_file_bytes_inplace,
     bind_run_root,
     current_run_root_binding,
     list_run_directory_entry_names,
     read_run_file_bytes,
+    run_file_append_transaction,
     require_bound_run_root,
     unlink_run_file,
     write_run_file_text,
@@ -30,6 +35,24 @@ from toc.run_root_binding import (
 
 
 class RunRootBindingTests(unittest.TestCase):
+    def test_cleanup_root_failure_overrides_a_projection_primary_error(self) -> None:
+        from toc import run_root_binding
+
+        primary = RunFilePostAppendError("projection failed")
+
+        with self.assertRaisesRegex(RunRootBindingError, "root changed"):
+            run_root_binding._run_cleanup_actions(
+                primary,
+                [
+                    (
+                        "verifying run root",
+                        lambda: (_ for _ in ()).throw(
+                            RunRootBindingError("root changed")
+                        ),
+                    )
+                ],
+            )
+
     def test_relative_run_root_helpers_do_not_repeat_the_run_path(self) -> None:
         workspace = Path.cwd()
         with tempfile.TemporaryDirectory(
@@ -759,6 +782,494 @@ class RunRootBindingTests(unittest.TestCase):
             self.assertEqual(
                 outside.read_text(encoding="utf-8"),
                 "runtime.stage=outside\n---\n",
+            )
+
+    def test_bound_state_parse_uses_serialized_run_file_reader(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            (run_dir / "state.txt").write_text(
+                "runtime.stage=reviewing\n---\n",
+                encoding="utf-8",
+            )
+            opened = run_dir.stat()
+            identity = opened.st_dev, opened.st_ino
+
+            with bind_run_root(run_dir, expected_identity=identity):
+                with patch(
+                    "toc.harness.read_regular_file_nofollow",
+                    side_effect=AssertionError(
+                        "bound state reads must share append serialization"
+                    ),
+                ):
+                    state = parse_state_file(run_dir / "state.txt")
+
+            self.assertEqual(state["runtime.stage"], "reviewing")
+
+    def test_state_parse_waits_for_cow_append_publication(self) -> None:
+        from toc import run_root_binding
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            (run_dir / "state.txt").write_text(
+                "runtime.stage=prepared\n---\n",
+                encoding="utf-8",
+            )
+
+            exchange_ready = threading.Event()
+            release_exchange = threading.Event()
+            reader_waiting = threading.Event()
+            writer_errors: list[BaseException] = []
+            reader_errors: list[BaseException] = []
+            reader_states: list[dict[str, str]] = []
+            real_exchange = run_root_binding._exchange_names_reconciled
+            real_flock = fcntl.flock
+
+            def pause_before_publication(*args, **kwargs):
+                exchange_ready.set()
+                if not release_exchange.wait(timeout=5):
+                    raise TimeoutError("test did not release COW publication")
+                return real_exchange(*args, **kwargs)
+
+            def observe_reader_lock(descriptor: int, operation: int):
+                if (
+                    threading.current_thread().name == "state-reader"
+                    and operation in {fcntl.LOCK_SH, fcntl.LOCK_EX}
+                ):
+                    reader_waiting.set()
+                return real_flock(descriptor, operation)
+
+            def write_state() -> None:
+                try:
+                    append_run_file_text(
+                        run_dir,
+                        "state.txt",
+                        "runtime.stage=reviewing\n---\n",
+                    )
+                except BaseException as exc:
+                    writer_errors.append(exc)
+
+            def read_state() -> None:
+                try:
+                    reader_states.append(parse_state_file(run_dir / "state.txt"))
+                except BaseException as exc:
+                    reader_errors.append(exc)
+
+            with (
+                patch.object(
+                    run_root_binding,
+                    "_exchange_names_reconciled",
+                    side_effect=pause_before_publication,
+                ),
+                patch.object(
+                    run_root_binding.fcntl,
+                    "flock",
+                    side_effect=observe_reader_lock,
+                ),
+            ):
+                writer = threading.Thread(target=write_state, name="state-writer")
+                writer.start()
+                self.assertTrue(exchange_ready.wait(timeout=5))
+
+                reader = threading.Thread(target=read_state, name="state-reader")
+                reader.start()
+                self.assertTrue(reader_waiting.wait(timeout=5))
+
+                release_exchange.set()
+                writer.join(timeout=5)
+                reader.join(timeout=5)
+
+            self.assertFalse(writer.is_alive())
+            self.assertFalse(reader.is_alive())
+            self.assertEqual(writer_errors, [])
+            self.assertEqual(reader_errors, [])
+            self.assertEqual(reader_states[0]["runtime.stage"], "reviewing")
+
+    def test_inplace_append_preserves_inode_and_writes_only_new_record(self) -> None:
+        from toc import run_root_binding
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            state_path = run_dir / "state.txt"
+            state_path.write_bytes(b"legacy=1\n---\n")
+            before = state_path.stat()
+            record = b"# toc.state.delta.v1 {}\nvalue=2\n---\n"
+            writes: list[bytes] = []
+            real_write_all = run_root_binding._write_all
+
+            def observe_write(descriptor: int, data: bytes) -> None:
+                writes.append(bytes(data))
+                return real_write_all(descriptor, data)
+
+            identity = run_dir.stat()
+            with bind_run_root(
+                run_dir,
+                expected_identity=(identity.st_dev, identity.st_ino),
+            ):
+                with (
+                    patch.object(
+                        run_root_binding,
+                        "_write_all",
+                        side_effect=observe_write,
+                    ),
+                    patch.object(
+                        run_root_binding,
+                        "atomic_exchange_names",
+                        side_effect=AssertionError(
+                            "in-place append must not publish a COW replacement"
+                        ),
+                    ),
+                ):
+                    result = append_run_file_bytes_inplace(
+                        run_dir,
+                        "state.txt",
+                        record,
+                        expected_head_size=before.st_size,
+                    )
+
+            after = state_path.stat()
+            self.assertEqual(result, state_path)
+            self.assertEqual(
+                (after.st_dev, after.st_ino),
+                (before.st_dev, before.st_ino),
+            )
+            self.assertEqual(state_path.read_bytes(), b"legacy=1\n---\n" + record)
+            self.assertEqual(writes, [record])
+
+    def test_inplace_append_rejects_stale_expected_head_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            state_path = run_dir / "state.txt"
+            state_path.write_bytes(b"head\n---\n")
+            before = state_path.read_bytes()
+
+            with self.assertRaises(RunRootBindingError):
+                append_run_file_bytes_inplace(
+                    run_dir,
+                    "state.txt",
+                    b"must-not-append\n---\n",
+                    expected_head_size=len(before) - 1,
+                )
+
+            self.assertEqual(state_path.read_bytes(), before)
+
+    def test_inplace_append_full_write_loop_preserves_one_record(self) -> None:
+        from toc import run_root_binding
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            state_path = run_dir / "state.txt"
+            state_path.write_bytes(b"head\n---\n")
+            record = b"event=short-writes\n---\n"
+            calls: list[bytes] = []
+            real_write = os.write
+
+            def short_write(descriptor: int, data: bytes | memoryview) -> int:
+                remaining = bytes(data)
+                calls.append(remaining)
+                return real_write(descriptor, remaining[:1])
+
+            with patch.object(
+                run_root_binding.os,
+                "write",
+                side_effect=short_write,
+            ):
+                append_run_file_bytes_inplace(run_dir, "state.txt", record)
+
+            self.assertGreater(len(calls), 1)
+            self.assertEqual(
+                state_path.read_bytes(),
+                b"head\n---\n" + record,
+            )
+            self.assertEqual(state_path.read_bytes().count(record), 1)
+
+    def test_inplace_append_serializes_concurrent_writers_without_lost_records(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            state_path = run_dir / "state.txt"
+            state_path.write_bytes(b"seed=1\n---\n")
+            writer_count = 16
+            barrier = threading.Barrier(writer_count)
+            errors: list[BaseException] = []
+
+            def write_record(index: int) -> None:
+                try:
+                    barrier.wait(timeout=5)
+                    append_run_file_bytes_inplace(
+                        run_dir,
+                        "state.txt",
+                        f"event-{index}=committed\n---\n".encode(),
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            writers = [
+                threading.Thread(
+                    target=write_record,
+                    args=(index,),
+                    name=f"delta-writer-{index}",
+                )
+                for index in range(writer_count)
+            ]
+            for writer in writers:
+                writer.start()
+            for writer in writers:
+                writer.join(timeout=10)
+
+            self.assertTrue(all(not writer.is_alive() for writer in writers))
+            self.assertEqual(errors, [])
+            data = state_path.read_bytes()
+            self.assertTrue(data.startswith(b"seed=1\n---\n"))
+            for index in range(writer_count):
+                record = f"event-{index}=committed\n---\n".encode()
+                self.assertEqual(data.count(record), 1)
+
+    def test_inplace_append_rejects_symlink_fifo_and_hardlink_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            outside = parent / "outside.txt"
+            outside.write_bytes(b"outside\n")
+
+            symlink_run = parent / "symlink-run"
+            symlink_run.mkdir()
+            (symlink_run / "state.txt").symlink_to(outside)
+            with self.assertRaises(RunRootBindingError):
+                append_run_file_bytes_inplace(
+                    symlink_run,
+                    "state.txt",
+                    b"must-not-follow\n",
+                )
+
+            fifo_run = parent / "fifo-run"
+            fifo_run.mkdir()
+            os.mkfifo(fifo_run / "state.txt")
+            with self.assertRaises(RunRootBindingError):
+                append_run_file_bytes_inplace(
+                    fifo_run,
+                    "state.txt",
+                    b"must-not-open\n",
+                )
+
+            hardlink_run = parent / "hardlink-run"
+            hardlink_run.mkdir()
+            os.link(outside, hardlink_run / "state.txt")
+            with self.assertRaises(RunRootBindingError):
+                append_run_file_bytes_inplace(
+                    hardlink_run,
+                    "state.txt",
+                    b"must-not-touch\n",
+                )
+
+            self.assertEqual(outside.read_bytes(), b"outside\n")
+
+    def test_inplace_append_rejects_symlink_fifo_and_hardlink_locks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            outside = parent / "outside-lock.txt"
+            outside.write_bytes(b"lock\n")
+
+            for label in ("symlink", "fifo", "hardlink"):
+                run_dir = parent / f"{label}-run"
+                run_dir.mkdir()
+                state_path = run_dir / "state.txt"
+                state_path.write_bytes(b"head\n---\n")
+                lock_path = run_dir / ".state.txt.append.lock"
+                if label == "symlink":
+                    lock_path.symlink_to(outside)
+                elif label == "fifo":
+                    os.mkfifo(lock_path)
+                else:
+                    os.link(outside, lock_path)
+
+                with self.subTest(lock_kind=label):
+                    with self.assertRaises(RunRootBindingError):
+                        append_run_file_bytes_inplace(
+                            run_dir,
+                            "state.txt",
+                            b"must-not-append\n---\n",
+                        )
+                    self.assertEqual(state_path.read_bytes(), b"head\n---\n")
+
+            self.assertEqual(outside.read_bytes(), b"lock\n")
+
+    def test_append_transaction_reads_and_appends_under_one_exclusive_lock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            state_path = run_dir / "state.txt"
+            state_path.write_bytes(b"head=1\n---\n")
+            callback_entered = threading.Event()
+            release_callback = threading.Event()
+            competing_done = threading.Event()
+            errors: list[BaseException] = []
+
+            def merge(descriptor: int, current_size: int) -> bytes:
+                current = os.pread(descriptor, current_size, 0)
+                self.assertEqual(current, b"head=1\n---\n")
+                self.assertEqual(current_size, len(current))
+                callback_entered.set()
+                if not release_callback.wait(timeout=5):
+                    raise TimeoutError("test did not release append callback")
+                return b"callback=2\n---\n"
+
+            def competing_writer() -> None:
+                try:
+                    append_run_file_bytes_inplace(
+                        run_dir,
+                        "state.txt",
+                        b"competing=3\n---\n",
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    competing_done.set()
+
+            callback_thread = threading.Thread(
+                target=lambda: run_file_append_transaction(
+                    run_dir,
+                    "state.txt",
+                    merge,
+                ),
+                name="callback-writer",
+            )
+            callback_thread.start()
+            self.assertTrue(callback_entered.wait(timeout=5))
+
+            competing_thread = threading.Thread(
+                target=competing_writer,
+                name="competing-writer",
+            )
+            competing_thread.start()
+            self.assertFalse(competing_done.wait(timeout=0.2))
+            release_callback.set()
+
+            callback_thread.join(timeout=10)
+            competing_thread.join(timeout=10)
+            self.assertFalse(callback_thread.is_alive())
+            self.assertFalse(competing_thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                state_path.read_bytes(),
+                b"head=1\n---\ncallback=2\n---\ncompeting=3\n---\n",
+            )
+
+    def test_append_transaction_keeps_writer_locked_through_post_append(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            state_path = run_dir / "state.txt"
+            state_path.write_bytes(b"head=1\n---\n")
+            post_entered = threading.Event()
+            release_post = threading.Event()
+            competing_done = threading.Event()
+            errors: list[BaseException] = []
+
+            def post_append(_descriptor: int, new_size: int) -> None:
+                self.assertEqual(new_size, state_path.stat().st_size)
+                post_entered.set()
+                if not release_post.wait(timeout=5):
+                    raise TimeoutError("test did not release post-append hook")
+
+            def primary() -> None:
+                try:
+                    run_file_append_transaction(
+                        run_dir,
+                        "state.txt",
+                        lambda _descriptor, _size: b"primary=2\n---\n",
+                        post_append=post_append,
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            def competing() -> None:
+                try:
+                    append_run_file_bytes_inplace(
+                        run_dir,
+                        "state.txt",
+                        b"competing=3\n---\n",
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    competing_done.set()
+
+            primary_thread = threading.Thread(target=primary)
+            primary_thread.start()
+            self.assertTrue(post_entered.wait(timeout=5))
+            competing_thread = threading.Thread(target=competing)
+            competing_thread.start()
+            self.assertFalse(competing_done.wait(timeout=0.2))
+            release_post.set()
+            primary_thread.join(timeout=10)
+            competing_thread.join(timeout=10)
+
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                state_path.read_bytes(),
+                b"head=1\n---\nprimary=2\n---\ncompeting=3\n---\n",
+            )
+
+    def test_append_transaction_does_not_downgrade_root_binding_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            state_path = run_dir / "state.txt"
+            state_path.write_bytes(b"initial\n")
+
+            def fail_root_binding(_descriptor: int, _size: int) -> None:
+                raise RunRootBindingError("root changed")
+
+            with self.assertRaisesRegex(RunRootBindingError, "root changed"):
+                run_file_append_transaction(
+                    run_dir,
+                    "state.txt",
+                    lambda _descriptor, _size: b"committed\n",
+                    post_append=fail_root_binding,
+                )
+
+            self.assertEqual(state_path.read_bytes(), b"initial\ncommitted\n")
+
+    def test_append_transaction_does_not_eagerly_read_history(self) -> None:
+        from toc import run_root_binding
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            state_path = run_dir / "state.txt"
+            history = b"legacy=value\n---\n" * 128
+            state_path.write_bytes(history)
+            observed: list[tuple[int, int]] = []
+
+            def append_without_read(descriptor: int, current_size: int) -> bytes:
+                observed.append((descriptor, current_size))
+                return b"delta=only\n---\n"
+
+            with patch.object(
+                run_root_binding.os,
+                "pread",
+                side_effect=AssertionError(
+                    "append callback must choose its own read range"
+                ),
+            ):
+                run_file_append_transaction(
+                    run_dir,
+                    "state.txt",
+                    append_without_read,
+                )
+
+            self.assertEqual(observed[0][1], len(history))
+            self.assertEqual(
+                state_path.read_bytes(),
+                history + b"delta=only\n---\n",
             )
 
     def test_bound_append_rolls_back_a_late_hardlink_substitution(self) -> None:

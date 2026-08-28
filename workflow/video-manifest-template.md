@@ -15,6 +15,9 @@ manifest_phase: "skeleton"
 # === メタ情報 ===
 video_metadata:
   topic: "<topic>"
+  # 既存物語 adaptation の場合のみ、次のコメントを外して script metadata から exact projection する。
+  # original_story では key 自体を出力しない。
+  # adaptation_value_contract: "required_v1"
   # script_metadata.scene_time_of_day_contract の exact one-way projection。
   scene_time_of_day_contract: "required_v1"
   # script_metadata.scene_time_of_day_visual_basis_contract の exact one-way projection。
@@ -31,6 +34,21 @@ video_metadata:
   experience: "cinematic_story"
   aspect_ratio: "9:16"
   resolution: "1080x1920"
+
+# === Scene acceptance projection（script.mdを正本とする） ===
+# 会話履歴を使わず、script.mdの凍結契約とstage grounding readsetだけを読む。
+# 契約全体を複製しない。scene authoring / preflightを通過した digestだけを projection する。
+# manifestで event ownership / reveal / role を再authoringしない。
+scene_acceptance_projection:
+  schema_version: "scene_acceptance_projection_v1"
+  source_script: "output/<topic>_<timestamp>/script.md#/scene_set_authoring_contract"
+  generation_id: "scene-authoring-<id>"
+  contract_digest: "sha256:<hex>"
+  criterion_registry_version: "scene_acceptance_criteria_v1"
+  criterion_registry_sha256: "sha256:<hex>"
+  source_digest: "sha256:<hex>"
+  preflight_digest: "sha256:<hex>"
+  scene_slice_digests: []
 
 # p700 script.mdからの一方向projection。manifest上で独立authoringしない。
 audio_story_plan:
@@ -273,6 +291,16 @@ canonical_event_coverage_matrix:
 # scene/cut duration合計をvideo_metadataの計画尺へ整合させる。
 scenes:
   - scene_id: 1   # dotted numeric string も可: 3.1
+    # script.md の frozen contract slice / preflight の read-only projection。
+    # manifest authorはevent ownership、reveal state、role bindingを再計算しない。
+    scene_acceptance_projection:
+      schema_version: "scene_acceptance_scene_projection_v1"
+      scene_id: 1
+      generation_id: "scene-authoring-<id>"
+      contract_digest: "sha256:<hex>"
+      scene_slice_digest: "sha256:<hex>"
+      preflight_digest: "sha256:<hex>"
+      preflight_status: "passed"
     # script.md の同一 scene から一方向 projection する open string。新規 artifact では非空必須。
     # contract marker がない Legacy の missing/empty だけ、読み込み時に "" として扱い、時間帯 prompt fragment を生成しない。
     # 同一 scene の cut image にだけ適用し、reusable asset へは時間帯 variant を明示した場合を除いて付与しない。
@@ -351,6 +379,24 @@ scenes:
       target_duration_seconds: 8
       estimated_duration_seconds: 8
       story_purpose: "この scene が物語全体で担う役割"
+      # script.md の同sceneからexact projectionする価値増幅契約。内部IDはprovider proseへ直送しない。
+      scene_value_amplification:
+        schema_version: "scene_value_amplification_v1"
+        source_value_refs: ["REPLACE_ME_STORY_VALUE_ID"]
+        why_this_scene_matters: "原作全体に対してこのsceneが不可欠な理由"
+        audience_state_before: "scene開始時の観客状態"
+        audience_state_after: "scene終了時の観客状態"
+        emotional_contradiction: "同時に存在する相反感情や圧力"
+        cinematic_gain:
+          performance: "呼吸、視線、抑制、身体反応の具体差"
+          blocking_and_space: "距離、遮蔽、孤立、接近、退路の変化"
+          camera_and_composition: "認識、見せる順序、構図の変化"
+          edit_and_rhythm: "hold、reaction、reveal、余韻"
+          sound: "環境音、沈黙、音の先行・残響"
+        iconic_moment_target: "再体験・再発見させる一瞬"
+        must_preserve_story_facts: ["このsceneで変えてはいけない原作事実"]
+        must_not_reduce_to: ["説明絵や美麗な壁紙への縮退"]
+        success_evidence: ["映像だけでも価値増幅が成立したと分かる証拠"]
       dramatic_question: "この scene の間、観客が追う問い"
       scene_spine: "setup → pressure → turn → payoff → handoff の1文要約"
       value_shift:
@@ -487,6 +533,20 @@ scenes:
           notes: ""
         cut_contract:
           schema_version: "3.0"
+          # scene価値のうち、このcutが担当する一つの表現機能。review/compile sourceでありprovider直送禁止。
+          expressive_contract:
+            schema_version: "cut_expressive_contract_v1"
+            source_value_refs: ["REPLACE_ME_STORY_VALUE_ID"]
+            scene_amplification_ref: "scene1.scene_intent.scene_value_amplification"
+            audience_experience_delta: "このcut前後の観客体験差"
+            expressive_function: "recognition|withhold|pressure|release|contrast|reaction|reframe|afterimage|spectacle|transition"
+            performance_beat: "表情ラベルではなく観察可能な演技beat"
+            visual_pressure: "画面内で圧力を作る距離・遮蔽・運動・光"
+            attention_shift: "観客の注意を何から何へ移すか"
+            edit_trigger: "このcutへ入り、次へ切る観察可能な契機"
+            sound_function: "環境音、沈黙、音の先行・残響の役割"
+            emotional_afterimage: "cut後に残す感覚"
+            must_not_reduce_to: ["genericな説明ショットへの縮退"]
           source_event_contract:
             primary_event_beat_id: "scene1_event_setup"
             source_event_beat_ids: ["scene1_event_setup"]

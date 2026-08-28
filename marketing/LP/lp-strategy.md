@@ -1,6 +1,6 @@
 # ToC LP strategy
 
-更新日: 2026-08-08
+更新日: 2026-08-09
 
 用途: ToC の LP 部門における、調査、情報設計、copy、proof、conversion、法務、accessibility、performance、検証の正本。
 
@@ -10,7 +10,7 @@ LP は機能カタログではない。訪問者が次の順序で判断でき�
 
 ```text
 これは自分の問題だ
-  -> 動画を作る意味がある
+  -> 画像・動画を作る意味がある
   -> ToC なら制作の障壁を下げられる
   -> 提供形態と費用を理解できる
   -> proof と限界を確認できる
@@ -21,7 +21,7 @@ LP は機能カタログではない。訪問者が次の順序で判断でき�
 
 ## 2. Offer facts
 
-- product: 企画、台本、scene、画像、動画、音声、編集、品質確認を一つの流れにする ToC 動画作成システム
+- product: 企画、構成、画像、動画、音声、編集、品質確認を一つの流れにする ToC ビジュアル制作システム
 - delivery: 顧客の利用環境へシステム一式を納品
 - ToC monthly fee: 納品後 0 円
 - external cost: AI model、image / video / voice generation、cloud 等の外部 API 料金は別途、使用量に応じて発生
@@ -40,11 +40,11 @@ LP は機能カタログではない。訪問者が次の順序で判断でき�
 
 `月額0円` を `無料` と言い換えない。外部 API 料金と初期導入費を同じ視界に置く。
 
-## 3. 動画が伝えられる情報的価値
+## 3. 画像・動画が伝えられる情報的価値
 
-動画の価値は「動くから目立つ」だけではない。言葉、図像、動き、音声、時間軸を対応させ、情報を理解・判断・再利用できる形に変えることで生まれる。
+画像・動画の価値は「目立つ」だけではない。言葉、図像、動き、音声、時間軸を目的に合わせ、情報を理解・判断・再利用できる形に変えることで生まれる。
 
-| 情報価値 | 動画でできること | ToC LP で見せる proof |
+| 情報価値 | 画像・動画でできること | 紹介ページで見せる根拠 |
 |----------|------------------|------------------------|
 | 抽象を可視化する | 概念、関係、世界観、見えない変化を図像と動きへ変える | 一行のテーマと完成 scene の対比 |
 | 順序を理解させる | 手順、因果、before / after、時間変化を同じ時間軸で示す | production flow / tutorial example |
@@ -66,13 +66,13 @@ Cambridge の multimedia learning research は、内容に対応する words と
   -> 推測ではなく公開後の反応で次を判断できる
 ```
 
-個人ブランド persona:
+小規模ビジネス persona:
 
 ```text
-動画を作れる
-  -> 頭の中の知識、経験、考え方を見える形にできる
-  -> 検索、共有、再視聴できる発信資産として蓄積できる
-  -> 自分の名前と専門領域を結ぶ証拠が増える
+画像・動画を作れる
+  -> 商品、サービス、知識を見れば分かる形にできる
+  -> 素材、表現基準、採用判断を事業へ蓄積できる
+  -> 外注のたびに説明し直さず、改善・再利用できる
 ```
 
 禁止する飛躍:
@@ -89,11 +89,11 @@ Cambridge の multimedia learning research は、内容に対応する words と
 1. Hero: `あなたの想いを、映像に。` を入口に、visitor outcome と mechanism を順に見せる
 2. Problem: 分断された tool と制作工程で、企画が完成しない
 3. Informational value: 説明だけでは伝わりにくいものを、見れば分かる形へ
-4. Mechanism: one-line idea から完成動画までの Idea-to-Video Line
-5. Persona split: 副業 / 個人ブランド
+4. Mechanism: 一行の案から画像セットまたは完成動画までの制作の流れ
+5. 顧客層の分岐: 副業 / 小規模ビジネス
 6. Delivery and cost: システム納品、ToC 月額 0 円、外部 API 別途
 7. Proof and boundary: 完成例、時間、human work、API cost、revision、human approval
-8. CTA: 用途を一行で入力して相談
+8. 行動: 作りたい画像・動画を一行で入力して相談
 9. Footer: 事業者情報、取引条件、privacy、外部 API 費用注記
 
 mobile では各 section を `結論 -> 1 visual -> 根拠 -> 1 CTA` の順にし、横並びを前提にしない。primary CTA は一種類に揃え、ページ内の再掲は同じ action と label を使う。
@@ -105,16 +105,29 @@ mobile では各 section を `結論 -> 1 visual -> 根拠 -> 1 CTA` の順に�
 ```text
 あなたの想いを、映像に。
 
-知識も、物語も、世界観も。
-人の心へ届く一本に。
+一枚の画像から、一本の動画まで。
 
-企画・台本・映像・音声・編集を、ひとつの制作フローへ。
-ToC は、あなたが動画を作り続けるためのシステム一式を納品します。
+企画、構成、画像、動画、音声、編集を、ひとつの制作の流れへ。
+ToC は、あなたが画像・動画を作り続けるためのシステム一式を納品します。
 
-[自分の用途で導入できるか相談する]
+[作りたい画像・動画を一行で入力する]
 ```
 
-Hero は `0 秒: brand line -> 3 秒: visitor outcome -> 10 秒: mechanism` の順に progressive disclosure する。`0 秒` は内部設計用語であり、外向けの脳科学的主張には使わない。速度は reason-to-believe とし、比較可能な実測が揃うまでは `動画制作を、もっと速く、もっと簡単に。` を使う。
+最上部は `0秒: ブランドの言葉 -> 3秒: 制作範囲 -> 10秒: 実現方法` の順に見せる。`0秒` は内部設計用語であり、外向けの脳科学的主張には使わない。速度は信じる理由として下位へ置き、比較可能な実測が揃うまでは `画像も動画も、もっと速く、もっと簡単に。` を使う。
+
+### Hero visual direction
+
+最上部は、同じ事例の実在する依頼内容と採用済み完成物を一つの視界に置く。見出しや句点へ操作を加えず、依頼と完成物の対応自体を記憶点にする。最初の販売対象に合わせ、主実例は副業向け動画とし、画像一括生成の実例は制作範囲の証明として次に置く。
+
+既存 draft `marketing/test/lp-proposal-01/drafts-before-section-design/01-hero.png` は、旧 functional headline、electric-blue の速度表現、floating process cards、actual proof に束縛されていない video mock を使っているため archive / comparison 用とする。新 Hero の実装正本にはしない。
+
+変更後の原則:
+
+- process diagram より actual input / output を先に見せる
+- glow や粒子で AI 感を作らず、actual brief、contact sheet、video frame、proof metadata という制作物固有の語彙を使う
+- copy、proof、action の3責務以外の装飾を first viewport から外す
+- animation を待たなくても意味が成立する
+- mobile では proof を H1 直後に置き、工程を横並びへ圧縮しない
 
 Hero の offer note:
 
@@ -136,7 +149,7 @@ Hero の offer note:
 ### Delivery
 
 ```text
-借り続ける動画サービスではなく、
+借り続ける制作サービスではなく、
 作り続けるためのシステムを手元へ。
 ```
 
@@ -157,32 +170,50 @@ LP へ出す example は完成映像だけでなく、次を同じ card また�
 
 実測が揃うまでは `圧倒的`、時間短縮率、費用削減率を公開しない。
 
+### Claim-to-proof contract
+
+| Claim | Required proof |
+|-------|----------------|
+| `あなたの想い` | actual initial brief / original text or theme |
+| `映像に` | 同じ brief から作られた再生可能な accepted output |
+| `人の心へ届く` | target audience / intended change。実際に届いたと断定する場合は audience response |
+| `ひとつの制作フロー` | stage ownership、human decisions、revision history |
+| `速く、簡単に` | elapsed time、active human time、comparison boundary |
+| `続けられる` | second / third video で再利用した brief、asset、series rule |
+
+Hero では少なくとも `actual brief -> accepted output -> creator acceptance` を満たす。actual output が mythology / folklore だけの場合は examples library へ置き、common Hero の primary proof にしない。
+
 ## 7. Conversion and measurement
 
-Primary conversion:
+主な問い合わせ行動:
 
-`自分の用途で導入できるか相談する`
+`作りたい画像・動画を一行で入力する`
 
-form はサイト内に置き、最初に `作りたい動画` と persona を取り、contact details は後にする。Google Forms / Notion は canonical public route にしない。
+この共通ボタンの言葉はスレッド2の推奨案であり、最終承認は `workstream-handoffs.md` の引き継ぎ001でスレッド1へ依頼する。顧客層別の行動ボタンは上流の決定を使う。
+
+フォームはサイト内に置き、最初に `作りたい画像・動画` を取り、顧客層と制作形式を別々に選ばせ、連絡先は後にする。Google Forms / Notion は正式な公開経路にしない。
 
 minimum events:
 
 - `view_lp`
 - `view_information_value`
 - `view_delivery_model`
-- `select_persona`
+- `select_customer_segment`
+- `select_production_mode`
 - `start_idea_input`
 - `start_lead_form`
 - `generate_lead`
 
 検証順:
 
-1. 5 秒テスト: 何のサービス、誰向け、何が違うか
-2. offer comprehension: 初期費用、月額 0 円、API 別途を正しく説明できるか
-3. persona message test
-4. CTA click / form start
-5. qualified lead / consultation quality
-6. 実際の導入と継続制作
+1. 1 秒テスト: `自分の想いを映像にするサービス` と理解できる
+2. 3 秒テスト: 画像から動画までの制作範囲と、実在する依頼・完成物の対応を指差せる
+3. 10 秒テスト: 統合制作システムの納品サービスであり、単純な月額 SaaS ではないと分かる
+4. offer comprehension: 初期費用、月額 0 円、API 別途を正しく説明できる
+5. persona message test
+6. CTA click / form start
+7. qualified lead / consultation quality
+8. 実際の導入と継続制作
 
 ## 8. Accessibility / performance / legal
 

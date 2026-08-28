@@ -6,6 +6,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+from toc.adaptation_value_contract import (
+    manifest_adaptation_issues,
+    source_value_ids as adaptation_source_value_ids,
+)
 from toc.harness import load_structured_document
 from toc.immersive_manifest import dotted_id_sort_key, make_scene_cut_selector
 from toc.review_loop import (
@@ -20,6 +24,7 @@ from toc.review_loop import (
     review_input_digest,
     review_input_snapshot_issues,
 )
+from toc.semantic_pack_scene import scene_acceptance_currentness_issues
 from toc.story_duration import (
     MAX_TARGET_DURATION_SECONDS,
     MINIMUM_EFFECTIVE_RATIO,
@@ -221,7 +226,29 @@ def _script_readiness_issues_from_run(
     readiness_issues = _scene_readiness_issues(scenes)
     issues.extend(readiness_issues)
     issues.extend(_scene_event_readiness_issues(scenes, prefix="script"))
-    if _review_status(data, "cut_blueprint_review") not in {"approved", "passed"}:
+    script_metadata = as_dict(data.get("script_metadata"))
+    authoring_preflight = as_dict(data.get("authoring_preflight"))
+    acceptance_marker = str(
+        script_metadata.get("scene_acceptance_contract") or ""
+    ).strip()
+    acceptance_marker_declared = bool(acceptance_marker)
+    acceptance_marker_present = acceptance_marker == "required_v1"
+    acceptance_currentness_issues = (
+        scene_acceptance_currentness_issues(data, run_dir)
+        if acceptance_marker_declared
+        else []
+    )
+    acceptance_preflight_passed = (
+        acceptance_marker_present
+        and str(authoring_preflight.get("status") or "").strip().lower()
+        == "passed"
+        and not acceptance_currentness_issues
+    )
+    issues.extend(acceptance_currentness_issues)
+    accepted_cut_blueprint_statuses = {"approved", "passed"}
+    if acceptance_preflight_passed:
+        accepted_cut_blueprint_statuses.add("pending_independent_review")
+    if _review_status(data, "cut_blueprint_review") not in accepted_cut_blueprint_statuses:
         issues.append("script.cut_blueprint_review_approved")
     renderable_scenes = [scene for scene in scenes if isinstance(scene, dict) and str(scene.get("kind") or "").strip() != "reference"]
     missing_cuts = [
@@ -646,6 +673,8 @@ def _append_immersive_manifest_checks(
     profile: str,
     path_label: str,
     is_production: bool,
+    run_dir: Path | None = None,
+    script_data: dict[str, Any] | None = None,
 ) -> None:
     experience = nested_get(data, ["video_metadata", "experience"])
     prompt_mentions_text_rule = ("画面内テキスト" in body_text) or ("No on-screen text" in body_text)
@@ -685,6 +714,51 @@ def _append_immersive_manifest_checks(
         emotion_film_issues: list[str] = []
         composite_issues: list[str] = []
         triangulation_issues: list[str] = []
+        scene_acceptance_projection = as_dict(
+            data.get("scene_acceptance_contract")
+        )
+        acceptance_projection_present = bool(scene_acceptance_projection)
+        acceptance_currentness_issues = (
+            scene_acceptance_currentness_issues(
+                script_data,
+                run_dir,
+                manifest=data,
+            )
+            if acceptance_projection_present
+            and isinstance(script_data, dict)
+            and run_dir is not None
+            else (
+                ["scene_acceptance.script_binding_missing"]
+                if acceptance_projection_present
+                else []
+            )
+        )
+        acceptance_preflight_passed = bool(
+            acceptance_projection_present
+            and str(
+                scene_acceptance_projection.get("preflight_status") or ""
+            ).strip().lower()
+            == "passed"
+            and not acceptance_currentness_issues
+        )
+        if acceptance_projection_present:
+            add_check(
+                checks,
+                f"{path_label}.scene_acceptance_current",
+                not acceptance_currentness_issues,
+                "manifest scene acceptance projection matches current script/source/preflight"
+                + (
+                    f" (issues: {', '.join(acceptance_currentness_issues[:8])})"
+                    if acceptance_currentness_issues
+                    else ""
+                ),
+                kind="rubric",
+            )
+        accepted_composite_statuses = (
+            {"passed", "approved", "preflight_passed"}
+            if acceptance_preflight_passed
+            else {"passed", "approved"}
+        )
         for index, scene in enumerate(scenes, start=1):
             if not isinstance(scene, dict) or str(scene.get("kind") or "").strip().endswith("_reference"):
                 continue
@@ -702,7 +776,7 @@ def _append_immersive_manifest_checks(
                     emotion_film_issues.extend(values)
             if is_production:
                 composite = as_dict(scene.get("scene_composite_review"))
-                if not composite or str(composite.get("status") or "").strip().lower() not in {"passed", "approved"}:
+                if not composite or str(composite.get("status") or "").strip().lower() not in accepted_composite_statuses:
                     composite_issues.append(f"scene{scene_id}:scene_composite_review")
                 else:
                     for key in (
@@ -766,7 +840,17 @@ def _append_immersive_manifest_checks(
             )
 
 
-def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[str, Any], *, profile: str, flow: str, path_label: str) -> None:
+def _manifest_checks(
+    checks: list[dict[str, Any]],
+    body_text: str,
+    data: dict[str, Any],
+    *,
+    profile: str,
+    flow: str,
+    path_label: str,
+    run_dir: Path | None = None,
+    script_data: dict[str, Any] | None = None,
+) -> None:
     add_check(checks, f"{path_label}.structured", bool(data), f"{path_label} contains structured YAML output")
     if not data:
         return
@@ -937,6 +1021,8 @@ def _manifest_checks(checks: list[dict[str, Any]], body_text: str, data: dict[st
             profile=profile,
             path_label=path_label,
             is_production=is_production,
+            run_dir=run_dir,
+            script_data=script_data,
         )
 
 
@@ -1044,12 +1130,36 @@ def check_manifest_single(
         _script_text, loaded_script_data = load_structured_document(script_path)
         if isinstance(loaded_script_data, dict):
             script_data = loaded_script_data
+    story_path = run_dir / "story.md"
+    story_data = load_structured_document(story_path)[1] if story_path.exists() else {}
+    adaptation_issues = manifest_adaptation_issues(
+        data,
+        source_value_ids=adaptation_source_value_ids(story_data),
+        script=script_data,
+    )
+    add_check(
+        checks,
+        "manifest.adaptation_value_contract",
+        not adaptation_issues,
+        "declared adaptation value contract is an exact script projection through every scene and cut"
+        + (f" (issues: {', '.join(adaptation_issues[:8])})" if adaptation_issues else ""),
+        kind="rubric",
+    )
     body_text = flatten_without_keys(data, excluded={"cut_contract", "scene_contract", "review_contract", "evaluation_contract"}) or text
     _append_grounding_checks(checks, run_dir=run_dir, stage="manifest")
     raw_manifest_phase = data.get("manifest_phase")
     manifest_phase = str(raw_manifest_phase or "production").strip().lower()
     add_check(checks, "manifest.phase", manifest_phase == "production", f"video_manifest.md is production phase (got {manifest_phase or '(unset)'})", kind="rubric")
-    _manifest_checks(checks, body_text, data, profile=profile, flow=flow, path_label="manifest")
+    _manifest_checks(
+        checks,
+        body_text,
+        data,
+        profile=profile,
+        flow=flow,
+        path_label="manifest",
+        run_dir=run_dir,
+        script_data=script_data,
+    )
     if flow == "immersive":
         add_check(
             checks,
@@ -1186,6 +1296,8 @@ def check_manifest_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, 
 
     nested_ok = True
     phase_ok = True
+    adaptation_issues: list[str] = []
+    story_data = load_structured_document(run_dir / "story.md")[1] if (run_dir / "story.md").exists() else {}
     for path in manifest_paths:
         text, data = load_structured_document(path)
         local_checks: list[dict[str, Any]] = []
@@ -1193,10 +1305,36 @@ def check_manifest_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, 
         if str(data.get("manifest_phase") or "production").strip().lower() != "production":
             phase_ok = False
         _manifest_checks(local_checks, body_text, data, profile=profile, flow="scene-series", path_label=path.name)
+        script_path = path.parent / "script.md"
+        scene_script_data = load_structured_document(script_path)[1] if script_path.exists() else {}
+        scene_script_metadata = scene_script_data.get("scene_script_metadata")
+        if isinstance(scene_script_metadata, dict):
+            scene_data = scene_script_data.get("scene") if isinstance(scene_script_data.get("scene"), dict) else scene_script_data
+            scenes = as_list(scene_script_data.get("scenes")) or ([scene_data] if isinstance(scene_data, dict) else [])
+            scene_script_data = {
+                **scene_script_data,
+                "script_metadata": scene_script_metadata,
+                "scenes": scenes,
+            }
+        adaptation_issues.extend(
+            manifest_adaptation_issues(
+                data,
+                source_value_ids=adaptation_source_value_ids(story_data),
+                script=scene_script_data,
+            )
+        )
         if not all(check["passed"] for check in local_checks):
             nested_ok = False
     add_check(checks, "manifest.scene_phase", phase_ok, "scene manifests are in production phase", kind="rubric")
     add_check(checks, "manifest.scene_contracts", nested_ok, "scene manifests satisfy render contract checks", kind="rubric")
+    add_check(
+        checks,
+        "manifest.scene_series_adaptation_value_contract",
+        not adaptation_issues,
+        "scene-series manifests that declare adaptation_value_contract preserve exact script projection"
+        + (f" (issues: {', '.join(adaptation_issues[:8])})" if adaptation_issues else ""),
+        kind="rubric",
+    )
     rubric_scores = {
         "beat_clarity": 1.0 if nested_ok else 0.4,
         "visual_specificity": 1.0 if nested_ok else 0.4,

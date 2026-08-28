@@ -23,6 +23,10 @@ class RunRootBindingError(ValueError):
     """The lexical run path no longer names the pinned directory inode."""
 
 
+class RunFilePostAppendError(RuntimeError):
+    """A canonical append committed but its lock-held projection hook failed."""
+
+
 @dataclass
 class _RunRootBindingLifetime:
     active: bool = True
@@ -436,6 +440,12 @@ def _run_cleanup_actions(
                     f"{label} also failed: "
                     f"{type(error).__name__}: {error}"
                 )
+        binding_failure = next(
+            (error for _label, error in errors if isinstance(error, RunRootBindingError)),
+            None,
+        )
+        if binding_failure is not None and isinstance(primary, RunFilePostAppendError):
+            raise binding_failure from primary
         return
     label, error = errors[0]
     add_note = getattr(error, "add_note", None)
@@ -806,7 +816,10 @@ def _remove_name_or_raise(
 def _write_all(descriptor: int, data: bytes) -> None:
     remaining = memoryview(data)
     while remaining:
-        written = os.write(descriptor, remaining)
+        try:
+            written = os.write(descriptor, remaining)
+        except InterruptedError:
+            continue
         if written <= 0:
             raise OSError("bound run write made no progress")
         remaining = remaining[written:]
@@ -888,13 +901,21 @@ def _finish_bound_parent(
     )
 
 
-def read_run_file_bytes(run_dir: Path, path: str | Path) -> bytes:
+def read_run_file_bytes(
+    run_dir: Path,
+    path: str | Path,
+    *,
+    max_bytes: int | None = None,
+) -> bytes:
     """Read a run file; active bindings use the retained root descriptor."""
+
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+        raise ValueError("max_bytes must be a non-negative integer")
 
     bound = _bound_run_file(run_dir, path)
     if bound is None:
         with _temporary_run_root_binding(Path(run_dir), create=False):
-            return read_run_file_bytes(run_dir, path)
+            return read_run_file_bytes(run_dir, path, max_bytes=max_bytes)
     binding, relative = bound
     parent_descriptor, name, ancestry = _open_bound_parent(
         binding,
@@ -913,6 +934,8 @@ def read_run_file_bytes(run_dir: Path, path: str | Path) -> bytes:
             dir_fd=parent_descriptor,
         )
         opened = os.fstat(descriptor)
+        if max_bytes is not None and opened.st_size > max_bytes:
+            raise ValueError(f"bound read artifact exceeds size limit: {relative}")
         identity = opened.st_dev, opened.st_ino
         _assert_named_regular_identity(
             descriptor,
@@ -924,8 +947,12 @@ def read_run_file_bytes(run_dir: Path, path: str | Path) -> bytes:
         fcntl.flock(descriptor, fcntl.LOCK_SH)
         locked = True
         chunks: list[bytes] = []
+        total_bytes = 0
         while chunk := os.read(descriptor, 1024 * 1024):
             chunks.append(chunk)
+            total_bytes += len(chunk)
+            if max_bytes is not None and total_bytes > max_bytes:
+                raise ValueError(f"bound read artifact exceeds size limit: {relative}")
         _assert_named_regular_identity(
             descriptor,
             parent_descriptor,
@@ -970,6 +997,106 @@ def read_run_file_bytes(run_dir: Path, path: str | Path) -> bytes:
                 ),
                 (
                     "verifying run root after bound read",
+                    lambda: require_bound_run_root(
+                        Path(binding.lexical_root)
+                    ),
+                ),
+            ]
+        )
+        _run_cleanup_actions(primary, actions)
+
+
+def read_run_file_bytes_serialized(
+    run_dir: Path,
+    path: str | Path,
+) -> bytes:
+    """Read a run file after serializing with COW append publication."""
+
+    bound = _bound_run_file(run_dir, path)
+    if bound is None:
+        with _temporary_run_root_binding(Path(run_dir), create=False):
+            return read_run_file_bytes_serialized(run_dir, path)
+    binding, relative = bound
+    parent_descriptor, name, ancestry = _open_bound_parent(
+        binding,
+        relative,
+        create=False,
+    )
+    lock_descriptor = -1
+    lock_locked = False
+    try:
+        lock_name = f".{name}.append.lock"
+        for attempt in range(4):
+            try:
+                lock_descriptor = os.open(
+                    lock_name,
+                    os.O_RDWR
+                    | os.O_CREAT
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0),
+                    0o600,
+                    dir_fd=parent_descriptor,
+                )
+                break
+            except FileNotFoundError:
+                if attempt == 3:
+                    raise
+        lock_opened = os.fstat(lock_descriptor)
+        lock_identity = lock_opened.st_dev, lock_opened.st_ino
+        _assert_named_regular_identity(
+            lock_descriptor,
+            parent_descriptor,
+            lock_name,
+            expected_identity=lock_identity,
+            require_single_link=True,
+        )
+        fcntl.flock(lock_descriptor, fcntl.LOCK_SH)
+        lock_locked = True
+        _assert_named_regular_identity(
+            lock_descriptor,
+            parent_descriptor,
+            lock_name,
+            expected_identity=lock_identity,
+            require_single_link=True,
+        )
+        return read_run_file_bytes(Path(binding.lexical_root), relative)
+    finally:
+        primary = sys.exception()
+        actions: list[tuple[str, Callable[[], object]]] = []
+        if lock_descriptor >= 0:
+            if lock_locked:
+                actions.append(
+                    (
+                        "unlocking append-serialized read",
+                        lambda: fcntl.flock(
+                            lock_descriptor,
+                            fcntl.LOCK_UN,
+                        ),
+                    )
+                )
+            actions.append(
+                (
+                    "closing append-serialized read lock",
+                    lambda: os.close(lock_descriptor),
+                )
+            )
+        actions.extend(
+            [
+                (
+                    "verifying serialized read parent ancestry",
+                    lambda: _verify_bound_parent_ancestry(
+                        binding,
+                        relative,
+                        ancestry,
+                    ),
+                ),
+                (
+                    "closing serialized read parent",
+                    lambda: os.close(parent_descriptor),
+                ),
+                (
+                    "verifying run root after serialized read",
                     lambda: require_bound_run_root(
                         Path(binding.lexical_root)
                     ),
@@ -1314,6 +1441,364 @@ def read_run_directory_regular_files(
             ]
         )
         _run_cleanup_actions(primary, actions)
+
+
+@contextmanager
+def _open_bound_append_target(
+    binding: RunRootBinding,
+    relative: Path,
+    *,
+    expected_head_size: int | None,
+) -> Iterator[tuple[int, os.stat_result, int, str, PathIdentity]]:
+    """Open and lock one append target relative to a retained run root.
+
+    The append lock is deliberately a separate, stable inode.  The target is
+    then opened with ``O_APPEND`` and held with an exclusive file lock for the
+    duration of the callback/write.  No pathname under the run root is
+    reopened after the retained parent descriptor has been acquired.
+    """
+
+    if expected_head_size is not None and (
+        type(expected_head_size) is not int or expected_head_size < 0
+    ):
+        raise ValueError("expected_head_size must be a non-negative integer")
+
+    parent_descriptor, name, ancestry = _open_bound_parent(
+        binding,
+        relative,
+        create=True,
+    )
+    lock_descriptor = -1
+    target_descriptor = -1
+    lock_locked = False
+    target_locked = False
+    lock_identity: PathIdentity | None = None
+    target_identity: PathIdentity | None = None
+    try:
+        lock_name = f".{name}.append.lock"
+        try:
+            for attempt in range(4):
+                try:
+                    lock_descriptor = os.open(
+                        lock_name,
+                        os.O_RDWR
+                        | os.O_CREAT
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0)
+                        | getattr(os, "O_NONBLOCK", 0),
+                        0o600,
+                        dir_fd=parent_descriptor,
+                    )
+                    break
+                except FileNotFoundError:
+                    # macOS can transiently report ENOENT when two O_CREAT
+                    # callers race on the same descriptor-relative lock name.
+                    if attempt == 3:
+                        raise
+        except OSError as exc:
+            raise RunRootBindingError(
+                f"bound append lock is unavailable: {relative}"
+            ) from exc
+        lock_opened = os.fstat(lock_descriptor)
+        lock_identity = lock_opened.st_dev, lock_opened.st_ino
+        _assert_named_regular_identity(
+            lock_descriptor,
+            parent_descriptor,
+            lock_name,
+            expected_identity=lock_identity,
+            require_single_link=True,
+        )
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        lock_locked = True
+        _assert_named_regular_identity(
+            lock_descriptor,
+            parent_descriptor,
+            lock_name,
+            expected_identity=lock_identity,
+            require_single_link=True,
+        )
+
+        if expected_head_size not in (None, 0):
+            try:
+                os.stat(
+                    name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError as exc:
+                raise RunRootBindingError(
+                    f"bound append target is absent for expected head: "
+                    f"{relative}"
+                ) from exc
+
+        try:
+            target_descriptor = os.open(
+                name,
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_APPEND
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+        except OSError as exc:
+            raise RunRootBindingError(
+                f"bound append target is unavailable: {relative}"
+            ) from exc
+        target_opened = os.fstat(target_descriptor)
+        target_identity = target_opened.st_dev, target_opened.st_ino
+        _assert_named_regular_identity(
+            target_descriptor,
+            parent_descriptor,
+            name,
+            expected_identity=target_identity,
+            require_single_link=True,
+        )
+        fcntl.flock(target_descriptor, fcntl.LOCK_EX)
+        target_locked = True
+        target_opened = _assert_named_regular_identity(
+            target_descriptor,
+            parent_descriptor,
+            name,
+            expected_identity=target_identity,
+            require_single_link=True,
+        )
+        if (
+            expected_head_size is not None
+            and target_opened.st_size != expected_head_size
+        ):
+            raise RunRootBindingError(
+                f"bound append target head size changed: {relative}"
+            )
+        yield (
+            target_descriptor,
+            target_opened,
+            parent_descriptor,
+            name,
+            target_identity,
+        )
+    finally:
+        primary = sys.exception()
+        actions: list[tuple[str, Callable[[], object]]] = []
+        if target_descriptor >= 0:
+            if target_identity is not None:
+                actions.append(
+                    (
+                        "verifying bound append target identity",
+                        lambda: _assert_named_regular_identity(
+                            target_descriptor,
+                            parent_descriptor,
+                            name,
+                            expected_identity=target_identity,
+                            require_single_link=True,
+                        ),
+                    )
+                )
+            if target_locked:
+                actions.append(
+                    (
+                        "unlocking bound append target",
+                        lambda: fcntl.flock(
+                            target_descriptor,
+                            fcntl.LOCK_UN,
+                        ),
+                    )
+                )
+            actions.append(
+                (
+                    "closing bound append target",
+                    lambda: os.close(target_descriptor),
+                )
+            )
+        if lock_descriptor >= 0:
+            if lock_identity is not None:
+                actions.append(
+                    (
+                        "verifying bound append lock identity",
+                        lambda: _assert_named_regular_identity(
+                            lock_descriptor,
+                            parent_descriptor,
+                            lock_name,
+                            expected_identity=lock_identity,
+                            require_single_link=True,
+                        ),
+                    )
+                )
+            if lock_locked:
+                actions.append(
+                    (
+                        "unlocking bound append lock",
+                        lambda: fcntl.flock(
+                            lock_descriptor,
+                            fcntl.LOCK_UN,
+                        ),
+                    )
+                )
+            actions.append(
+                (
+                    "closing bound append lock",
+                    lambda: os.close(lock_descriptor),
+                )
+            )
+        actions.extend(
+            [
+                (
+                    "verifying bound append parent ancestry",
+                    lambda: _verify_bound_parent_ancestry(
+                        binding,
+                        relative,
+                        ancestry,
+                    ),
+                ),
+                (
+                    "closing bound append parent",
+                    lambda: os.close(parent_descriptor),
+                ),
+                (
+                    "verifying run root after in-place append",
+                    lambda: require_bound_run_root(
+                        Path(binding.lexical_root)
+                    ),
+                ),
+            ]
+        )
+        _run_cleanup_actions(primary, actions)
+
+
+def append_run_file_bytes_inplace(
+    run_dir: Path,
+    path: str | Path,
+    data: bytes,
+    *,
+    expected_head_size: int | None = None,
+) -> Path:
+    """Append bytes in place under the run's exclusive append lock.
+
+    ``data`` is one already-framed record.  The existing target inode is
+    retained and opened descriptor-relatively with ``O_APPEND``; no prior
+    bytes are copied and no replacement inode is published.  A target is
+    rejected unless it is a single-link regular file, and the append is
+    checked against the expected head size (when supplied) before writing.
+    """
+
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise TypeError("append data must be bytes-like")
+    encoded = bytes(data)
+    target = _run_file_path(run_dir, path)
+    bound = _bound_run_file(run_dir, path)
+    if bound is None:
+        with _temporary_run_root_binding(Path(run_dir), create=True):
+            return append_run_file_bytes_inplace(
+                run_dir,
+                path,
+                encoded,
+                expected_head_size=expected_head_size,
+            )
+    binding, relative = bound
+    with _open_bound_append_target(
+        binding,
+        relative,
+        expected_head_size=expected_head_size,
+    ) as (descriptor, opened, parent_descriptor, name, target_identity):
+        before_size = opened.st_size
+        _write_all(descriptor, encoded)
+        os.fsync(descriptor)
+        after = os.fstat(descriptor)
+        _assert_named_regular_identity(
+            descriptor,
+            parent_descriptor,
+            name,
+            expected_identity=target_identity,
+            require_single_link=True,
+        )
+        if after.st_size != before_size + len(encoded):
+            raise RunRootBindingError(
+                f"bound append wrote an unexpected byte count: {relative}"
+            )
+    return target
+
+
+def run_file_append_transaction(
+    run_dir: Path,
+    path: str | Path,
+    callback: Callable[
+        [int, int],
+        bytes | bytearray | memoryview | None,
+    ],
+    *,
+    expected_head_size: int | None = None,
+    post_append: Callable[[int, int], object] | None = None,
+) -> Path:
+    """Run a descriptor-relative append callback under one exclusive lock.
+
+    The callback receives ``(target_descriptor, current_size)`` after the
+    target has been validated and exclusively locked.  It may use ``os.pread``
+    for only the bytes it needs, or read a materialized current view while the
+    same append lock is held.  Return one framed byte record to append, or
+    ``None`` to commit no bytes.  When bytes are committed, ``post_append`` is
+    called with ``(target_descriptor, new_size)`` after fsync and identity
+    validation but before either exclusive lock is released.  This lets a
+    higher layer publish a derived view without a newer writer overtaking it.
+    """
+
+    if not callable(callback):
+        raise TypeError("append transaction callback must be callable")
+    if post_append is not None and not callable(post_append):
+        raise TypeError("post_append must be callable or None")
+    target = _run_file_path(run_dir, path)
+    bound = _bound_run_file(run_dir, path)
+    if bound is None:
+        with _temporary_run_root_binding(Path(run_dir), create=True):
+            return run_file_append_transaction(
+                run_dir,
+                path,
+                callback,
+                expected_head_size=expected_head_size,
+                post_append=post_append,
+            )
+    binding, relative = bound
+    with _open_bound_append_target(
+        binding,
+        relative,
+        expected_head_size=expected_head_size,
+    ) as (descriptor, opened, parent_descriptor, name, target_identity):
+        current_size = opened.st_size
+        result = callback(descriptor, current_size)
+        if result is None:
+            return target
+        if not isinstance(result, (bytes, bytearray, memoryview)):
+            raise TypeError(
+                "append transaction callback must return bytes-like data "
+                "or None"
+            )
+        encoded = bytes(result)
+        _write_all(descriptor, encoded)
+        os.fsync(descriptor)
+        after = os.fstat(descriptor)
+        _assert_named_regular_identity(
+            descriptor,
+            parent_descriptor,
+            name,
+            expected_identity=target_identity,
+            require_single_link=True,
+        )
+        if after.st_size != current_size + len(encoded):
+            raise RunRootBindingError(
+                "bound append transaction wrote an unexpected byte count: "
+                f"{relative}"
+            )
+        if post_append is not None:
+            try:
+                post_append(descriptor, after.st_size)
+            except RunRootBindingError:
+                raise
+            except Exception as exc:
+                raise RunFilePostAppendError(
+                    f"append committed but post-append publication failed: {relative}"
+                ) from exc
+    return target
 
 
 def write_run_file_text(

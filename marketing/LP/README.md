@@ -1,38 +1,33 @@
-# ToC Public Site / LP Guide
+# ToC 公開サイト / 紹介ページガイド
 
-更新日: 2026-08-08
+更新日: 2026-08-09
 
-`marketing/LP/` は、既存 ToC 制作フロントとは分離して公開する marketing site と persona-specific LP の正本を置く。
+`marketing/LP/` は、既存の ToC 制作画面とは分離して公開する共通サイト、顧客層別の紹介ページ、問い合わせフォームの正本を置く。
 
-## Site job
-
-訪問者に ToC の内部実装を説明することではなく、次の順に理解と行動を進めてもらう。
+## サイトの役割
 
 ```text
-自分の想いが映像になると直感する
-  -> 実際の完成物で信じる
-  -> 副業 / 個人ブランドの目的を選ぶ
-  -> 一行の動画案を入力する
+自分の想いが画像・動画になると直感する
+  -> 実在する依頼内容と完成物を見て信じる
+  -> 副業を試す / ビジネスを伝える、の目的を選ぶ
+  -> 作りたい画像・動画を一行で入力する
   -> 提供形態と費用を理解して相談する
 ```
 
-common site の customer-facing brand line は `あなたの想いを、映像に。` とする。persona-specific LP は広告との message match を優先し、次の persona 固有 CTA へ進める。
+共通サイトは広い制作能力を伝える入口とし、最初の販売導線は `副業に取り組む個人 × 動画制作` へ向ける。小規模ビジネス向けページは次の販売市場として保持するが、最初の主導線と同じ強さでは扱わない。
 
-- 副業の最初の1本を作る
-- 自分のブランド動画を設計する
+共通サイトの最初の言葉は次の順に置く。
 
-同時に、提供形態を誤解なく伝える。
+1. `あなたの想いを、映像に。`
+2. `一枚の画像から、一本の動画まで。`
+3. `企画、構成、画像、動画、音声、編集を、ひとつの制作の流れへ。`
 
-- 動画作成システム一式を顧客へ納品する
-- 納品後の ToC 月額料金は 0 円
-- 外部 AI / cloud API の利用料は別途、使用量に応じてかかる
-
-## Information architecture
+## ページ構成
 
 ```text
 /
 ├── /for-side-business
-├── /for-personal-brand
+├── /for-small-business
 ├── /examples
 ├── /how-it-works
 ├── /contact
@@ -40,41 +35,52 @@ common site の customer-facing brand line は `あなたの想いを、映像�
 └── /thanks
 ```
 
-- common home: brand, organic traffic, comparison, persona selection
-- `/for-side-business`: side-business campaign landing page
-- `/for-personal-brand`: personal-brand campaign landing page
-- `/examples`: proof library; mythology is one example category
-- `/how-it-works`: mechanism and human judgment
-- `/contact`: native form
+- 共通サイト: ブランド、制作範囲、実例、顧客層の選択
+- `/for-side-business`: 最初の販売先である副業向け動画制作の紹介ページ
+- `/for-small-business`: 次の販売市場である小規模ビジネス向けページ
+- `/examples`: 顧客層と制作形式で分けた実例集。神話・民話は一分類に留める
+- `/how-it-works`: 制作の流れと、人間が判断する範囲
+- `/contact`: 一行の案から始めるサイト内フォーム
 
-## Design rules
+個人ブランドは独立した顧客層やページにしない。運営者本人の知識と信用を伝える、小規模ビジネスの利用例として扱う。
 
-- Hero is the promise, not a company introduction
-- common home は `0 秒: brand line -> 3 秒: visitor outcome -> 10 秒: mechanism` の順に見せる
-- `0 秒` は内部設計用語とし、外向けの脳科学的主張には使わない
-- persona-specific LP は共通 brand line だけで Hero を置き換えず、persona 固有の問題、未来、CTA を維持する
-- Show `one-line idea -> completed video timeline` before the detailed workflow
-- Lead with visitor outcome, then product value, then mechanism
-- Keep side-business and personal-brand copy separate
-- Use one signature motion, `Idea-to-Video Line`; keep other motion restrained
-- Respect mobile, keyboard focus, reduced motion, readable contrast, and fast loading
-- Do not use generic purple AI gradients, mythic ornaments, dashboard-first heroes, or unverified claims
+## 設計ルール
 
-## Conversion rules
+- 最上部は会社紹介ではなく、訪問者が得る変化を伝える
+- 共通サイトは `0秒: ブランドの言葉 -> 3秒: 制作範囲 -> 10秒: 実現方法` の順にする
+- `0秒` は内部の設計用語とし、脳科学的な公開主張には使わない
+- 顧客層別ページは、固有の困りごと、未来、行動ボタンを持つ
+- 顧客層と、画像一括生成 / 動画制作という制作形式を別の選択として扱う
+- 同じ事例の実在する依頼内容と採用済み完成物を、最初に同時に見せる
+- 見出しと句点は静かに読ませ、装飾的な操作を加えない
+- 工程図、AIらしい光彩、架空の完成物を実例の代わりにしない
+- 顧客層に合う実例がない場合は、最上部の実例公開を止める
+- mobile、keyboard、reduced motion、contrast、表示速度へ配慮する
+- 計測していない速度、収益、成果を断定しない
 
-- common CTA: `自分なら何を作れるか見る`
-- side-business CTA: `副業の最初の1本を作る`
-- personal-brand CTA: `自分のブランド動画を設計する`
-- collect the video idea before long profile fields
-- carry the idea and persona into the native form
-- use a dedicated thank-you page and conversion event
-- do not use Notion or Google Forms as the canonical public route
+## 問い合わせルール
 
-## Files
+- 共通サイト: 作りたい画像・動画を一行入力してから、目的と制作形式を選ぶ
+- 副業向け: `副業の最初のコンテンツを作る`
+- 小規模ビジネス向け: `ビジネスの画像・動画制作を設計する`
+- 長い個人情報入力より、作りたいものの入力を先にする
+- 入力内容、顧客層、制作形式、流入元をフォームと送信後の記録へ引き継ぐ
+- 専用の送信完了ページと計測イベントを使う
+- Notion や Google Forms を正式な公開経路にしない
 
-- `lp-strategy.md`: LP 部門の正本。情報価値、訴求順序、調査根拠、検証、法務・速度・accessibility
-- `personas.md`: side-business / personal-brand persona, message, objection, proof contract
-- `toc-marketing-site.md`: common site and persona LP copy / section contract
-- `lead-form-schema.md`: native form, validation, event, and data contract
+提供形態は、同じ視界で誤解なく伝える。
 
-画像モックと試作は `marketing/test/` に置く。公開用 source of truth と混同せず、採用する copy / section だけを上記正本へ戻す。
+- 画像・動画制作システム一式を顧客環境へ納品する
+- 導入費用は個別見積り
+- 納品後の ToC 月額料金は 0 円
+- 外部 AI / cloud サービス料金は別途、使用量に応じて発生する
+
+## ファイル
+
+- `lp-strategy.md`: 情報設計、文章、実例、問い合わせ、法務、利用しやすさ、表示速度、検証
+- `personas.md`: 副業 / 小規模ビジネスの困りごと、伝える内容、不安、必要な実例
+- `toc-marketing-site.md`: 共通サイトと顧客層別ページの文章・画面構成
+- `lead-form-schema.md`: サイト内フォーム、入力確認、計測、保存する情報
+- `workstream-handoffs.md`: スレッド1・3へ渡す未確定事項と不足実例。承認済み決定の代わりにはしない
+
+画像モックと試作は `marketing/test/` に置く。公開用の正本と混同せず、採用する文章と画面構成だけをこのフォルダへ戻す。`marketing/test/lp-proposal-01/drafts-before-section-design/` は比較用であり、現在の最上部デザインの正本ではない。

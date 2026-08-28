@@ -14,13 +14,19 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import toc.p500_resume as p500_resume
-from toc.harness import load_structured_document, parse_state_file
+from toc.harness import (
+    append_state_snapshot,
+    load_structured_document,
+    parse_state_file,
+)
+from toc.image_prompt_compiler import compile_image_api_prompt_v2
 from toc.p500_resume import (
     P500ResumeError,
     apply_resume_plan,
     build_resume_plan,
     resolve_run_dir,
 )
+from toc.run_root_binding import RunRootBindingError, bind_run_root
 from toc.runtime_locks import sync_file_lock
 
 
@@ -2456,6 +2462,12 @@ class P500ResumeTests(unittest.TestCase):
                     }
                 ],
             }
+            (run_dir / "video_manifest.md").write_text(
+                "# manifest\n\n```yaml\n"
+                + json.dumps(manifest, ensure_ascii=False, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
             profile = {
                 "topic_label": "sample",
                 "story_time": "",
@@ -2471,6 +2483,11 @@ class P500ResumeTests(unittest.TestCase):
                     return_value=(profile, manifest),
                 ),
                 patch.object(module, "_archive_p400_review_evidence"),
+                patch.object(
+                    module,
+                    "_recompile_resumed_image_prompt_payloads",
+                    return_value=[],
+                ),
                 patch.object(module, "_resume_state_updates", return_value={}),
                 patch.object(frontend, "_prepare_authoring_grounding"),
                 patch.object(frontend, "_refresh_p400_review_artifacts"),
@@ -2848,6 +2865,13 @@ class P500ResumeTests(unittest.TestCase):
                 patch.object(module, "_archive_p400_review_evidence"),
                 patch.object(
                     module,
+                    "_recompile_resumed_image_prompt_payloads",
+                    side_effect=lambda _run_dir: (
+                        events.append("image_prompt_recompile") or []
+                    ),
+                ),
+                patch.object(
+                    module,
                     "_prepare_stage_context",
                     side_effect=legacy_prepare_stage_context,
                 ),
@@ -2863,6 +2887,7 @@ class P500ResumeTests(unittest.TestCase):
             self.assertEqual(
                 events,
                 [
+                    "image_prompt_recompile",
                     "authoring_grounding",
                     "freeze_p400_snapshots",
                     "require_fresh_p400",
@@ -2920,6 +2945,257 @@ class P500ResumeTests(unittest.TestCase):
                     final_manifest_sha,
                     stage,
                 )
+
+    def test_materialize_recompiles_repaired_image_prompt_before_first_p400_gate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            plan = {
+                "schema_version": "first_frame_visual_plan_v1",
+                "temporal_boundary": {
+                    "event_fact_visible_in_still": "継母の影を前に立ち止まる",
+                    "not_yet_happened_in_still": ["台所から走り出す"],
+                },
+                "subject_binding": {
+                    "primary_subject": {"name": "シンデレラ"}
+                },
+                "character_state_gate": {
+                    "costume_state": "灰の付いた麻布の仕事着",
+                    "pose": "台所の出口へ重心を向けて立ち止まる",
+                    "gaze": "出口をふさぐ影を見る",
+                },
+                "spatial_composition": {
+                    "foreground": "灰と家事道具",
+                    "midground": "シンデレラ",
+                    "background": "薄暗い台所の出口",
+                    "shot_size": "medium_wide",
+                },
+                "scene_material_pack": {
+                    "light_source": "朝の低い自然光",
+                    "dominant_materials": ["灰", "麻布", "石"],
+                },
+            }
+            payload = compile_image_api_prompt_v2(
+                first_frame_visual_plan=plan,
+                character_ids=["cinderella"],
+                location_ids=["ash_kitchen"],
+                reference_images=[],
+                story_time="17世紀末フランス・ルイ14世時代",
+                scene_time_of_day="朝",
+            )
+            stale_payload = dict(payload)
+            stale_payload["prompt"] = payload["prompt"] + " 壊れた追記"
+            manifest = {
+                "schema_version": "scene_event_v1",
+                "video_metadata": {
+                    "topic": "シンデレラ",
+                    "experience": "cinematic_story",
+                    "time": "17世紀末フランス・ルイ14世時代",
+                },
+                "scenes": [
+                    {
+                        "scene_id": 40,
+                        "time_of_day": "朝",
+                        "cuts": [
+                            {
+                                "cut_id": 2,
+                                "image_generation": {
+                                    "output": "assets/scenes/scene40_cut2.png",
+                                    "character_ids": ["cinderella"],
+                                    "object_ids": [],
+                                    "location_ids": ["ash_kitchen"],
+                                    "references": [],
+                                    "first_frame_visual_plan": plan,
+                                    "api_prompt_payload": stale_payload,
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+            (run_dir / "video_manifest.md").write_text(
+                "# manifest\n\n```yaml\n"
+                + json.dumps(manifest, ensure_ascii=False, indent=2)
+                + "\n```\n",
+                encoding="utf-8",
+            )
+            (run_dir / "state.txt").write_text(
+                "topic=シンデレラ\n"
+                "immersive.experience=cinematic_story\n---\n",
+                encoding="utf-8",
+            )
+            module = self._resume_cli_module()
+            events: list[str] = []
+
+            def assert_payload_is_current(
+                event: str,
+                current: dict[str, object] | None = None,
+            ) -> None:
+                if current is None:
+                    _text, current = load_structured_document(
+                        run_dir / "video_manifest.md"
+                    )
+                current_payload = current["scenes"][0]["cuts"][0][
+                    "image_generation"
+                ]["api_prompt_payload"]
+                self.assertEqual(
+                    current_payload["sha256"],
+                    hashlib.sha256(
+                        current_payload["prompt"].encode("utf-8")
+                    ).hexdigest(),
+                )
+                self.assertNotIn("壊れた追記", current_payload["prompt"])
+                events.append(event)
+
+            def build_asset_artifacts_from_manifest(
+                **kwargs: object,
+            ) -> tuple[dict[str, object], dict[str, object]]:
+                assert_payload_is_current(
+                    "asset_build",
+                    kwargs["manifest"],
+                )
+                return {"asset_inventory": {"items": []}}, {"assets": []}
+
+            frontend = SimpleNamespace(
+                _now_iso=lambda: "2026-08-09T04:00:00+09:00",
+                append_state_snapshot=append_state_snapshot,
+                _build_asset_artifacts_from_manifest=(
+                    build_asset_artifacts_from_manifest
+                ),
+                _md_yaml=lambda _title, _payload: "fixture\n",
+                _prepare_authoring_grounding=lambda _run_dir: events.append(
+                    "authoring_grounding"
+                ),
+                _refresh_p400_review_artifacts=lambda _run_dir: events.append(
+                    "freeze_p400"
+                ),
+                _require_fresh_p400_readiness=lambda _run_dir: (
+                    assert_payload_is_current("p400_gate")
+                ),
+                _write_asset_request_files=lambda *_args: events.append(
+                    "asset_requests"
+                ),
+                _materialize_standard_request_files=lambda _run_dir: events.append(
+                    "scene_requests"
+                ),
+            )
+            identity = run_dir.stat().st_dev, run_dir.stat().st_ino
+            token = module._ACTIVE_RESUME_ROOT.set(
+                (os.path.abspath(os.fspath(run_dir)), identity, frontend)
+            )
+            try:
+                with (
+                    bind_run_root(run_dir, expected_identity=identity),
+                    patch.object(
+                        module,
+                        "_resume_profile",
+                        return_value=({"duration_plan": {}}, manifest),
+                    ),
+                    patch.object(
+                        module,
+                        "_resolve_resume_mode_contract",
+                        return_value={"experience": "cinematic_story"},
+                    ),
+                    patch.object(
+                        module,
+                        "_preflight_world_walk_reference_restore",
+                        return_value=([], {}, None),
+                    ),
+                    patch.object(
+                        module,
+                        "_restore_world_walk_source_references",
+                        return_value=[],
+                    ),
+                    patch.object(module, "_archive_p400_review_evidence"),
+                    patch.object(module, "_resume_state_updates", return_value={}),
+                ):
+                    module.materialize_from_p500(
+                        frontend,
+                        run_dir=run_dir,
+                        topic="シンデレラ",
+                        source="シンデレラ",
+                        stop_target="p650",
+                    )
+            finally:
+                module._ACTIVE_RESUME_ROOT.reset(token)
+
+            self.assertLess(
+                events.index("asset_build"), events.index("p400_gate")
+            )
+            self.assertLess(
+                events.index("p400_gate"), events.index("scene_requests")
+            )
+            state = parse_state_file(run_dir / "state.txt")
+            self.assertEqual(
+                state["runtime.resume.p500.image_prompt_recompile.status"],
+                "done",
+            )
+            self.assertEqual(
+                state["runtime.resume.p500.image_prompt_recompile.count"],
+                "1",
+            )
+            self.assertEqual(
+                state[
+                    "runtime.resume.p500.image_prompt_recompile.compiled_selectors"
+                ],
+                "scene40_cut2",
+            )
+
+    def test_recompile_rejects_replaced_bound_run_before_server_delegate(
+        self,
+    ) -> None:
+        """A same-name replacement must not receive prompt-compiler writes."""
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run_dir = root / "output" / "sample_20260809_0400"
+            run_dir.mkdir(parents=True)
+            module = self._resume_cli_module()
+            frontend = SimpleNamespace()
+            identity = run_dir.stat().st_dev, run_dir.stat().st_ino
+            active_token = module._ACTIVE_RESUME_ROOT.set(
+                (os.path.abspath(os.fspath(run_dir)), identity, frontend)
+            )
+            binding_context = bind_run_root(
+                run_dir,
+                expected_identity=identity,
+            )
+            binding_context.__enter__()
+            try:
+                original_dir = root / "original-run-root"
+                run_dir.rename(original_dir)
+                run_dir.mkdir()
+                replacement_sentinel = run_dir / "replacement.txt"
+                replacement_sentinel.write_text("replacement\n", encoding="utf-8")
+
+                from server import image_gen_app
+
+                delegate = Mock(return_value=["scene40_cut2"])
+                with patch.object(
+                    image_gen_app,
+                    "_recompile_image_prompt_payloads_from_plans",
+                    delegate,
+                ):
+                    with self.assertRaises(
+                        (P500ResumeError, RunRootBindingError)
+                    ):
+                        module._recompile_resumed_image_prompt_payloads(run_dir)
+
+                delegate.assert_not_called()
+                self.assertEqual(
+                    replacement_sentinel.read_text(encoding="utf-8"),
+                    "replacement\n",
+                )
+            finally:
+                # Renaming the bound path makes the binding's exit integrity
+                # check fail by design; this test verifies the earlier helper
+                # rejection, not teardown behavior.
+                try:
+                    binding_context.__exit__(None, None, None)
+                except RunRootBindingError:
+                    pass
+                module._ACTIVE_RESUME_ROOT.reset(active_token)
 
     def test_p650_continuation_marks_asset_generation_before_validation(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -3010,6 +3286,13 @@ class P500ResumeTests(unittest.TestCase):
                 ),
                 patch.object(
                     module,
+                    "_mark_resume_dependency_sync_complete",
+                    side_effect=lambda *_args, **_kwargs: events.append(
+                        "dependency_sync_complete"
+                    ),
+                ),
+                patch.object(
+                    module,
                     "_finalize_resume_orchestration",
                     return_value={},
                 ),
@@ -3036,8 +3319,52 @@ class P500ResumeTests(unittest.TestCase):
             )
             self.assertLess(
                 events.index("downstream_reviews"),
+                events.index("dependency_sync_complete"),
+            )
+            self.assertLess(
+                events.index("dependency_sync_complete"),
                 events.index("generate_images"),
             )
+
+    def test_resume_rematerialization_supersedes_only_incomplete_dependency_sync(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            (run_dir / "state.txt").write_text(
+                "\n".join(
+                    [
+                        "review.semantic.story.dependency_sync.status=failed",
+                        "review.semantic.story.dependency_sync.error=old p450 failure",
+                        "review.semantic.scene_set.dependency_sync.status=in_progress",
+                        "review.semantic.asset_plan.dependency_sync.status=done",
+                        "---",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            module = self._resume_cli_module()
+
+            module._mark_resume_dependency_sync_complete(run_dir)
+            state = parse_state_file(run_dir / "state.txt")
+
+        for stage in ("story", "scene_set"):
+            prefix = f"review.semantic.{stage}.dependency_sync"
+            self.assertEqual(state[f"{prefix}.status"], "done")
+            self.assertEqual(state[f"{prefix}.error"], "")
+            self.assertEqual(
+                state[f"{prefix}.completed_by"],
+                "p500_full_rematerialization",
+            )
+        self.assertEqual(
+            state["review.semantic.asset_plan.dependency_sync.status"],
+            "done",
+        )
+        self.assertNotIn(
+            "review.semantic.asset_plan.dependency_sync.completed_by",
+            state,
+        )
 
     def test_continue_run_rejects_reserved_root_replacement_before_work(
         self,

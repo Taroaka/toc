@@ -66,6 +66,8 @@ scripts/ai/multiagent.sh --engine codex
 - Phase 4（並列）: sceneごとに `scenes/sceneXX/` 配下だけ編集して完成（競合なし）
 - Phase 5（直列）: **1人**が全体サマリ作成
 
+run state は例外的なshared artifactであり、agent / scriptが `state.txt`、`state.current.json`、`run_status.json`、`p000_index.md` を直接編集しない。orchestratorだけがshared state store APIへ変更keyを一つのatomic delta eventとして渡す。current viewと表示projectionは自動生成物であり、agent間handoffやstate mutationの入力正本にしない。
+
 準備スクリプト（scratch/run-dir作成）:
 
 ```bash

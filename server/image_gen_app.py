@@ -24,6 +24,7 @@ import sys
 import tempfile
 import unicodedata
 import uuid
+import warnings
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -123,6 +124,7 @@ from toc.immersive_manifest import (
     selector_aliases,
 )
 from toc.harness import append_state_snapshot, load_structured_document, now_iso, parse_state_file
+from toc.state_store import append_state_delta
 from toc.run_root_binding import (
     RunRootBinding,
     RunRootBindingError,
@@ -134,6 +136,7 @@ from toc.run_root_binding import (
     run_file_entry_exists,
     unlink_run_file,
     verify_run_root,
+    write_run_file_text,
 )
 from toc import process_store
 from toc.providers.kling import KlingClient, KlingConfig
@@ -218,6 +221,8 @@ from toc.semantic_review_loop import (
     SEMANTIC_REVIEW_PRODUCER_TARGETS,
     read_committed_semantic_repair_prompt,
     semantic_loop_state_updates,
+    scene_set_review_concurrency,
+    scene_set_transport_retry_attempts,
     scene_detail_review_concurrency,
     scene_detail_transport_retry_attempts,
     semantic_repair_state_updates,
@@ -227,6 +232,11 @@ from toc.semantic_review_loop import (
     semantic_review_timeout_seconds,
     write_semantic_repair_prompt,
 )
+from toc.semantic_repair_reconciliation import (
+    SemanticRepairReconciliationResult,
+    reconcile_semantic_repair_documents,
+)
+from toc.scene_acceptance_contract import criterion_registry_payload, resolve_criterion
 from toc.tts_text import load_pronunciation_aliases, prepare_elevenlabs_tts_text
 from .image_gen import (
     IMAGE_API_PROMPT_POLICY_VERSION,
@@ -325,13 +335,13 @@ def safe_run_dir(run_id: str, root: Path | None = None) -> Path:
         return _safe_run_dir_unbound(run_id, root)
     if not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}:
         raise ValueError("invalid run_id")
-    lexical = Path(os.path.abspath(os.fspath(output_root(root) / run_id)))
+    resolved = _safe_run_dir_unbound(run_id, root)
+    lexical = Path(os.path.abspath(os.fspath(resolved)))
     if os.path.abspath(os.fspath(lexical)) != binding.lexical_root:
         raise RunRootBindingError(
             "requested run does not match the active bound run root"
         )
     _assert_bound_run_root(lexical)
-    resolved = _safe_run_dir_unbound(run_id, root)
     _assert_bound_run_root(lexical)
     opened = os.stat(resolved, follow_symlinks=False)
     if (opened.st_dev, opened.st_ino) != binding.identity:
@@ -7070,37 +7080,102 @@ def _atomic_write_text(path: Path, content: str) -> None:
     _atomic_write_bytes(path, content.encode("utf-8"))
 
 
-def _capture_file_transaction(paths: Iterable[Path]) -> dict[Path, bytes | None]:
-    return {
-        path: path.read_bytes() if path.is_file() else None
-        for path in dict.fromkeys(paths)
-    }
+class _FileTransactionSnapshot(dict[Path, bytes | None]):
+    """Recoverable artifact bytes plus append-only state cursors at capture."""
+
+    def __init__(
+        self,
+        files: dict[Path, bytes | None],
+        state_cursors: dict[Path, tuple[int, int, int] | None],
+    ) -> None:
+        super().__init__(files)
+        self.state_cursors = state_cursors
 
 
-def _restore_file_transaction(snapshot: dict[Path, bytes | None]) -> None:
+def _capture_file_transaction(
+    paths: Iterable[Path],
+    *,
+    state_paths: Iterable[Path] = (),
+) -> _FileTransactionSnapshot:
+    unique_paths = tuple(dict.fromkeys(paths))
+    tracked_state_paths = tuple(
+        dict.fromkeys(
+            [path for path in unique_paths if path.name == "state.txt"]
+            + list(state_paths)
+        )
+    )
+
+    def state_cursor(path: Path) -> tuple[int, int, int] | None:
+        try:
+            info = path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        return info.st_dev, info.st_ino, info.st_size
+
+    return _FileTransactionSnapshot(
+        {
+            path: path.read_bytes() if path.is_file() else None
+            for path in unique_paths
+        },
+        {path: state_cursor(path) for path in tracked_state_paths},
+    )
+
+
+def _restore_file_transaction(snapshot: _FileTransactionSnapshot) -> None:
+    for state_path, captured_cursor in snapshot.state_cursors.items():
+        try:
+            info = state_path.stat(follow_symlinks=False)
+            current_cursor: tuple[int, int, int] | None = (
+                info.st_dev,
+                info.st_ino,
+                info.st_size,
+            )
+        except FileNotFoundError:
+            current_cursor = None
+        if current_cursor != captured_cursor:
+            warnings.warn(
+                "artifact rollback skipped because append-only state already "
+                f"advanced: {state_path}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return
     for path, previous_content in snapshot.items():
+        if path.name in {
+            "state.txt",
+            "state.current.json",
+            "run_status.json",
+            "p000_index.md",
+        }:
+            # Canonical state is append-only.  The other three files are
+            # derived projections and are rebuilt from the committed head.
+            continue
         if previous_content is None:
             path.unlink(missing_ok=True)
         else:
             _atomic_write_bytes(path, previous_content)
 
 
-def _write_manifest_data(manifest_path: Path, original_text: str, data: dict[str, Any]) -> None:
+def _render_manifest_data(original_text: str, data: dict[str, Any]) -> str:
     yaml_text = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
     if "```yaml" not in original_text:
-        _atomic_write_text(manifest_path, f"```yaml\n{yaml_text}```\n")
-        return
+        return f"```yaml\n{yaml_text}```\n"
     start = original_text.find("```yaml")
     yaml_start = original_text.find("\n", start)
     if yaml_start == -1:
-        _atomic_write_text(manifest_path, f"```yaml\n{yaml_text}```\n")
-        return
+        return f"```yaml\n{yaml_text}```\n"
     yaml_start += 1
     yaml_end = original_text.find("```", yaml_start)
     if yaml_end == -1:
-        _atomic_write_text(manifest_path, original_text[:yaml_start] + yaml_text)
-        return
-    _atomic_write_text(manifest_path, original_text[:yaml_start] + yaml_text + original_text[yaml_end:])
+        return original_text[:yaml_start] + yaml_text
+    return original_text[:yaml_start] + yaml_text + original_text[yaml_end:]
+
+
+def _write_manifest_data(manifest_path: Path, original_text: str, data: dict[str, Any]) -> None:
+    _atomic_write_text(
+        manifest_path,
+        _render_manifest_data(original_text, data),
+    )
 
 
 def _full_json_hash(value: Any) -> str:
@@ -12367,9 +12442,6 @@ STORYBOARD_TRANSACTION_REL = Path(
 STORYBOARD_TRANSACTION_CORE_TARGETS = {
     "video_manifest.md",
     "video_generation_requests.md",
-    "state.txt",
-    "run_status.json",
-    "p000_index.md",
 }
 
 
@@ -12474,6 +12546,15 @@ def _recover_storyboard_transaction(run_dir: Path) -> None:
                 "storyboard transaction target is invalid"
             )
         relative = str(item.get("path") or "")
+        if relative in {
+            "state.txt",
+            "state.current.json",
+            "run_status.json",
+            "p000_index.md",
+        }:
+            # Older pending markers may list state artifacts.  Never restore
+            # or unlink a committed append-only log or its projections.
+            continue
         target = _storyboard_transaction_target_path(
             run_dir,
             relative,
@@ -12622,9 +12703,6 @@ def _materialize_scene_storyboard_video_requests(
             *storyboard_paths,
             "video_generation_requests.md",
             "video_manifest.md",
-            "state.txt",
-            "run_status.json",
-            "p000_index.md",
         ]
         transaction_dir = _prepare_storyboard_transaction(
             run_dir,
@@ -13686,7 +13764,27 @@ def _review_metadata_for_recompiled_visual_plan(
 def _recompile_image_prompt_payloads_from_plans(run_dir: Path) -> list[str]:
     """Rebuild every compiled-v2 payload from the repaired visual-plan source."""
 
-    manifest_path, original_text, data = _read_manifest_data(run_dir)
+    if current_run_root_binding() is None:
+        named = os.stat(run_dir, follow_symlinks=False)
+        with bind_run_root(
+            run_dir,
+            expected_identity=(named.st_dev, named.st_ino),
+        ):
+            return _recompile_image_prompt_payloads_from_plans(run_dir)
+    _assert_bound_run_root(run_dir)
+    manifest_path = run_dir / "video_manifest.md"
+    try:
+        original_text = read_run_file_bytes(
+            run_dir,
+            "video_manifest.md",
+        ).decode("utf-8")
+    except FileNotFoundError as exc:
+        raise FileNotFoundError("video_manifest.md not found") from exc
+    except UnicodeDecodeError as exc:
+        raise ValueError("video_manifest.md must be UTF-8") from exc
+    data = yaml.safe_load(_extract_manifest_yaml_text(original_text)) or {}
+    if not isinstance(data, dict):
+        raise ValueError("video_manifest.md YAML root must be a mapping")
     story_time = str(_dict_value(data.get("video_metadata")).get("time") or "").strip()
     canonical_payload_keys = {
         "policy_version",
@@ -13753,11 +13851,19 @@ def _recompile_image_prompt_payloads_from_plans(run_dir: Path) -> list[str]:
         node["image_generation"] = image_generation
         changed_selectors.append(str(target["selector"]))
     if changed_selectors:
-        _write_manifest_data(manifest_path, original_text, data)
+        write_run_file_text(
+            run_dir,
+            manifest_path.name,
+            _render_manifest_data(original_text, data),
+        )
     return changed_selectors
 
 
-def _synchronize_image_prompt_repair_outputs(run_dir: Path) -> None:
+def _synchronize_image_prompt_repair_outputs(
+    run_dir: Path,
+    *,
+    precompiled_selectors: Iterable[str] | None = None,
+) -> None:
     """Compile repaired plans and atomically rematerialize request + snapshot files."""
 
     _assert_bound_run_root(run_dir)
@@ -13772,7 +13878,10 @@ def _synchronize_image_prompt_repair_outputs(run_dir: Path) -> None:
         run_dir / "asset_plan.md",
         run_dir / "image_prompt_story_review.md",
     )
-    before = _capture_file_transaction(tracked_paths)
+    before = _capture_file_transaction(
+        tracked_paths,
+        state_paths=(run_dir / "state.txt",),
+    )
     asset_snapshot_path = tracked_paths[4]
 
     def captured_request_item_digests(content: bytes | None) -> tuple[tuple[str, str], ...]:
@@ -13797,7 +13906,11 @@ def _synchronize_image_prompt_repair_outputs(run_dir: Path) -> None:
 
     before_asset_request_digests = captured_request_item_digests(before[asset_snapshot_path])
     try:
-        compiled_selectors = _recompile_image_prompt_payloads_from_plans(run_dir)
+        compiled_selectors = (
+            list(precompiled_selectors)
+            if precompiled_selectors is not None
+            else _recompile_image_prompt_payloads_from_plans(run_dir)
+        )
         _write_asset_request_files(run_dir)
         result = _run_bound_subprocess(
             run_dir,
@@ -13874,6 +13987,448 @@ def _synchronize_image_prompt_repair_outputs(run_dir: Path) -> None:
             "artifact.image_generation_request_snapshot": str(tracked_paths[2].resolve()),
         },
     )
+
+
+def _reconcile_semantic_repair_authoring_projections(
+    run_dir: Path,
+) -> SemanticRepairReconciliationResult:
+    """Project repaired authoring sources before P400 reviews inspect them."""
+
+    _assert_bound_run_root(run_dir)
+    paths = {
+        "script": run_dir / "script.md",
+        "manifest": run_dir / "video_manifest.md",
+        "asset_plan": run_dir / "asset_plan.md",
+    }
+    state_path = run_dir / "state.txt"
+    before = _capture_file_transaction(
+        tuple(paths.values()),
+        state_paths=(state_path,),
+    )
+    original_text: dict[str, str] = {}
+    data: dict[str, dict[str, Any]] = {}
+    try:
+        for key, path in paths.items():
+            original_text[key] = path.read_text(encoding="utf-8")
+            loaded = yaml.safe_load(
+                _extract_manifest_yaml_text(original_text[key])
+            ) or {}
+            if not isinstance(loaded, dict):
+                raise ValueError(f"{path.name} YAML root must be a mapping")
+            data[key] = loaded
+
+        result = reconcile_semantic_repair_documents(
+            script=data["script"],
+            manifest=data["manifest"],
+            asset_plan=data["asset_plan"],
+        )
+        for key, changed in (
+            ("script", result.script_changed),
+            ("manifest", result.manifest_changed),
+            ("asset_plan", result.asset_plan_changed),
+        ):
+            if not changed:
+                continue
+            write_run_file_text(
+                run_dir,
+                paths[key].name,
+                _render_manifest_data(original_text[key], data[key]),
+            )
+        append_state_snapshot(
+            state_path,
+            {
+                "review.semantic.repair.authoring_projection.status": "done",
+                "review.semantic.repair.authoring_projection.changed_scenes": (
+                    ", ".join(result.changed_scene_ids)
+                ),
+                "review.semantic.repair.authoring_projection.changed_cuts": (
+                    ", ".join(result.changed_cut_selectors)
+                ),
+                "review.semantic.repair.authoring_projection.replaced_characters": (
+                    ", ".join(
+                        f"{old}->{new}"
+                        for old, new in result.replaced_character_ids
+                    )
+                ),
+                "review.semantic.repair.authoring_projection.updated_at": now_iso(),
+            },
+        )
+    except Exception:
+        _restore_file_transaction(before)
+        raise
+    return result
+
+
+def _refresh_scene_acceptance_after_semantic_repair(run_dir: Path) -> None:
+    """Rebind scene-acceptance evidence to repaired story/script bytes."""
+
+    _assert_bound_run_root(run_dir)
+    frontend = _load_frontend_review_runner()
+    try:
+        create_input_bytes = read_run_file_bytes(
+            run_dir,
+            "logs/orchestration/create_input.json",
+        )
+        create_input = json.loads(create_input_bytes.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "scene acceptance refresh requires a valid create_input.json"
+        ) from exc
+    original_script, script = load_structured_document(run_dir / "script.md")
+    original_manifest, manifest = load_structured_document(
+        run_dir / "video_manifest.md"
+    )
+    _research_text, research = load_structured_document(run_dir / "research.md")
+    _story_text, story = load_structured_document(run_dir / "story.md")
+    if not all(
+        isinstance(value, dict) and value
+        for value in (script, manifest, research, story)
+    ):
+        raise RuntimeError(
+            "scene acceptance refresh requires structured research/story/script/manifest"
+        )
+    state = parse_state_file(run_dir / "state.txt")
+    if create_input.get("schema_version") != "toc.create_input.v1":
+        raise RuntimeError("scene acceptance refresh create input schema is invalid")
+    raw_topic = create_input.get("topic")
+    raw_source = create_input.get("source")
+    if (
+        not isinstance(raw_topic, str)
+        or not raw_topic.strip()
+        or not isinstance(raw_source, str)
+        or not raw_source.strip()
+    ):
+        raise RuntimeError(
+            "scene acceptance refresh topic/source must be nonempty strings"
+        )
+    topic = raw_topic
+    source = raw_source
+    source_sha256 = str(create_input.get("source_sha256") or "").strip()
+    if (
+        not topic
+        or not source
+        or re.fullmatch(r"[0-9a-f]{64}", source_sha256) is None
+        or hashlib.sha256(source.encode("utf-8")).hexdigest()
+        != source_sha256
+    ):
+        raise RuntimeError("scene acceptance refresh create input is invalid")
+    experience = str(create_input.get("experience") or "").strip()
+    source_run = create_input.get("source_run")
+    if experience not in {"cinematic_story", "world_walk"}:
+        raise RuntimeError("scene acceptance refresh experience is invalid")
+    if experience == "world_walk":
+        if (
+            not isinstance(source_run, str)
+            or not source_run.strip()
+            or source_run != source_run.strip()
+            or Path(source_run).is_absolute()
+            or ".." in Path(source_run).parts
+        ):
+            raise RuntimeError("scene acceptance refresh source_run is invalid")
+    elif source_run is not None:
+        raise RuntimeError(
+            "scene acceptance refresh cinematic input has source_run"
+        )
+    raw_target_seconds = create_input.get("target_duration_seconds")
+    if (
+        isinstance(raw_target_seconds, bool)
+        or not isinstance(raw_target_seconds, int)
+        or not 300 <= raw_target_seconds <= 1200
+    ):
+        raise RuntimeError("scene acceptance refresh target duration is invalid")
+    target_seconds = raw_target_seconds
+    metadata = _dict_value(manifest.get("video_metadata"))
+    if (
+        metadata.get("topic") != topic
+        or metadata.get("experience") != experience
+        or metadata.get("target_duration_seconds") != target_seconds
+        or str(state.get("immersive.experience") or "") != experience
+        or str(state.get("runtime.target_video_seconds") or "")
+        != str(target_seconds)
+        or str(state.get("immersive.source_run") or "")
+        != (source_run or "")
+    ):
+        raise RuntimeError(
+            "scene acceptance refresh create input does not match run state"
+        )
+
+    trusted_contract_path = str(
+        state.get("authoring.scene_set.contract.path") or ""
+    ).strip()
+    if not trusted_contract_path:
+        raise RuntimeError("scene acceptance trusted contract path is missing")
+    try:
+        trusted_contract = json.loads(
+            read_run_file_bytes(run_dir, trusted_contract_path).decode("utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("scene acceptance trusted contract is unreadable") from exc
+    if (
+        not isinstance(trusted_contract, dict)
+        or trusted_contract.get("contract_digest")
+        != frontend.digest_scene_acceptance_contract(trusted_contract)
+    ):
+        raise RuntimeError("scene acceptance trusted contract digest is invalid")
+    profile = frontend._duration_aware_profile(
+        frontend._story_profile(topic, source, variant_seed=run_dir.name),
+        target_duration_seconds=target_seconds,
+    )
+    profile = frontend._profile_from_reviewed_research(profile, research)
+    profile = frontend._profile_from_reviewed_story(profile, story)
+    research_events = _list_value(
+        _dict_value(research.get("story_materials")).get(
+            "chronological_events"
+        )
+    )
+    reviewed_story_scenes = _list_value(
+        _dict_value(story.get("script")).get("scenes")
+    )
+    if (
+        not research_events
+        or not all(
+            isinstance(event, dict)
+            and isinstance(event.get("event_id"), str)
+            and event["event_id"].strip()
+            and isinstance(event.get("event"), str)
+            and event["event"].strip()
+            for event in research_events
+        )
+        or not reviewed_story_scenes
+        or not all(
+            isinstance(scene, dict)
+            and scene.get("scene_id") is not None
+            and isinstance(scene.get("title"), str)
+            and scene["title"].strip()
+            and isinstance(scene.get("time_of_day"), str)
+            and scene["time_of_day"].strip()
+            and isinstance(scene.get("location"), dict)
+            and isinstance(scene["location"].get("name"), str)
+            and scene["location"]["name"].strip()
+            and isinstance(scene.get("purpose"), str)
+            and scene["purpose"].strip()
+            and isinstance(scene.get("turn"), str)
+            and scene["turn"].strip()
+            and isinstance(scene.get("story_event_ids"), list)
+            and bool(scene["story_event_ids"])
+            for scene in reviewed_story_scenes
+        )
+    ):
+        raise RuntimeError(
+            "scene acceptance refresh reviewed research/story structure is incomplete"
+        )
+    if [str(value).strip() for value in profile.get("events", [])] != [
+        event["event"].strip() for event in research_events
+    ]:
+        raise RuntimeError(
+            "scene acceptance refresh profile did not preserve reviewed events"
+        )
+    if [str(value).strip() for value in profile.get("scene_titles", [])] != [
+        scene["title"].strip() for scene in reviewed_story_scenes
+    ]:
+        raise RuntimeError(
+            "scene acceptance refresh profile did not preserve reviewed scenes"
+        )
+
+    script_scenes = [
+        scene for scene in _list_value(script.get("scenes"))
+        if isinstance(scene, dict)
+    ]
+    manifest_scenes = [
+        scene for scene in _list_value(manifest.get("scenes"))
+        if isinstance(scene, dict)
+    ]
+    if not script_scenes or len(script_scenes) != len(manifest_scenes):
+        raise RuntimeError("scene acceptance refresh scene set is incomplete")
+    repaired_scene_ids = [int(scene["scene_id"]) for scene in script_scenes]
+    trusted_scene_ids = [
+        int(scene["scene_id"])
+        for scene in _list_value(trusted_contract.get("scenes"))
+        if isinstance(scene, dict)
+    ]
+    expected_scene_ids = [
+        int(frontend._runtime_scene_id(index))
+        for index in range(1, len(profile.get("scene_titles") or []) + 1)
+    ]
+    manifest_scene_ids = [int(scene["scene_id"]) for scene in manifest_scenes]
+    if (
+        repaired_scene_ids != trusted_scene_ids
+        or repaired_scene_ids != expected_scene_ids
+        or repaired_scene_ids != manifest_scene_ids
+    ):
+        raise RuntimeError(
+            "scene acceptance refresh scene identity/order changed"
+        )
+    records: list[dict[str, Any]] = []
+    for index, scene in enumerate(script_scenes, start=1):
+        records.append(
+            {
+                "scene_id": int(scene["scene_id"]),
+                "scene_index": index,
+                "include_artifact": frontend._scene_uses_artifact(
+                    profile, index
+                ),
+                "time_of_day": str(
+                    scene.get("time_of_day")
+                    or frontend._scene_time_of_day(profile, index)
+                ),
+                "scene_location_specs": (
+                    frontend._location_specs_for_scene_sequence(
+                        profile, index
+                    )
+                ),
+                "scene_intent": deepcopy(_dict_value(scene.get("scene_intent"))),
+                "scene_event": deepcopy(_dict_value(scene.get("scene_event"))),
+            }
+        )
+    contract = frontend._build_scene_set_authoring_contract(
+        profile=profile,
+        scene_records=records,
+        now=now_iso(),
+        run_dir=run_dir,
+    )
+    trusted_bindings = _dict_value(trusted_contract.get("source_bindings"))
+    refreshed_bindings = _dict_value(contract.get("source_bindings"))
+    if set(trusted_bindings) != set(refreshed_bindings):
+        raise RuntimeError("scene acceptance refresh source binding set changed")
+    for binding_name in trusted_bindings:
+        trusted_binding = _dict_value(trusted_bindings[binding_name])
+        refreshed_binding = _dict_value(refreshed_bindings[binding_name])
+        if trusted_binding.get("sha256") != refreshed_binding.get("sha256"):
+            raise RuntimeError(
+                "scene acceptance refresh source binding digest changed: "
+                f"{binding_name}"
+            )
+        if (
+            binding_name != "authoring_source_ledger"
+            and trusted_binding.get("path") != refreshed_binding.get("path")
+        ):
+            raise RuntimeError(
+                "scene acceptance refresh source binding path changed: "
+                f"{binding_name}"
+            )
+    for protected_field in ("canonical_events", "reveal_ledger"):
+        if contract.get(protected_field) != trusted_contract.get(protected_field):
+            raise RuntimeError(
+                "scene acceptance refresh changed protected canonical field: "
+                f"{protected_field}"
+            )
+    drafts = frontend._build_scene_acceptance_drafts(
+        contract=contract,
+        scene_records=records,
+    )
+    preflight = frontend._run_scene_acceptance_preflight(
+        contract,
+        drafts,
+        source_artifacts=frontend._scene_acceptance_source_artifacts(profile),
+    )
+    draft_by_scene = {
+        str(draft["scene_id"]): draft for draft in drafts
+    }
+    for scene in script_scenes:
+        scene_id = str(scene["scene_id"])
+        scene["scene_acceptance_draft"] = deepcopy(draft_by_scene[scene_id])
+    script["scene_set_authoring_contract"] = contract
+    script["authoring_preflight"] = preflight
+    manifest_projection = {
+        "schema_version": contract["schema_version"],
+        "canonical_script_path": "script.md",
+        "generation_id": contract["generation_id"],
+        "contract_digest": contract["contract_digest"],
+        "criterion_registry_sha256": contract["criterion_registry_sha256"],
+        "preflight_status": "passed",
+        "preflight_digest": preflight["preflight_digest"],
+        "scene_slice_digests": {
+            scene_id: draft["scene_slice_digest"]
+            for scene_id, draft in draft_by_scene.items()
+        },
+    }
+    manifest["scene_acceptance_contract"] = manifest_projection
+    for scene in manifest_scenes:
+        scene_id = str(scene["scene_id"])
+        draft = draft_by_scene[scene_id]
+        scene["scene_acceptance_binding"] = {
+            "generation_id": contract["generation_id"],
+            "contract_digest": contract["contract_digest"],
+            "scene_slice_digest": draft["scene_slice_digest"],
+            "preflight_digest": preflight["preflight_digest"],
+        }
+
+    staging = (
+        Path("logs") / "authoring" / "staging" / contract["generation_id"]
+    )
+    outputs: dict[Path, str] = {
+        Path("script.md"): _render_manifest_data(original_script, script),
+        Path("video_manifest.md"): _render_manifest_data(
+            original_manifest, manifest
+        ),
+        staging / "contract.json": json.dumps(
+            contract, ensure_ascii=False, indent=2, sort_keys=True
+        ) + "\n",
+        staging / "preflight.json": json.dumps(
+            preflight, ensure_ascii=False, indent=2, sort_keys=True
+        ) + "\n",
+        staging / "source_ledger.json": json.dumps(
+            frontend._scene_acceptance_source_ledger(profile),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+        staging / "criterion_registry.json": json.dumps(
+            {
+                "schema_version": frontend.CRITERION_REGISTRY_VERSION,
+                "criterion_registry_sha256": frontend.criterion_registry_digest(),
+                "criteria": frontend.criterion_registry_payload(),
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+    }
+    for scene_id, draft in draft_by_scene.items():
+        outputs[staging / "scene_drafts" / f"{int(scene_id)}.json"] = (
+            json.dumps(draft, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n"
+        )
+    tracked = tuple(run_dir / relative for relative in outputs)
+    before = _capture_file_transaction(
+        tracked,
+        state_paths=(run_dir / "state.txt",),
+    )
+    try:
+        for relative, text in outputs.items():
+            _write_semantic_artifact_text(
+                run_dir,
+                run_dir / relative,
+                text,
+            )
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "authoring.scene_set.contract.status": "validated",
+                "authoring.scene_set.contract.path": (
+                    staging / "contract.json"
+                ).as_posix(),
+                "authoring.scene_set.contract.digest": contract[
+                    "contract_digest"
+                ],
+                "authoring.scene_set.generation_id": contract["generation_id"],
+                "authoring.scene_set.preflight.status": "passed",
+                "authoring.scene_set.preflight.digest": preflight[
+                    "preflight_digest"
+                ],
+                "authoring.scene_set.preflight.source_digest": preflight[
+                    "source_digest"
+                ],
+                "authoring.scene_set.preflight.criterion_registry_digest": (
+                    preflight["criterion_registry_digest"]
+                ),
+                "authoring.scene_set.preflight.error_count": "0",
+                "authoring.scene_set.preflight.failed_scene_ids": "",
+            },
+        )
+    except Exception:
+        _restore_file_transaction(before)
+        raise
 
 
 def _project_image_prompt_reviews_to_p630_p640(
@@ -16657,44 +17212,45 @@ async def _reconcile_after_semantic_repair(
         or stage == "image_prompt"
     )
     if dependency_stage and not full_run_context:
-        if stage == "image_prompt":
-            # Isolated/legacy fixtures do not have enough authoring evidence to
-            # run the upstream fixed point.  They may still rebuild the
-            # repaired request revision, but must never submit refreshed media
-            # while that evidence is unavailable.
-            _synchronize_image_prompt_repair_outputs(run_dir)
-            state = parse_state_file(run_dir / "state.txt")
-            if (
-                state.get(
-                    "review.semantic.image_prompt.repair.asset_refresh_required"
+        async with _serialized_run_write(run_dir, "run_artifacts"):
+            if stage == "image_prompt":
+                # Isolated/legacy fixtures do not have enough authoring evidence to
+                # run the upstream fixed point.  They may still rebuild the
+                # repaired request revision, but must never submit refreshed media
+                # while that evidence is unavailable.
+                _synchronize_image_prompt_repair_outputs(run_dir)
+                state = parse_state_file(run_dir / "state.txt")
+                if (
+                    state.get(
+                        "review.semantic.image_prompt.repair.asset_refresh_required"
+                    )
+                    == "true"
+                ):
+                    append_state_snapshot(
+                        run_dir / "state.txt",
+                        {
+                            "review.semantic.image_prompt.repair.asset_refresh.status": "deferred",
+                            "review.semantic.image_prompt.repair.asset_refresh.note": (
+                                "full upstream review context is unavailable"
+                            ),
+                        },
+                    )
+                _prepare_image_prompt_request_revision_for_review(
+                    run_dir,
+                    provider_ready=image_prompt_provider_ready,
                 )
-                == "true"
-            ):
-                append_state_snapshot(
-                    run_dir / "state.txt",
-                    {
-                        "review.semantic.image_prompt.repair.asset_refresh.status": "deferred",
-                        "review.semantic.image_prompt.repair.asset_refresh.note": (
-                            "full upstream review context is unavailable"
-                        ),
-                    },
-                )
-            _prepare_image_prompt_request_revision_for_review(
-                run_dir,
-                provider_ready=image_prompt_provider_ready,
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    f"review.semantic.{stage}.dependency_sync.status": (
+                        "deferred_until_full_run_materialization"
+                    ),
+                    f"review.semantic.{stage}.dependency_sync.changed_artifacts": (
+                        ", ".join(changed)
+                    ),
+                    f"review.semantic.{stage}.dependency_sync.updated_at": now_iso(),
+                },
             )
-        append_state_snapshot(
-            run_dir / "state.txt",
-            {
-                f"review.semantic.{stage}.dependency_sync.status": (
-                    "deferred_until_full_run_materialization"
-                ),
-                f"review.semantic.{stage}.dependency_sync.changed_artifacts": (
-                    ", ".join(changed)
-                ),
-                f"review.semantic.{stage}.dependency_sync.updated_at": now_iso(),
-            },
-        )
         return
     if not changed:
         raise RuntimeError(
@@ -16751,31 +17307,47 @@ async def _reconcile_after_semantic_repair(
             "slot.p570.status",
         ):
             invalidation_updates.pop(key, None)
-    append_state_snapshot(run_dir / "state.txt", invalidation_updates)
-    _invalidate_p600_supervisor_result(
-        run_dir,
-        invalidated_by=f"semantic.{stage}.producer_repair",
-    )
-
     def refresh_dependency_evidence() -> None:
         frontend = _load_frontend_review_runner()
+        _assert_bound_run_root(run_dir)
+        _reconcile_semantic_repair_authoring_projections(run_dir)
+        if stage == "scene_set":
+            _refresh_scene_acceptance_after_semantic_repair(run_dir)
+        compiled_selectors = _recompile_image_prompt_payloads_from_plans(run_dir)
         frontend._prepare_authoring_grounding(run_dir)
         frontend._refresh_p400_review_artifacts(run_dir)
         frontend._require_fresh_p400_readiness(run_dir)
-        _synchronize_image_prompt_repair_outputs(run_dir)
+        _synchronize_image_prompt_repair_outputs(
+            run_dir,
+            precompiled_selectors=compiled_selectors,
+        )
         # Request compilation binds compiled prompt payloads into the manifest.
         # Freeze P400 evidence again against that final pre-provider manifest.
         frontend._prepare_authoring_grounding(run_dir)
         frontend._refresh_p400_review_artifacts(run_dir)
         frontend._require_fresh_p400_readiness(run_dir)
-        frontend.prepare_grounding(run_dir)
+        # The repaired stage still truthfully holds a non-terminal semantic
+        # slot until the caller performs its fresh contextless rereview. A
+        # full p450 orchestration check cannot pass at this intermediate point;
+        # refresh only the downstream grounding needed to build that review.
+        # The provider gate runs the full p450 verifier after the semantic
+        # fixed point is current.
+        frontend.prepare_grounding(run_dir, verify_p450=False)
         frontend._refresh_downstream_review_artifacts(run_dir)
         # The downstream helper must not accidentally make the P400 evidence
         # stale while refreshing asset/scene readsets.
         frontend._require_fresh_p400_readiness(run_dir)
 
     try:
-        refresh_dependency_evidence()
+        async with _serialized_run_write(run_dir, "run_artifacts"):
+            append_state_snapshot(
+                run_dir / "state.txt", invalidation_updates
+            )
+            _invalidate_p600_supervisor_result(
+                run_dir,
+                invalidated_by=f"semantic.{stage}.producer_repair",
+            )
+            refresh_dependency_evidence()
         if stage == "image_prompt":
             fixed_point_job_id = (
                 str(job_id).strip()
@@ -16821,7 +17393,10 @@ async def _reconcile_after_semantic_repair(
                     # Generated reference bytes are part of request evidence.
                     # Re-materialize and re-enter the upstream fixed point
                     # before the repaired image-prompt revision is reviewed.
-                    refresh_dependency_evidence()
+                    async with _serialized_run_write(
+                        run_dir, "run_artifacts"
+                    ):
+                        refresh_dependency_evidence()
                     await _run_pre_asset_semantic_fixed_point(
                         fixed_point_job_id,
                         run_dir=run_dir,
@@ -18026,7 +18601,11 @@ async def _run_semantic_review(
     image_prompt_provider_ready: bool = True,
 ) -> None:
     _assert_bound_run_root(run_dir)
-    attempts = max(1, max_attempts or semantic_review_max_attempts())
+    attempts = (
+        semantic_review_max_attempts(stage)
+        if max_attempts is None
+        else max(1, max_attempts)
+    )
     if stage == "image_prompt":
         # The semantic pack must review the exact provider-ready snapshot.
         # Freeze is validation/state only; it must not mutate a reviewed source.
@@ -18076,7 +18655,7 @@ async def _run_semantic_review(
         )
         output_contract_attempts = (
             1
-            if stage in {"scene_detail", "image_prompt"}
+            if stage in {"scene_set", "scene_detail", "image_prompt"}
             else _semantic_review_output_contract_retry_attempts()
         )
         result: SemanticReviewStatus | None = None
@@ -18113,7 +18692,8 @@ async def _run_semantic_review(
                     run_dir=run_dir,
                     stage=stage,
                     operation="review",
-                    timeout_seconds=_semantic_review_no_progress_timeout_seconds(),
+                    timeout_seconds=_semantic_review_operation_no_progress_timeout_seconds(),
+                    hard_timeout_seconds=_semantic_review_once_hard_timeout_seconds(),
                     fingerprint=lambda: _semantic_review_progress_fingerprint(run_dir, stage),
                 )
             except asyncio.TimeoutError as exc:
@@ -18122,7 +18702,7 @@ async def _run_semantic_review(
                     stage,
                     attempt=attempt,
                     max_attempts=attempts,
-                    timeout_seconds=_semantic_review_no_progress_timeout_seconds(),
+                    timeout_seconds=_semantic_review_operation_no_progress_timeout_seconds(),
                 )
                 raise CodexAppServerTransportError(
                     f"{stage} semantic review timed out after no observable progress"
@@ -18230,6 +18810,47 @@ async def _run_semantic_review(
                     request_revision=image_prompt_request_revision,
                 )
             return
+        shift_left_escape_reason_keys = (
+            _scene_set_shift_left_escape_reason_keys(run_dir, stage)
+        )
+        if shift_left_escape_reason_keys:
+            failure_updates = semantic_loop_state_updates(
+                stage,
+                status="failed",
+                attempt=attempt,
+                max_attempts=attempts,
+                error_count=len(result.errors),
+            )
+            failure_updates.update(_semantic_review_failure_state(run_dir, stage))
+            failure_updates.update(
+                _scene_set_shift_left_escape_state_updates(
+                    run_dir,
+                    reason_keys=shift_left_escape_reason_keys,
+                )
+            )
+            append_state_snapshot(run_dir / "state.txt", failure_updates)
+            error_text = (
+                "scene_set semantic review shift-left escape: "
+                + ", ".join(shift_left_escape_reason_keys)
+            )
+            write_app_server_debug_log(
+                run_dir=run_dir,
+                operation="semantic_review",
+                status="failed_shift_left_escape",
+                item_id=job_id,
+                request={
+                    "stage": stage,
+                    "attempt": attempt,
+                    "maxAttempts": attempts,
+                },
+                response={
+                    **_semantic_review_failure_context(run_dir, stage),
+                    "routing": "authoring_contract_defect",
+                    "reasonKeys": shift_left_escape_reason_keys,
+                },
+                error=error_text,
+            )
+            raise RuntimeError(error_text)
         if attempt >= attempts:
             failure_updates = semantic_loop_state_updates(
                 stage,
@@ -18284,6 +18905,7 @@ async def _run_semantic_review(
                 stage=stage,
                 operation="producer_repair",
                 timeout_seconds=_semantic_repair_no_progress_timeout_seconds(),
+                hard_timeout_seconds=_semantic_repair_once_hard_timeout_seconds(),
                 fingerprint=lambda: _semantic_repair_progress_fingerprint(run_dir, stage, attempt),
                 pending_state=lambda pending_seconds: _semantic_repair_pending_state(
                     run_dir,
@@ -18534,6 +19156,22 @@ def _semantic_repair_report_status(report_path: Path) -> str:
     return parse_judgment_report_status(report_text) or "pending"
 
 
+def _canonical_semantic_repair_target_selector(value: str) -> str:
+    scene_match = re.fullmatch(
+        r"scene:?(\d+(?:\.\d+)*)"
+        r"(?:\.[A-Za-z_][A-Za-z0-9_-]*"
+        r"(?:\.[A-Za-z_][A-Za-z0-9_-]*|\[\d+\])*)?",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if scene_match:
+        normalized_id = ".".join(
+            str(int(part)) for part in scene_match.group(1).split(".")
+        )
+        return f"scene:{normalized_id}"
+    return value
+
+
 def _semantic_repair_target_selectors(run_dir: Path, stage: str) -> list[str]:
     report_path = run_dir / semantic_review_relpaths(stage)["report"]
     if not report_path.exists():
@@ -18554,9 +19192,10 @@ def _semantic_repair_target_selectors(run_dir: Path, stage: str) -> list[str]:
                 in_selector_list = False
             values = []
         for value in values:
-            if value not in seen:
-                seen.add(value)
-                selectors.append(value)
+            canonical = _canonical_semantic_repair_target_selector(value)
+            if canonical not in seen:
+                seen.add(canonical)
+                selectors.append(canonical)
     return selectors[:50]
 
 
@@ -18626,6 +19265,107 @@ def _semantic_review_failure_context(run_dir: Path, stage: str) -> dict[str, Any
         "blockedEntries": _semantic_report_list_values(report_text, "blocked_entries"),
         "reasonKeys": _semantic_report_list_values(report_text, "reason_keys"),
         "sourceArtifacts": source_artifacts,
+    }
+
+
+SCENE_SET_PROMPT_SEMANTIC_REASON_KEYS = (
+    "semantic_subject_mismatch",
+    "semantic_location_mismatch",
+    "semantic_timeline_mismatch",
+    "semantic_reveal_order_mismatch",
+    "scene_location_route_order_mismatch",
+    "scene_time_of_day_mismatch",
+    "scene_set_obligation_missing",
+    "scene_set_handoff_weak",
+    "scene_event_abstract_only",
+)
+SCENE_SET_REPAIRABLE_SEMANTIC_REASON_KEYS = frozenset(
+    {
+        *SCENE_SET_PROMPT_SEMANTIC_REASON_KEYS,
+        "scene_set.role_coverage_missing",
+        "scene_set.handoff_state_mismatch",
+        "scene_set.time_transition_cue_missing",
+        "scene_set.causal_proof_weak",
+        "scene_set.scene_event_missing_source_grounding",
+    }
+)
+
+
+def _scene_set_shift_left_escape_reason_keys(
+    run_dir: Path,
+    stage: str,
+) -> list[str]:
+    """Return deterministic findings that escaped a passed new-run preflight."""
+
+    if stage != "scene_set":
+        return []
+    state = parse_state_file(run_dir / "state.txt")
+    preflight_digest = str(
+        state.get("authoring.scene_set.preflight.digest") or ""
+    )
+    if (
+        state.get("authoring.scene_set.preflight.status") != "passed"
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", preflight_digest)
+    ):
+        return []
+    report_path = run_dir / semantic_review_relpaths(stage)["report"]
+    if not report_path.exists():
+        return []
+    report_text = report_path.read_text(encoding="utf-8", errors="replace")
+    escaped: list[str] = []
+    for reason_key in _semantic_report_list_values(report_text, "reason_keys"):
+        criterion = resolve_criterion(reason_key, stage=stage)
+        canonical_reason_key = str(
+            (criterion or {}).get("canonical_reason_key") or reason_key
+        )
+        if (
+            reason_key in SCENE_SET_REPAIRABLE_SEMANTIC_REASON_KEYS
+            or canonical_reason_key
+            in SCENE_SET_REPAIRABLE_SEMANTIC_REASON_KEYS
+        ):
+            continue
+        if not criterion:
+            if reason_key not in escaped:
+                escaped.append(reason_key)
+            continue
+        if (
+            criterion.get("owner") != "deterministic"
+            or criterion.get("provider_repair_allowed") is True
+        ):
+            continue
+        if canonical_reason_key not in escaped:
+            escaped.append(canonical_reason_key)
+    return escaped
+
+
+def _scene_set_shift_left_escape_state_updates(
+    run_dir: Path,
+    *,
+    reason_keys: list[str],
+) -> dict[str, str]:
+    state = parse_state_file(run_dir / "state.txt")
+    return {
+        "review.semantic.scene_set.shift_left_escape.status": "detected",
+        "review.semantic.scene_set.shift_left_escape.count": str(
+            len(reason_keys)
+        ),
+        "review.semantic.scene_set.shift_left_escape.reason_keys": ", ".join(
+            reason_keys
+        )[:2000],
+        "review.semantic.scene_set.shift_left_escape.preflight_digest": str(
+            state.get("authoring.scene_set.preflight.digest") or ""
+        ),
+        "review.semantic.scene_set.shift_left_escape.routing": (
+            "authoring_contract_defect"
+        ),
+        "review.semantic.scene_set.repair.active": "false",
+        "review.semantic.scene_set.repair.skipped": "true",
+        "review.semantic.scene_set.repair.skipped_reason": "shift_left_escape",
+        "slot.p410.status": "failed",
+        "slot.p410.note": (
+            "scene_set deterministic finding escaped authoring preflight; "
+            "authoring contract repair required"
+        ),
     }
 
 
@@ -18703,11 +19443,18 @@ def _semantic_repair_no_progress_timeout_seconds() -> float:
 
 
 def _semantic_review_once_hard_timeout_seconds() -> float:
-    return _semantic_review_no_progress_timeout_seconds()
+    # The outer operation must outlive the three shard-local transport
+    # attempts; otherwise it cancels the aggregate before the failed shard can
+    # be retried selectively.
+    return float(semantic_review_timeout_seconds() * 4)
+
+
+def _semantic_review_operation_no_progress_timeout_seconds() -> float:
+    return float(semantic_review_timeout_seconds() * 3.5)
 
 
 def _semantic_repair_once_hard_timeout_seconds() -> float:
-    return _semantic_repair_no_progress_timeout_seconds()
+    return float(semantic_repair_timeout_seconds() * 2)
 
 
 def _semantic_review_progress_fingerprint(run_dir: Path, stage: str) -> dict[str, str]:
@@ -18761,6 +19508,7 @@ async def _await_semantic_operation_with_progress_watchdog(
     stage: str,
     operation: str,
     timeout_seconds: float,
+    hard_timeout_seconds: float | None = None,
     fingerprint: Callable[[], dict[str, str]],
     pending_state: Callable[[float], dict[str, str]] | None = None,
 ):
@@ -18780,9 +19528,41 @@ async def _await_semantic_operation_with_progress_watchdog(
     # watchdog starts after its own bookkeeping so that observer overhead is
     # never mistaken for producer inactivity.
     last_progress_at = time.monotonic()
+    hard_started_at = last_progress_at
+    last_pending_state_at = last_progress_at
+    hard_deadline = (
+        hard_started_at + hard_timeout_seconds
+        if hard_timeout_seconds is not None
+        else None
+    )
+
+    async def raise_hard_timeout() -> None:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                f"review.semantic.{stage}.watchdog.status": "hard_timeout",
+                f"review.semantic.{stage}.watchdog.operation": operation,
+                f"review.semantic.{stage}.watchdog.last_progress_at": now_iso(),
+                f"review.semantic.{stage}.watchdog.hard_timeout_seconds": f"{hard_timeout_seconds:.0f}",
+            },
+        )
+        raise asyncio.TimeoutError
+
     try:
         while True:
-            done, _ = await asyncio.wait({task}, timeout=SEMANTIC_TURN_ARTIFACT_POLL_SECONDS)
+            wait_timeout = SEMANTIC_TURN_ARTIFACT_POLL_SECONDS
+            if hard_deadline is not None:
+                remaining = hard_deadline - time.monotonic()
+                if remaining <= 0:
+                    await raise_hard_timeout()
+                wait_timeout = min(wait_timeout, remaining)
+            done, _ = await asyncio.wait({task}, timeout=wait_timeout)
+            if hard_deadline is not None and time.monotonic() >= hard_deadline:
+                await raise_hard_timeout()
             if task in done:
                 result = await task
                 append_state_snapshot(
@@ -18821,12 +19601,21 @@ async def _await_semantic_operation_with_progress_watchdog(
                     },
                 )
                 raise asyncio.TimeoutError
-            if pending_state is not None:
+            if (
+                pending_state is not None
+                and time.monotonic() - last_pending_state_at
+                >= SEMANTIC_WATCHDOG_STATE_UPDATE_SECONDS
+            ):
                 bookkeeping_started_at = time.monotonic()
-                append_state_snapshot(
+                heartbeat_at = now_iso()
+                append_state_delta(
                     run_dir / "state.txt",
                     pending_state(time.monotonic() - started_at),
+                    event_type="semantic.watchdog.heartbeat",
+                    occurred_at=heartbeat_at,
+                    committed_at=heartbeat_at,
                 )
+                last_pending_state_at = time.monotonic()
                 last_progress_at += time.monotonic() - bookkeeping_started_at
     except Exception:
         if not task.done():
@@ -19469,6 +20258,31 @@ class _BoundSemanticRepairWorkspace:
         )
 
 
+def _validate_semantic_repair_structured_output(
+    *,
+    relative: Path,
+    original_text: str,
+    repaired_text: str,
+) -> None:
+    """Reject a repair that corrupts an existing fenced-YAML artifact."""
+
+    if "```yaml" not in original_text.lower():
+        return
+    try:
+        loaded = yaml.safe_load(
+            _extract_manifest_yaml_text(repaired_text)
+        )
+    except yaml.YAMLError as exc:
+        raise RuntimeError(
+            f"semantic repair produced invalid YAML: {relative} ({exc})"
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise RuntimeError(
+            "semantic repair structured artifact root must be a mapping: "
+            f"{relative}"
+        )
+
+
 def _semantic_repair_allowed_paths(
     stage: str,
 ) -> tuple[set[Path], tuple[Path, ...]]:
@@ -19650,6 +20464,21 @@ def _prepare_bound_semantic_repair_workspace(
             (private_root / relative).parent.mkdir(parents=True, exist_ok=True)
         for prefix in allowed_prefixes:
             (private_root / prefix).mkdir(parents=True, exist_ok=True)
+        staged_review_sha256s = [
+            {
+                "path": relative.as_posix(),
+                "sha256": immutable_sha256s[relative],
+            }
+            for relative in sorted(
+                review_relpaths,
+                key=lambda item: item.as_posix(),
+            )
+            if relative in immutable_sha256s
+        ]
+        if len(staged_review_sha256s) != len(review_relpaths):
+            raise RuntimeError(
+                "semantic repair staged review artifact is not immutable"
+            )
         allowed_display = [
             *[item.as_posix() for item in sorted(allowed_exact)],
             *[f"{item.as_posix()}/**" for item in allowed_prefixes],
@@ -19669,7 +20498,27 @@ def _prepare_bound_semantic_repair_workspace(
                 + json.dumps(allowed_display, ensure_ascii=False),
                 "- Do not create or modify any other workspace path.",
                 "- This isolated commit accepts UTF-8 text artifacts only; leave binary media regeneration to the orchestrator after repair.",
-                f"- Write `{report_relative.as_posix()}` with `status: done`, the exact `repair_input_digest`, and `changed_artifacts` exactly matching every file you changed.",
+                f"- Write `{report_relative.as_posix()}` with `status: done`, the exact `repair_input_digest`, and `changed_artifacts` listing every approved production artifact whose contents you changed. Do not list the producer report itself; it is control metadata, not a production artifact.",
+                "",
+                "## Trusted Staged Immutable Review Artifacts",
+                "",
+                "- The Bound Semantic Review Snapshot hashes above are a canonical orchestrator binding and must not be compared to path-rebased staged-copy bytes.",
+                "- The mapping below is the trusted SHA-256 baseline for the immutable review artifacts as staged in this isolated workspace.",
+                "- It excludes mutable production artifacts, the producer report, and this repair prompt so the mapping has no circular prompt hash.",
+                "- The orchestrator independently verifies both the canonical and staged baselines and rejects any mutation before import.",
+                "",
+                "```json",
+                json.dumps(
+                    {
+                        "schema_version": "semantic_repair_staged_review_artifacts_v1",
+                        "artifacts": staged_review_sha256s,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                    allow_nan=False,
+                ),
+                "```",
                 "",
             ]
         )
@@ -19848,11 +20697,35 @@ def _import_bound_semantic_repair_outputs(
         "changed_artifacts",
     )
     changed_names = sorted(item.as_posix() for item in changed)
-    if sorted(reported_changes) != changed_names or len(reported_changes) != len(
-        changed_names
-    ):
+    reported_paths: list[Path] = []
+    for raw in reported_changes:
+        relative = _semantic_workspace_relpath(
+            raw,
+            field="producer_report.changed_artifacts",
+        )
+        if relative is None:
+            raise RuntimeError(
+                "semantic repair producer report contains an empty changed_artifact"
+            )
+        if relative != report_relative and not workspace.allows(relative):
+            raise RuntimeError(
+                "semantic repair producer report names an unapproved changed_artifact: "
+                f"{relative}"
+            )
+        reported_paths.append(relative)
+    if len(set(reported_paths)) != len(reported_paths):
         raise RuntimeError(
-            "semantic repair producer report changed_artifacts does not match the validated diff"
+            "semantic repair producer report contains duplicate changed_artifacts"
+        )
+    reported_path_set = set(reported_paths)
+    missing_reported_changes = [
+        item.as_posix() for item in changed if item not in reported_path_set
+    ]
+    if missing_reported_changes:
+        raise RuntimeError(
+            "semantic repair producer report changed_artifacts does not include every "
+            "validated diff: "
+            + ", ".join(sorted(missing_reported_changes))
         )
     _verify_bound_semantic_repair_canonical_baseline(workspace)
     normalized_outputs: dict[Path, str] = {}
@@ -19867,6 +20740,17 @@ def _import_bound_semantic_repair_outputs(
             text,
             private_root=workspace.root,
             lexical_root=workspace.run_dir,
+        )
+    for relative in sorted(changed):
+        current_text = read_regular_file_nofollow(
+            workspace.run_dir,
+            relative,
+            expected_root_identity=workspace.binding.identity,
+        ).decode("utf-8")
+        _validate_semantic_repair_structured_output(
+            relative=relative,
+            original_text=current_text,
+            repaired_text=normalized_outputs[relative],
         )
     for relative in sorted(changed):
         expected_before = workspace.canonical_baseline_sha256s.get(relative)
@@ -19939,6 +20823,28 @@ async def _run_semantic_review_once(
     max_attempts: int,
     final_attempt: bool,
 ) -> SemanticReviewStatus:
+    if (
+        current_run_root_binding() is None
+        and stage in {"scene_set", "scene_detail"}
+    ):
+        lexical_run_dir = Path(os.path.abspath(os.fspath(run_dir)))
+        opened = os.stat(lexical_run_dir, follow_symlinks=False)
+        if not stat.S_ISDIR(opened.st_mode):
+            raise RunRootBindingError(
+                f"semantic review run root is not a directory: {run_dir}"
+            )
+        with bind_run_root(
+            lexical_run_dir,
+            expected_identity=(opened.st_dev, opened.st_ino),
+        ):
+            return await _run_semantic_review_once(
+                job_id,
+                run_dir=lexical_run_dir,
+                stage=stage,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                final_attempt=final_attempt,
+            )
     binding = _assert_bound_run_root(run_dir)
     # API callers commonly hold output/<run_id> as a relative path.  App-server
     # cwd is process-relative, so resolve it once to avoid duplicating the run
@@ -19948,10 +20854,11 @@ async def _run_semantic_review_once(
         if binding is not None
         else run_dir.resolve()
     )
-    if stage == "scene_detail":
+    if stage in {"scene_set", "scene_detail"}:
         return await _run_scene_detail_sharded_semantic_review_once(
             job_id,
             run_dir=run_dir,
+            stage=stage,
             attempt=attempt,
             max_attempts=max_attempts,
             final_attempt=final_attempt,
@@ -20048,6 +20955,17 @@ async def _run_semantic_review_once(
             timeout_seconds=semantic_review_timeout_seconds(),
             report_path=provider_report_path,
             is_completed=provider_is_completed,
+            progress_callback=(
+                (
+                    lambda notification: _write_semantic_turn_activity_marker(
+                        run_dir,
+                        report_path,
+                        notification,
+                    )
+                )
+                if review_workspace is not None
+                else None
+            ),
         )
         _assert_bound_run_root(run_dir)
         if review_workspace is not None or not _semantic_review_report_completed(
@@ -20209,6 +21127,9 @@ async def _run_semantic_review_once(
             *_semantic_negative_verdict_contract_errors(
                 report_text,
                 scope_entry_ids=_semantic_review_scope_entry_ids(
+                    scope_path
+                ),
+                source_artifacts=_semantic_scope_source_artifacts(
                     scope_path
                 ),
             ),
@@ -20379,6 +21300,134 @@ def _load_semantic_scope(scope_path: Path) -> dict[str, Any]:
 def _semantic_scope_input_digest(scope_path: Path) -> str:
     value = str(_load_semantic_scope(scope_path).get("semantic_review_input_digest") or "").strip()
     return value if re.fullmatch(r"sha256:[0-9a-f]{64}", value) else ""
+
+
+@dataclass(frozen=True)
+class _SceneSemanticReviewGeneration:
+    stage: str
+    generation_id: str
+    collection_sha256: str
+    scope_binding_sha256: str
+    input_digest: str
+
+
+def _read_bound_semantic_run_file(
+    run_dir: Path,
+    path: Path,
+) -> bytes:
+    binding = _assert_bound_run_root(run_dir)
+    if binding is None:
+        raise RunRootBindingError(
+            "semantic review generation reads require a bound run root"
+        )
+    relative = _bound_semantic_relative_path(
+        Path(binding.lexical_root),
+        path,
+    )
+    return read_regular_file_nofollow(
+        Path(binding.lexical_root),
+        relative,
+        expected_root_identity=binding.identity,
+    )
+
+
+def _capture_scene_semantic_review_generation(
+    *,
+    run_dir: Path,
+    stage: str,
+    collection_path: Path,
+    scope_path: Path,
+) -> _SceneSemanticReviewGeneration:
+    """Capture one stable canonical collection/scope generation."""
+
+    first_collection = _read_bound_semantic_run_file(
+        run_dir,
+        collection_path,
+    )
+    first_scope = _read_bound_semantic_run_file(run_dir, scope_path)
+    second_collection = _read_bound_semantic_run_file(
+        run_dir,
+        collection_path,
+    )
+    second_scope = _read_bound_semantic_run_file(run_dir, scope_path)
+    if first_collection != second_collection or first_scope != second_scope:
+        raise RuntimeError(
+            f"canonical {stage} semantic review generation changed while "
+            "it was captured"
+        )
+    try:
+        scope = json.loads(first_scope.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"canonical {stage} semantic review scope is unreadable"
+        ) from exc
+    if not isinstance(scope, dict) or str(scope.get("stage") or "") != stage:
+        raise RuntimeError(
+            f"canonical {stage} semantic review scope has the wrong stage"
+        )
+    generation_id = str(scope.get("review_generation_id") or "").strip()
+    collection_sha256 = hashlib.sha256(first_collection).hexdigest()
+    recorded_generation_collection_sha256 = str(
+        scope.get("review_generation_collection_sha256") or ""
+    ).strip()
+    recorded_collection_sha256 = str(
+        scope.get("collection_sha256") or ""
+    ).strip()
+    scope_binding_sha256 = str(
+        scope.get("scope_binding_sha256") or ""
+    ).strip()
+    input_digest = str(
+        scope.get("semantic_review_input_digest") or ""
+    ).strip()
+    issues: list[str] = []
+    if re.fullmatch(r"[0-9a-f]{32}", generation_id) is None:
+        issues.append("review_generation_id is invalid")
+    if recorded_generation_collection_sha256 != collection_sha256:
+        issues.append(
+            "review_generation_collection_sha256 does not match collection"
+        )
+    if recorded_collection_sha256 != collection_sha256:
+        issues.append("collection_sha256 does not match collection")
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", scope_binding_sha256) is None
+        or scope_binding_sha256
+        != semantic_review_scope_binding_sha256(scope)
+    ):
+        issues.append("scope_binding_sha256 is stale")
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", input_digest) is None:
+        issues.append("semantic_review_input_digest is invalid")
+    if issues:
+        raise RuntimeError(
+            f"canonical {stage} semantic review generation is invalid: "
+            + "; ".join(issues)
+        )
+    return _SceneSemanticReviewGeneration(
+        stage=stage,
+        generation_id=generation_id,
+        collection_sha256=collection_sha256,
+        scope_binding_sha256=scope_binding_sha256,
+        input_digest=input_digest,
+    )
+
+
+def _assert_scene_semantic_review_generation(
+    *,
+    run_dir: Path,
+    collection_path: Path,
+    scope_path: Path,
+    expected: _SceneSemanticReviewGeneration,
+) -> None:
+    current = _capture_scene_semantic_review_generation(
+        run_dir=run_dir,
+        stage=expected.stage,
+        collection_path=collection_path,
+        scope_path=scope_path,
+    )
+    if current != expected:
+        raise RuntimeError(
+            f"canonical {expected.stage} semantic review generation changed "
+            "during shard review"
+        )
 
 
 def _write_semantic_artifact_text(run_dir: Path, path: Path, text: str) -> Path:
@@ -21947,12 +22996,38 @@ async def _run_scene_detail_sharded_semantic_review_once(
     job_id: str,
     *,
     run_dir: Path,
+    stage: str = "scene_detail",
     attempt: int,
     max_attempts: int,
     final_attempt: bool,
 ) -> SemanticReviewStatus:
     _assert_bound_run_root(run_dir)
-    stage = "scene_detail"
+    async with _serialized_run_write(
+        run_dir,
+        f"semantic_review_{stage}",
+    ):
+        return await _run_scene_detail_sharded_semantic_review_once_unlocked(
+            job_id,
+            run_dir=run_dir,
+            stage=stage,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            final_attempt=final_attempt,
+        )
+
+
+async def _run_scene_detail_sharded_semantic_review_once_unlocked(
+    job_id: str,
+    *,
+    run_dir: Path,
+    stage: str = "scene_detail",
+    attempt: int,
+    max_attempts: int,
+    final_attempt: bool,
+) -> SemanticReviewStatus:
+    _assert_bound_run_root(run_dir)
+    if stage not in {"scene_set", "scene_detail"}:
+        raise ValueError(f"unsupported per-scene semantic review stage: {stage}")
     _run_bound_subprocess(
         run_dir,
         [
@@ -21972,19 +23047,36 @@ async def _run_scene_detail_sharded_semantic_review_once(
     collection_path = run_dir / relpaths["collection"]
     scope_path = run_dir / relpaths["scope"]
     report_path = run_dir / relpaths["report"]
-    shard_dir = run_dir / "logs" / "review" / "semantic" / "scene_detail_shards" / f"attempt_{attempt:02d}"
-    concurrency = scene_detail_review_concurrency()
-    transport_retry_attempts = scene_detail_transport_retry_attempts()
+    shard_dir = (
+        run_dir
+        / "logs"
+        / "review"
+        / "semantic"
+        / f"{stage}_shards"
+        / f"attempt_{attempt:02d}"
+    )
+    concurrency = (
+        scene_set_review_concurrency()
+        if stage == "scene_set"
+        else scene_detail_review_concurrency()
+    )
+    transport_retry_attempts = (
+        scene_set_transport_retry_attempts()
+        if stage == "scene_set"
+        else scene_detail_transport_retry_attempts()
+    )
+    state_prefix = f"review.semantic.{stage}.shards"
     entry_ids = _semantic_review_scope_entry_ids(scope_path)
     if not entry_ids:
         _write_scene_detail_shard_aggregate_report(
             run_dir,
             report_path,
+            stage=stage,
             semantic_review_input_digest_value=_semantic_scope_input_digest(scope_path),
             status="failed",
             reviewed_entries=[],
-            blocked_entries=["scene_detail"],
-            findings=["scene_detail scope has no entry_ids; cannot shard review"],
+            blocked_entries=[stage],
+            findings=[f"{stage} scope has no entry_ids; cannot shard review"],
             reason_keys=["semantic_review_scope_missing_entry_ids"],
             notes=[],
         )
@@ -21992,19 +23084,22 @@ async def _run_scene_detail_sharded_semantic_review_once(
         state_updates = review_status_to_state(stage, result)
         state_updates.update(
             {
-                "review.semantic.scene_detail.shards.status": "failed",
-                "review.semantic.scene_detail.shards.count": "0",
-                "review.semantic.scene_detail.shards.concurrency": str(concurrency),
-                "review.semantic.scene_detail.shards.failed_count": "1",
-                "review.semantic.scene_detail.shards.attempt": str(attempt),
-                "review.semantic.scene_detail.shards.dir": shard_dir.relative_to(run_dir).as_posix(),
-                "review.semantic.scene_detail.shards.updated_at": now_iso(),
+                f"{state_prefix}.status": "failed",
+                f"{state_prefix}.count": "0",
+                f"{state_prefix}.concurrency": str(concurrency),
+                f"{state_prefix}.failed_count": "1",
+                f"{state_prefix}.attempt": str(attempt),
+                f"{state_prefix}.dir": shard_dir.relative_to(run_dir).as_posix(),
+                f"{state_prefix}.updated_at": now_iso(),
             }
         )
         slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
         if slot:
             state_updates[f"slot.{slot}.status"] = "failed" if final_attempt else "in_progress"
-            state_updates[f"slot.{slot}.note"] = "contextless semantic scene_detail shard review could not start because scope entry_ids were missing"
+            state_updates[f"slot.{slot}.note"] = (
+                f"contextless semantic {stage} shard review could not start "
+                "because scope entry_ids were missing"
+            )
         append_state_snapshot(run_dir / "state.txt", state_updates)
         write_app_server_debug_log(
             run_dir=run_dir,
@@ -22031,11 +23126,98 @@ async def _run_scene_detail_sharded_semantic_review_once(
         )
         return result
 
+    try:
+        collection_bytes = _read_bound_semantic_run_file(
+            run_dir,
+            collection_path,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        collection_sha256 = ""
+        sections: dict[str, str] = {}
+        collection_issues = (
+            f"cannot read canonical {stage} collection: "
+            f"{type(exc).__name__}: {exc}",
+        )
+    else:
+        collection_text = collection_bytes.decode("utf-8", errors="replace")
+        collection_sha256 = hashlib.sha256(collection_bytes).hexdigest()
+        sections, collection_issues = _semantic_collection_sections_for_scope(
+            collection_text,
+            expected_entry_ids=entry_ids,
+        )
+    if collection_issues:
+        _write_scene_detail_shard_aggregate_report(
+            run_dir,
+            report_path,
+            stage=stage,
+            semantic_review_input_digest_value=_semantic_scope_input_digest(
+                scope_path
+            ),
+            status="failed",
+            reviewed_entries=entry_ids,
+            blocked_entries=entry_ids,
+            findings=list(collection_issues),
+            reason_keys=["semantic_review_selector_coverage_invalid"],
+            notes=["provider review was not started"],
+        )
+        result = check_semantic_review(run_dir, stage)
+        state_updates = review_status_to_state(stage, result)
+        state_updates.update(
+            {
+                f"{state_prefix}.status": "failed",
+                f"{state_prefix}.count": str(len(entry_ids)),
+                f"{state_prefix}.concurrency": str(concurrency),
+                f"{state_prefix}.failed_count": str(len(entry_ids)),
+                f"{state_prefix}.attempt": str(attempt),
+                f"{state_prefix}.dir": shard_dir.relative_to(
+                    run_dir
+                ).as_posix(),
+                f"{state_prefix}.coverage.status": "invalid",
+                f"{state_prefix}.updated_at": now_iso(),
+            }
+        )
+        slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+        if slot:
+            state_updates[f"slot.{slot}.status"] = (
+                "failed" if final_attempt else "in_progress"
+            )
+            state_updates[f"slot.{slot}.note"] = (
+                f"contextless semantic {stage} shard review blocked by "
+                "invalid collection coverage"
+            )
+        append_state_snapshot(run_dir / "state.txt", state_updates)
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="semantic_review",
+            status="failed" if final_attempt else "changes_requested",
+            item_id=job_id,
+            request={
+                "stage": stage,
+                "attempt": attempt,
+                "maxAttempts": max_attempts,
+                "mode": "per_scene_shards",
+                "concurrency": concurrency,
+                "shardCount": len(entry_ids),
+                "report": str(report_path.relative_to(run_dir)),
+            },
+            response={
+                "status": result.status,
+                "entryCount": result.entry_count,
+                "coverageErrors": list(collection_issues),
+                "reasonKeys": [
+                    "semantic_review_selector_coverage_invalid"
+                ],
+            },
+            error="; ".join(collection_issues),
+        )
+        return result
+
     canonical_scope = _load_semantic_scope(scope_path)
-    scene_detail_shards = [
+    scene_shards = [
         _scene_detail_shard_descriptor(
             run_dir,
             shard_dir,
+            stage=stage,
             entry_id=entry_id,
             entry_index=index,
         )
@@ -22043,13 +23225,22 @@ async def _run_scene_detail_sharded_semantic_review_once(
     ]
     assigned_entry_ids = [
         entry_id
-        for shard in scene_detail_shards
+        for shard in scene_shards
         for entry_id in shard["entry_ids"]
     ]
+    entry_projection_sha256s = {
+        entry_id: hashlib.sha256(
+            sections[entry_id].encode("utf-8")
+        ).hexdigest()
+        for entry_id in entry_ids
+    }
     canonical_scope.update(
         {
+            "review_generation_id": uuid.uuid4().hex,
+            "review_generation_collection_sha256": collection_sha256,
+            "entry_projection_sha256s": entry_projection_sha256s,
             "review_scope": "per_scene_shards",
-            "shards": scene_detail_shards,
+            "shards": scene_shards,
             "coverage": {
                 "status": "valid",
                 "expected_entry_count": len(entry_ids),
@@ -22061,6 +23252,13 @@ async def _run_scene_detail_sharded_semantic_review_once(
             },
         }
     )
+    if hashlib.sha256(
+        _read_bound_semantic_run_file(run_dir, collection_path)
+    ).hexdigest() != collection_sha256:
+        raise RuntimeError(
+            f"canonical {stage} semantic review collection changed after "
+            "selector preflight"
+        )
     _write_semantic_artifact_text(
         run_dir,
         scope_path,
@@ -22073,18 +23271,27 @@ async def _run_scene_detail_sharded_semantic_review_once(
         prompt_path=run_dir / relpaths["prompt"],
         report_path=report_path,
     )
+    canonical_generation = _capture_scene_semantic_review_generation(
+        run_dir=run_dir,
+        stage=stage,
+        collection_path=collection_path,
+        scope_path=scope_path,
+    )
 
-    collection_text = collection_path.read_text(encoding="utf-8", errors="replace")
-    sections = _semantic_collection_sections_by_entry(collection_text)
+    compact_scene_context = (
+        _compact_ordered_scene_context(sections)
+        if stage == "scene_set"
+        else []
+    )
     append_state_snapshot(
         run_dir / "state.txt",
         {
-            "review.semantic.scene_detail.shards.status": "reviewing",
-            "review.semantic.scene_detail.shards.count": str(len(entry_ids)),
-            "review.semantic.scene_detail.shards.concurrency": str(concurrency),
-            "review.semantic.scene_detail.shards.attempt": str(attempt),
-            "review.semantic.scene_detail.shards.dir": shard_dir.relative_to(run_dir).as_posix(),
-            "review.semantic.scene_detail.shards.updated_at": now_iso(),
+            f"{state_prefix}.status": "reviewing",
+            f"{state_prefix}.count": str(len(entry_ids)),
+            f"{state_prefix}.concurrency": str(concurrency),
+            f"{state_prefix}.attempt": str(attempt),
+            f"{state_prefix}.dir": shard_dir.relative_to(run_dir).as_posix(),
+            f"{state_prefix}.updated_at": now_iso(),
         },
     )
 
@@ -22095,12 +23302,19 @@ async def _run_scene_detail_sharded_semantic_review_once(
                 job_id,
                 run_dir=run_dir,
                 shard_dir=shard_dir,
+                stage=stage,
                 entry_id=entry_id,
                 entry_index=index,
                 total_entries=len(entry_ids),
                 collection_section=sections.get(entry_id, ""),
+                compact_scene_context=compact_scene_context,
+                canonical_collection_path=collection_path,
                 canonical_scope_path=scope_path,
                 canonical_report_path=report_path,
+                canonical_generation=canonical_generation,
+                canonical_entry_projection_sha256=(
+                    entry_projection_sha256s[entry_id]
+                ),
                 attempt=attempt,
                 max_attempts=max_attempts,
                 final_attempt=final_attempt,
@@ -22118,7 +23332,11 @@ async def _run_scene_detail_sharded_semantic_review_once(
         if isinstance(raw_result, BaseException):
             if is_codex_transport_error(raw_result):
                 shard_results.append(
-                    _scene_detail_transport_failure_result(entry_id=entry_id, exc=raw_result)
+                    _scene_detail_transport_failure_result(
+                        stage=stage,
+                        entry_id=entry_id,
+                        exc=raw_result,
+                    )
                 )
                 continue
             unexpected_exceptions.append(raw_result)
@@ -22132,6 +23350,14 @@ async def _run_scene_detail_sharded_semantic_review_once(
             result_item
             for result_item in shard_results
             if str(result_item.get("status") or "") == "transport_failed"
+            and (
+                str(result_item.get("transport_error_kind") or "")
+                != "output_contract_failed"
+                or (
+                    stage in {"scene_set", "scene_detail"}
+                    and transport_attempt == 2
+                )
+            )
         ]
         if not transport_failures_for_retry:
             break
@@ -22139,20 +23365,20 @@ async def _run_scene_detail_sharded_semantic_review_once(
         append_state_snapshot(
             run_dir / "state.txt",
             {
-                "review.semantic.scene_detail.shards.transport.status": "retrying",
-                "review.semantic.scene_detail.shards.transport.attempt": str(transport_attempt),
-                "review.semantic.scene_detail.shards.transport.max_attempts": str(transport_retry_attempts),
-                "review.semantic.scene_detail.shards.transport.retry_entries": ", ".join(retry_entry_ids),
-                "review.semantic.scene_detail.shards.updated_at": now_iso(),
+                f"{state_prefix}.transport.status": "retrying",
+                f"{state_prefix}.transport.attempt": str(transport_attempt),
+                f"{state_prefix}.transport.max_attempts": str(transport_retry_attempts),
+                f"{state_prefix}.transport.retry_entries": ", ".join(retry_entry_ids),
+                f"{state_prefix}.updated_at": now_iso(),
             },
         )
         for entry_id in retry_entry_ids:
             append_state_snapshot(
                 run_dir / "state.txt",
                 {
-                    f"review.semantic.scene_detail.shards.{_safe_scene_detail_shard_label(entry_id)}.transport.status": "retrying",
-                    f"review.semantic.scene_detail.shards.{_safe_scene_detail_shard_label(entry_id)}.transport.retry_count": str(transport_attempt - 1),
-                    f"review.semantic.scene_detail.shards.{_safe_scene_detail_shard_label(entry_id)}.transport.max_attempts": str(transport_retry_attempts),
+                    f"{state_prefix}.{_safe_scene_detail_shard_label(entry_id)}.transport.status": "retrying",
+                    f"{state_prefix}.{_safe_scene_detail_shard_label(entry_id)}.transport.retry_count": str(transport_attempt - 1),
+                    f"{state_prefix}.{_safe_scene_detail_shard_label(entry_id)}.transport.max_attempts": str(transport_retry_attempts),
                 },
             )
         retry_tasks = [
@@ -22161,12 +23387,19 @@ async def _run_scene_detail_sharded_semantic_review_once(
                     job_id,
                     run_dir=run_dir,
                     shard_dir=shard_dir,
+                    stage=stage,
                     entry_id=entry_id,
                     entry_index=entry_ids.index(entry_id) + 1,
                     total_entries=len(entry_ids),
                     collection_section=sections.get(entry_id, ""),
+                    compact_scene_context=compact_scene_context,
+                    canonical_collection_path=collection_path,
                     canonical_scope_path=scope_path,
                     canonical_report_path=report_path,
+                    canonical_generation=canonical_generation,
+                    canonical_entry_projection_sha256=(
+                        entry_projection_sha256s[entry_id]
+                    ),
                     attempt=attempt,
                     max_attempts=max_attempts,
                     final_attempt=final_attempt,
@@ -22183,7 +23416,11 @@ async def _run_scene_detail_sharded_semantic_review_once(
         for entry_id, raw_result in zip(retry_entry_ids, raw_retry_results):
             if isinstance(raw_result, BaseException):
                 if is_codex_transport_error(raw_result):
-                    retry_results_by_entry[entry_id] = _scene_detail_transport_failure_result(entry_id=entry_id, exc=raw_result)
+                    retry_results_by_entry[entry_id] = _scene_detail_transport_failure_result(
+                        stage=stage,
+                        entry_id=entry_id,
+                        exc=raw_result,
+                    )
                     continue
                 retry_unexpected_exceptions.append(raw_result)
                 continue
@@ -22203,25 +23440,25 @@ async def _run_scene_detail_sharded_semantic_review_once(
                 append_state_snapshot(
                     run_dir / "state.txt",
                     {
-                        f"review.semantic.scene_detail.shards.{label}.transport.status": "failed",
-                        f"review.semantic.scene_detail.shards.{label}.transport.retry_count": str(transport_attempt - 1),
-                        f"review.semantic.scene_detail.shards.{label}.transport.error_kind": str(replacement.get("transport_error_kind") or "unknown"),
-                        f"review.semantic.scene_detail.shards.{label}.transport.error": str(replacement.get("transport_error") or "")[:2000],
+                        f"{state_prefix}.{label}.transport.status": "failed",
+                        f"{state_prefix}.{label}.transport.retry_count": str(transport_attempt - 1),
+                        f"{state_prefix}.{label}.transport.error_kind": str(replacement.get("transport_error_kind") or "unknown"),
+                        f"{state_prefix}.{label}.transport.error": str(replacement.get("transport_error") or "")[:2000],
                     },
                 )
             else:
                 append_state_snapshot(
                     run_dir / "state.txt",
                     {
-                        f"review.semantic.scene_detail.shards.{label}.transport.status": "recovered",
-                        f"review.semantic.scene_detail.shards.{label}.transport.retry_count": str(transport_attempt - 1),
+                        f"{state_prefix}.{label}.transport.status": "recovered",
+                        f"{state_prefix}.{label}.transport.retry_count": str(transport_attempt - 1),
                     },
                 )
         shard_results = next_shard_results
 
     shards_by_entry_id = {
         str(entry_id): shard
-        for shard in scene_detail_shards
+        for shard in scene_shards
         for entry_id in shard.get("entry_ids") or []
     }
     for result_item in shard_results:
@@ -22231,12 +23468,12 @@ async def _run_scene_detail_sharded_semantic_review_once(
         shard = shards_by_entry_id.get(entry_id)
         if shard is None:
             raise RuntimeError(
-                "scene_detail transport failure is not bound to a "
+                f"{stage} transport failure is not bound to a "
                 "current shard descriptor"
             )
         _write_terminal_transport_shard_report(
             run_dir,
-            stage="scene_detail",
+            stage=stage,
             shard=shard,
             result=result_item,
         )
@@ -22251,7 +23488,7 @@ async def _run_scene_detail_sharded_semantic_review_once(
     findings: list[str] = []
     reason_keys: list[str] = []
     notes = [
-        f"scene_detail reviewed as {len(shard_results)} per-scene shard(s)",
+        f"{stage} reviewed as {len(shard_results)} per-scene shard(s)",
         f"bounded concurrency: {concurrency}",
         f"transport retry attempts: {transport_retry_attempts}",
     ]
@@ -22275,18 +23512,25 @@ async def _run_scene_detail_sharded_semantic_review_once(
         append_state_snapshot(
             run_dir / "state.txt",
             {
-                f"review.semantic.scene_detail.shards.{_safe_scene_detail_shard_label(entry_id)}.transport.status": "failed",
-                f"review.semantic.scene_detail.shards.{_safe_scene_detail_shard_label(entry_id)}.transport.error_kind": str(result_item.get("transport_error_kind") or "unknown"),
-                f"review.semantic.scene_detail.shards.{_safe_scene_detail_shard_label(entry_id)}.transport.error": str(result_item.get("transport_error") or "")[:2000],
+                f"{state_prefix}.{_safe_scene_detail_shard_label(entry_id)}.transport.status": "failed",
+                f"{state_prefix}.{_safe_scene_detail_shard_label(entry_id)}.transport.error_kind": str(result_item.get("transport_error_kind") or "unknown"),
+                f"{state_prefix}.{_safe_scene_detail_shard_label(entry_id)}.transport.error": str(result_item.get("transport_error") or "")[:2000],
             },
         )
     if not reason_keys and blocked_entries:
-        reason_keys.append("scene_detail_shard_failed")
+        reason_keys.append(f"{stage}_shard_failed")
 
+    _assert_scene_semantic_review_generation(
+        run_dir=run_dir,
+        collection_path=collection_path,
+        scope_path=scope_path,
+        expected=canonical_generation,
+    )
     _write_scene_detail_shard_aggregate_report(
         run_dir,
         report_path,
-        semantic_review_input_digest_value=_semantic_scope_input_digest(scope_path),
+        stage=stage,
+        semantic_review_input_digest_value=canonical_generation.input_digest,
         status="failed" if blocked_entries else "passed",
         reviewed_entries=reviewed_entries,
         blocked_entries=blocked_entries,
@@ -22294,34 +23538,46 @@ async def _run_scene_detail_sharded_semantic_review_once(
         reason_keys=sorted(set(reason_keys)),
         notes=notes,
     )
+    _assert_scene_semantic_review_generation(
+        run_dir=run_dir,
+        collection_path=collection_path,
+        scope_path=scope_path,
+        expected=canonical_generation,
+    )
     result = check_semantic_review(run_dir, stage)
+    _assert_scene_semantic_review_generation(
+        run_dir=run_dir,
+        collection_path=collection_path,
+        scope_path=scope_path,
+        expected=canonical_generation,
+    )
     state_updates = review_status_to_state(stage, result)
     state_updates.update(
         {
-            "review.semantic.scene_detail.shards.status": "passed" if result.passed else "failed",
-            "review.semantic.scene_detail.shards.failed_count": str(len(blocked_entries)),
-            "review.semantic.scene_detail.shards.updated_at": now_iso(),
+            f"{state_prefix}.status": "passed" if result.passed else "failed",
+            f"{state_prefix}.failed_count": str(len(blocked_entries)),
+            f"{state_prefix}.updated_at": now_iso(),
         }
     )
     slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
     if slot:
         if result.passed:
             state_updates[f"slot.{slot}.status"] = "done"
-            state_updates[f"slot.{slot}.note"] = "contextless semantic scene_detail shard review passed"
-            state_updates["review.semantic.scene_detail.transport.status"] = "passed"
-            state_updates["review.semantic.scene_detail.repair.active"] = "false"
+            state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} shard review passed"
+            state_updates[f"review.semantic.{stage}.transport.status"] = "passed"
+            state_updates[f"review.semantic.{stage}.repair.active"] = "false"
         elif final_attempt:
             state_updates[f"slot.{slot}.status"] = "failed"
             if max_attempts <= 1:
-                state_updates[f"slot.{slot}.note"] = "contextless semantic scene_detail shard review failed without repair"
-                state_updates["review.semantic.scene_detail.repair.active"] = "false"
-                state_updates["review.semantic.scene_detail.repair.skipped"] = "true"
-                state_updates["review.semantic.scene_detail.repair.skipped_reason"] = "max_attempts_1"
+                state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} shard review failed without repair"
+                state_updates[f"review.semantic.{stage}.repair.active"] = "false"
+                state_updates[f"review.semantic.{stage}.repair.skipped"] = "true"
+                state_updates[f"review.semantic.{stage}.repair.skipped_reason"] = "max_attempts_1"
             else:
-                state_updates[f"slot.{slot}.note"] = "contextless semantic scene_detail shard review failed after repair loop"
+                state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} shard review failed after repair loop"
         else:
             state_updates[f"slot.{slot}.status"] = "in_progress"
-            state_updates[f"slot.{slot}.note"] = "contextless semantic scene_detail shard review requested producer repair"
+            state_updates[f"slot.{slot}.note"] = f"contextless semantic {stage} shard review requested producer repair"
     append_state_snapshot(run_dir / "state.txt", state_updates)
     write_app_server_debug_log(
         run_dir=run_dir,
@@ -22349,9 +23605,73 @@ async def _run_scene_detail_sharded_semantic_review_once(
     )
     if transport_failures:
         failed_entries = ", ".join(str(result_item["entry_id"]) for result_item in transport_failures)
-        raise CodexAppServerTransportError(
-            f"scene_detail shard transport failed after {transport_retry_attempts} attempt(s): {failed_entries}"
+        failure_details = "; ".join(
+            f"{result_item['entry_id']}: "
+            f"{str(result_item.get('transport_error') or '')[:500]}"
+            for result_item in transport_failures
+            if str(result_item.get("transport_error") or "").strip()
         )
+        output_contract_entries = ", ".join(
+            str(result_item["entry_id"])
+            for result_item in transport_failures
+            if str(result_item.get("transport_error_kind") or "")
+            == "output_contract_failed"
+        )
+        output_contract_note = (
+            f"; semantic review output contract failed for: "
+            f"{output_contract_entries}"
+            if output_contract_entries
+            else ""
+        )
+        failure_detail_note = (
+            f"; details: {failure_details}" if failure_details else ""
+        )
+        transport_error_kinds = sorted(
+            {
+                str(result_item.get("transport_error_kind") or "unknown")
+                for result_item in transport_failures
+            }
+        )
+        aggregate_transport_kind = (
+            "output_contract_failed"
+            if output_contract_entries
+            else (
+                transport_error_kinds[0]
+                if len(transport_error_kinds) == 1
+                else "mixed"
+            )
+        )
+        aggregate_error = (
+            f"{stage} shard transport failed after {transport_retry_attempts} "
+            f"attempt(s): {failed_entries}{output_contract_note}"
+            f"{failure_detail_note}"
+        )
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                f"review.semantic.{stage}.transport.status": "failed",
+                f"review.semantic.{stage}.transport.error_kind": (
+                    aggregate_transport_kind
+                ),
+                f"review.semantic.{stage}.transport.error": aggregate_error[:2000],
+                f"review.semantic.{stage}.loop.status": "blocked_transport",
+            },
+        )
+        if output_contract_entries:
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    f"review.semantic.{stage}.transport.status": "failed",
+                    f"review.semantic.{stage}.transport.error_kind": (
+                        "output_contract_failed"
+                    ),
+                    f"review.semantic.{stage}.transport.error": (
+                        f"shard output contract failed: {output_contract_entries}"
+                    ),
+                    f"review.semantic.{stage}.loop.status": "blocked_transport",
+                },
+            )
+        raise CodexAppServerTransportError(aggregate_error)
     return result
 
 
@@ -22376,17 +23696,320 @@ def _semantic_collection_sections_by_entry(collection_text: str) -> dict[str, st
     return sections
 
 
+def _semantic_collection_sections_for_scope(
+    collection_text: str,
+    *,
+    expected_entry_ids: list[str],
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Parse a canonical collection without inventing or overwriting entries."""
+
+    sections: dict[str, str] = {}
+    observed_entry_ids: list[str] = []
+    issues: list[str] = []
+    for chunk in collection_text.split("\n## ")[1:]:
+        if not chunk.strip():
+            continue
+        heading, separator, body = chunk.partition("\n")
+        entry_id = heading.strip()
+        if (
+            len(entry_id) >= 2
+            and entry_id[0] == entry_id[-1] == "`"
+        ):
+            entry_id = entry_id[1:-1].strip()
+        if not entry_id:
+            issues.append("semantic review collection has a blank entry heading")
+            continue
+        observed_entry_ids.append(entry_id)
+        if entry_id in sections:
+            issues.append(
+                f"semantic review collection has duplicate entry heading: {entry_id}"
+            )
+            continue
+        section = f"## {heading}\n{body}".strip() + "\n"
+        sections[entry_id] = section
+        if not separator or not body.strip():
+            issues.append(
+                f"semantic review collection entry has no body: {entry_id}"
+            )
+            continue
+        payload, payload_issues = (
+            _semantic_collection_entry_payload_with_issues(section)
+        )
+        if payload_issues:
+            for payload_issue in payload_issues:
+                issues.append(
+                    "semantic review collection entry has invalid JSON payload: "
+                    f"{entry_id} ({payload_issue})"
+                )
+            continue
+        payload_id = payload.get("id")
+        if not isinstance(payload_id, str) or payload_id != entry_id:
+            rendered_payload_id = (
+                payload_id if isinstance(payload_id, str) else "(missing or non-string)"
+            )
+            issues.append(
+                "semantic review collection payload id does not match its heading "
+                f"(heading={entry_id}, payload_id={rendered_payload_id})"
+            )
+
+    expected_set = set(expected_entry_ids)
+    observed_set = set(observed_entry_ids)
+    if len(expected_set) != len(expected_entry_ids):
+        issues.append("semantic review scope contains duplicate entry_ids")
+    for entry_id in expected_entry_ids:
+        if entry_id not in observed_set:
+            issues.append(
+                f"semantic review collection is missing scoped entry: {entry_id}"
+            )
+    for entry_id in _dedupe_preserve_order(observed_entry_ids):
+        if entry_id not in expected_set:
+            issues.append(
+                f"semantic review collection has unexpected entry: {entry_id}"
+            )
+    if observed_entry_ids != expected_entry_ids:
+        issues.append(
+            "semantic review collection entry order does not match scope "
+            f"(expected={expected_entry_ids}, observed={observed_entry_ids})"
+        )
+    return sections, tuple(issues)
+
+
+def _reject_duplicate_json_object_pairs(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError(f"duplicate JSON key: {key}")
+        payload[key] = value
+    return payload
+
+
+def _reject_non_finite_json_constant(value: str) -> Any:
+    raise ValueError(f"non-finite JSON value: {value}")
+
+
+def _semantic_collection_entry_payload_with_issues(
+    section: str,
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    _heading, separator, body = section.partition("\n")
+    if not separator:
+        return {}, ("entry body is missing",)
+    matches = list(
+        re.finditer(
+            r"```json[ \t]*(?:\r?\n)?(.*?)```",
+            body,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+    )
+    if len(matches) != 1:
+        return {}, (
+            "entry must contain exactly one JSON fence "
+            f"(found={len(matches)})",
+        )
+    match = matches[0]
+    outside_fence = body[: match.start()] + body[match.end() :]
+    if outside_fence.strip():
+        return {}, ("entry has non-whitespace outside its JSON fence",)
+    try:
+        payload = json.loads(
+            match.group(1),
+            object_pairs_hook=_reject_duplicate_json_object_pairs,
+            parse_constant=_reject_non_finite_json_constant,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        return {}, (f"invalid JSON object: {exc}",)
+    if not isinstance(payload, dict):
+        return {}, ("JSON payload must be an object",)
+    return payload, ()
+
+
+def _semantic_collection_entry_payload(section: str) -> dict[str, Any]:
+    payload, issues = _semantic_collection_entry_payload_with_issues(section)
+    return {} if issues else payload
+
+
+def _compact_ordered_scene_context(
+    sections: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    """Project only cross-scene facts needed by each scene-set shard."""
+
+    payloads = [
+        (entry_id, _semantic_collection_entry_payload(section))
+        for entry_id, section in sections.items()
+    ]
+    context: list[dict[str, Any]] = []
+    for index, (entry_id, entry) in enumerate(payloads):
+        contract = entry.get("normalized_semantic_contract")
+        if not isinstance(contract, dict):
+            contract = {}
+        intent = entry.get("scene_intent")
+        if not isinstance(intent, dict):
+            intent = {}
+        scene_event = entry.get("scene_event")
+        if not isinstance(scene_event, dict):
+            scene_event = {}
+        raw_beats = scene_event.get("event_sequence")
+        beats = [
+            beat
+            for beat in raw_beats if isinstance(beat, dict)
+        ] if isinstance(raw_beats, list) else []
+        root_source_ids = scene_event.get("source_story_beat_ids")
+        if not isinstance(root_source_ids, list):
+            root_source_ids = []
+        source_story_beat_ids = _dedupe_preserve_order(
+            [
+                *root_source_ids,
+                *[
+                    source_id
+                    for beat in beats
+                    for source_id in (
+                        beat.get("source_story_beat_ids")
+                        if isinstance(beat.get("source_story_beat_ids"), list)
+                        else []
+                    )
+                ],
+            ]
+        )
+        event_beat_ids = _dedupe_preserve_order(
+            beat.get("beat_id") for beat in beats
+        )
+        revealed_information_ids = _dedupe_preserve_order(
+            reveal_id
+            for beat in beats
+            for reveal_id in (
+                beat.get("story_information_revealed_ids")
+                if isinstance(beat.get("story_information_revealed_ids"), list)
+                else []
+            )
+        )
+        row = {
+            "id": entry_id,
+            "selector": entry.get("selector"),
+            "previous_scene_id": payloads[index - 1][0] if index > 0 else None,
+            "next_scene_id": (
+                payloads[index + 1][0]
+                if index + 1 < len(payloads)
+                else None
+            ),
+            "phase": entry.get("phase"),
+            "importance": entry.get("importance"),
+            "time_of_day": entry.get("time_of_day"),
+            "time_of_day_status": entry.get("time_of_day_status"),
+            "location_mode": entry.get("location_mode"),
+            "location_sequence": entry.get("location_sequence"),
+            "location_segments": _compact_scene_location_segments(
+                entry.get("location_segments")
+            ),
+            "participants": _compact_scene_participants(
+                entry.get("participants")
+            ),
+            "role_coverage": _compact_scene_role_coverage(
+                entry.get("role_coverage") or intent.get("role_coverage")
+            ),
+            "spatial_plan": intent.get("spatial_plan"),
+            "dramatic_question": contract.get("dramatic_question"),
+            "value_shift": contract.get("value_shift"),
+            "causal_turn": contract.get("causal_turn"),
+            "event_beat_ids": event_beat_ids,
+            "source_story_beat_ids": source_story_beat_ids,
+            "revealed_information_ids": revealed_information_ids,
+            "audience_information": intent.get("audience_information"),
+            "withheld_information": intent.get("withheld_information"),
+            "reveal_constraints": intent.get("reveal_constraints"),
+            "handoff_to_next_scene": entry.get("handoff_to_next_scene"),
+            "terminal_resolution": entry.get("terminal_resolution"),
+        }
+        context.append(
+            {
+                key: value
+                for key, value in row.items()
+                if value not in (None, "", [], {})
+            }
+        )
+    return context
+
+
+def _compact_scene_location_segments(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    projected: list[dict[str, Any]] = []
+    for raw_segment in value:
+        if not isinstance(raw_segment, dict):
+            continue
+        segment = {
+            key: raw_segment.get(key)
+            for key in (
+                "location",
+                "responsibility",
+                "primary_subject",
+                "required_visual_evidence",
+                "required_roles",
+            )
+            if raw_segment.get(key) not in (None, "", [], {})
+        }
+        if segment:
+            projected.append(segment)
+    return projected
+
+
+def _compact_scene_participants(value: Any) -> list[Any]:
+    if not isinstance(value, list):
+        return []
+    projected: list[Any] = []
+    for raw_participant in value:
+        if isinstance(raw_participant, str) and raw_participant.strip():
+            projected.append(raw_participant.strip())
+            continue
+        if not isinstance(raw_participant, dict):
+            continue
+        participant = {
+            key: raw_participant.get(key)
+            for key in (
+                "character_id",
+                "character_name",
+                "scene_role",
+                "role",
+                "appearance_asset_ids",
+            )
+            if raw_participant.get(key) not in (None, "", [], {})
+        }
+        if participant:
+            projected.append(participant)
+    return projected
+
+
+def _compact_scene_role_coverage(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: value.get(key)
+        for key in (
+            "required_roles",
+            "covered_roles",
+            "missing_roles",
+            "must_not_collapse_to_protagonist_only",
+        )
+        if value.get(key) not in (None, "", [], {})
+    }
+
+
 async def _run_scene_detail_shard_review(
     job_id: str,
     *,
     run_dir: Path,
     shard_dir: Path,
+    stage: str = "scene_detail",
     entry_id: str,
     entry_index: int,
     total_entries: int,
     collection_section: str,
+    compact_scene_context: list[dict[str, Any]] | None = None,
+    canonical_collection_path: Path,
     canonical_scope_path: Path,
     canonical_report_path: Path,
+    canonical_generation: _SceneSemanticReviewGeneration,
+    canonical_entry_projection_sha256: str,
     attempt: int,
     max_attempts: int,
     final_attempt: bool,
@@ -22395,9 +24018,23 @@ async def _run_scene_detail_shard_review(
     transport_max_attempts: int = 1,
 ) -> dict[str, Any]:
     async with semaphore:
+        _assert_scene_semantic_review_generation(
+            run_dir=run_dir,
+            collection_path=canonical_collection_path,
+            scope_path=canonical_scope_path,
+            expected=canonical_generation,
+        )
+        if hashlib.sha256(
+            collection_section.encode("utf-8")
+        ).hexdigest() != canonical_entry_projection_sha256:
+            raise RuntimeError(
+                f"canonical {stage} entry projection changed before shard "
+                f"review: {entry_id}"
+            )
         shard_descriptor = _scene_detail_shard_descriptor(
             run_dir,
             shard_dir,
+            stage=stage,
             entry_id=entry_id,
             entry_index=entry_index,
         )
@@ -22408,28 +24045,36 @@ async def _run_scene_detail_shard_review(
         report_path = run_dir / artifacts["report"]
         _write_scene_detail_shard_artifacts(
             run_dir=run_dir,
+            stage=stage,
             entry_id=entry_id,
             entry_index=entry_index,
             total_entries=total_entries,
             collection_section=collection_section,
+            compact_scene_context=compact_scene_context,
+            canonical_collection_path=canonical_collection_path,
             collection_path=collection_path,
             scope_path=scope_path,
             prompt_path=prompt_path,
             report_path=report_path,
             canonical_scope_path=canonical_scope_path,
             canonical_report_path=canonical_report_path,
+            canonical_generation=canonical_generation,
+            canonical_entry_projection_sha256=(
+                canonical_entry_projection_sha256
+            ),
             shard_id=str(shard_descriptor["shard_id"]),
             scene_id=str(shard_descriptor["scene_id"]),
         )
         _touch_scene_detail_canonical_progress(
             run_dir,
             canonical_report_path,
+            stage=stage,
             status="pending",
-            message=f"scene_detail shard {entry_index}/{total_entries} started: {entry_id}",
+            message=f"{stage} shard {entry_index}/{total_entries} started: {entry_id}",
         )
         prompt = _semantic_review_prompt_for_attempt(
             prompt_path.read_text(encoding="utf-8"),
-            stage="scene_detail",
+            stage=stage,
             final_attempt=final_attempt,
         )
         _write_semantic_artifact_text(run_dir, prompt_path, prompt.rstrip() + "\n")
@@ -22439,6 +24084,12 @@ async def _run_scene_detail_shard_review(
             collection_path=collection_path,
             prompt_path=prompt_path,
             report_path=report_path,
+        )
+        _assert_scene_semantic_review_generation(
+            run_dir=run_dir,
+            collection_path=canonical_collection_path,
+            scope_path=canonical_scope_path,
+            expected=canonical_generation,
         )
         review_workspace = _prepare_bound_semantic_review_workspace(
             run_dir=run_dir,
@@ -22482,7 +24133,7 @@ async def _run_scene_detail_shard_review(
                 timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS,
             )
             _assert_bound_run_root(run_dir)
-            transcript, completed_from_report = await _run_turn_until_semantic_artifact_completed(
+            turn_transcript, completed_from_report = await _run_turn_until_semantic_artifact_completed(
                 client,
                 thread_id=thread_id,
                 text=provider_prompt,
@@ -22492,11 +24143,13 @@ async def _run_scene_detail_shard_review(
                 is_completed=provider_is_completed,
                 progress_callback=lambda notification: _write_scene_detail_shard_activity(
                     run_dir=run_dir,
+                    stage=stage,
                     report_path=report_path,
                     canonical_report_path=canonical_report_path,
                     notification=notification,
                 ),
             )
+            transcript = turn_transcript if isinstance(turn_transcript, list) else []
             _assert_bound_run_root(run_dir)
             if review_workspace is not None or not _semantic_review_report_completed(
                 report_path
@@ -22505,7 +24158,7 @@ async def _run_scene_detail_shard_review(
                     run_dir=run_dir,
                     report_path=report_path,
                     transcript=transcript,
-                    stage="scene_detail",
+                    stage=stage,
                     source=(
                         "immutable_workspace_agent_output"
                         if review_workspace is not None
@@ -22515,7 +24168,7 @@ async def _run_scene_detail_shard_review(
                 )
                 if review_workspace is not None and not materialized:
                     raise _semantic_review_output_contract_error(
-                        stage="scene_detail",
+                        stage=stage,
                         transcript=transcript,
                     )
             if completed_from_report:
@@ -22525,7 +24178,7 @@ async def _run_scene_detail_shard_review(
                     status="completed_after_report_before_turn_completed",
                     item_id=job_id,
                     request={
-                        "stage": "scene_detail",
+                        "stage": stage,
                         "mode": "per_scene_shard",
                         "entryId": entry_id,
                         "attempt": attempt,
@@ -22536,7 +24189,7 @@ async def _run_scene_detail_shard_review(
                         "report": str(report_path.relative_to(run_dir)),
                     },
                     response={
-                        "note": "scene_detail shard report reached a terminal status before app-server turn/completed notification arrived",
+                        "note": f"{stage} shard report reached a terminal status before app-server turn/completed notification arrived",
                     },
                     transcript=transcript,
                 )
@@ -22553,15 +24206,19 @@ async def _run_scene_detail_shard_review(
                         run_dir=run_dir,
                         report_path=report_path,
                         transcript=transcript,
-                        stage="scene_detail",
+                        stage=stage,
                         source=(
                             "agent_message_transport_exception_fallback"
                         ),
                         workspace=review_workspace,
                     )
-                    if review_workspace is not None and not materialized:
+                    if (
+                        review_workspace is not None
+                        and not materialized
+                        and transport_kind == "output_contract_failed"
+                    ):
                         raise _semantic_review_output_contract_error(
-                            stage="scene_detail",
+                            stage=stage,
                             transcript=transcript,
                         )
             if is_codex_transport_error(exc) and _semantic_review_report_completed(report_path):
@@ -22572,7 +24229,7 @@ async def _run_scene_detail_shard_review(
                     status="completed_after_transport_timeout",
                     item_id=job_id,
                     request={
-                        "stage": "scene_detail",
+                        "stage": stage,
                         "mode": "per_scene_shard",
                         "entryId": entry_id,
                         "attempt": attempt,
@@ -22584,7 +24241,7 @@ async def _run_scene_detail_shard_review(
                     },
                     response={
                         "transportErrorKind": transport_kind or "unknown",
-                        "note": "scene_detail shard report was completed before app-server turn completion notification timed out",
+                        "note": f"{stage} shard report was completed before app-server turn completion notification timed out",
                     },
                     transcript=transcript if isinstance(transcript, list) else [],
                 )
@@ -22597,7 +24254,7 @@ async def _run_scene_detail_shard_review(
                         status="app_server_failed",
                         item_id=job_id,
                         request={
-                            "stage": "scene_detail",
+                            "stage": stage,
                             "mode": "per_scene_shard",
                             "entryId": entry_id,
                             "attempt": attempt,
@@ -22614,14 +24271,18 @@ async def _run_scene_detail_shard_review(
                         transcript=getattr(exc, "transcript", []) if isinstance(getattr(exc, "transcript", None), list) else [],
                         error=f"{type(exc).__name__}: {exc}",
                     )
-                    return _scene_detail_transport_failure_result(entry_id=entry_id, exc=exc)
+                    return _scene_detail_transport_failure_result(
+                        stage=stage,
+                        entry_id=entry_id,
+                        exc=exc,
+                    )
                 write_app_server_debug_log(
                     run_dir=run_dir,
                     operation="semantic_review",
                     status="app_server_failed",
                     item_id=job_id,
                     request={
-                        "stage": "scene_detail",
+                        "stage": stage,
                         "mode": "per_scene_shard",
                         "entryId": entry_id,
                         "attempt": attempt,
@@ -22642,20 +24303,27 @@ async def _run_scene_detail_shard_review(
             finally:
                 if review_workspace is not None:
                     review_workspace.cleanup()
+        _assert_scene_semantic_review_generation(
+            run_dir=run_dir,
+            collection_path=canonical_collection_path,
+            scope_path=canonical_scope_path,
+            expected=canonical_generation,
+        )
         if review_workspace is None and not _semantic_review_report_completed(report_path):
             _materialize_semantic_report_from_transcript(
                 run_dir=run_dir,
                 report_path=report_path,
                 transcript=transcript if isinstance(transcript, list) else [],
-                stage="scene_detail",
+                stage=stage,
                 source="agent_message_transport_fallback",
             )
         if not _semantic_review_report_completed(report_path):
             output_contract_error = _semantic_review_output_contract_error(
-                stage="scene_detail",
+                stage=stage,
                 transcript=transcript if isinstance(transcript, list) else [],
             )
             failure = _scene_detail_transport_failure_result(
+                stage=stage,
                 entry_id=entry_id,
                 exc=output_contract_error,
             )
@@ -22665,7 +24333,7 @@ async def _run_scene_detail_shard_review(
                 status="output_contract_failed",
                 item_id=job_id,
                 request={
-                    "stage": "scene_detail",
+                    "stage": stage,
                     "mode": "per_scene_shard",
                     "entryId": entry_id,
                     "attempt": attempt,
@@ -22712,7 +24380,7 @@ async def _run_scene_detail_shard_review(
             )
         if reviewed_entries != [entry_id]:
             contract_errors.append(
-                "shard reviewed_entries must exactly match the scene-detail entry "
+                f"shard reviewed_entries must exactly match the {stage} entry "
                 f"(expected={[entry_id]}, got={reviewed_entries})"
             )
         if status == "passed" and blocked_entries:
@@ -22731,11 +24399,12 @@ async def _run_scene_detail_shard_review(
         )
         if contract_errors:
             output_contract_error = _semantic_review_output_contract_error(
-                stage="scene_detail",
+                stage=stage,
                 transcript=transcript if isinstance(transcript, list) else [],
                 issues=contract_errors,
             )
             failure = _scene_detail_transport_failure_result(
+                stage=stage,
                 entry_id=entry_id,
                 exc=output_contract_error,
             )
@@ -22745,7 +24414,7 @@ async def _run_scene_detail_shard_review(
                 status="output_contract_failed",
                 item_id=job_id,
                 request={
-                    "stage": "scene_detail",
+                    "stage": stage,
                     "mode": "per_scene_shard",
                     "entryId": entry_id,
                     "attempt": attempt,
@@ -22780,8 +24449,9 @@ async def _run_scene_detail_shard_review(
         _touch_scene_detail_canonical_progress(
             run_dir,
             canonical_report_path,
+            stage=stage,
             status="pending",
-            message=f"scene_detail shard {entry_index}/{total_entries} completed: {entry_id} -> {effective_status}",
+            message=f"{stage} shard {entry_index}/{total_entries} completed: {entry_id} -> {effective_status}",
         )
         write_app_server_debug_log(
             run_dir=run_dir,
@@ -22789,7 +24459,7 @@ async def _run_scene_detail_shard_review(
             status="completed" if effective_status == "passed" else "changes_requested",
             item_id=job_id,
             request={
-                "stage": "scene_detail",
+                "stage": stage,
                 "mode": "per_scene_shard",
                 "entryId": entry_id,
                 "attempt": attempt,
@@ -22813,56 +24483,167 @@ async def _run_scene_detail_shard_review(
         return result
 
 
+def _scene_shard_review_guidance(stage: str) -> tuple[list[str], str]:
+    registry_criteria = [
+        criterion
+        for criterion in criterion_registry_payload()
+        if stage in criterion.get("semantic_recheck_stages", [])
+    ]
+    registry_guidance = [
+        (
+            f"Registry `{criterion['criterion_id']}` ({criterion['owner']}): "
+            f"{criterion['reviewer_instruction']} "
+            "Exact ID/reference equality was already checked by deterministic "
+            "preflight; judge only the remaining semantic meaning."
+        )
+        for criterion in registry_criteria
+    ]
+    registry_reason_keys = [
+        str(criterion["canonical_reason_key"])
+        for criterion in registry_criteria
+    ]
+    if stage == "scene_set":
+        return (
+            [
+                "Gate this scene_set entry on scene necessity, exact participants and subjects, local value_shift visibility, causal_turn visibility, ordered scene_event evidence, story-specific grounding, canonical event coverage, reveal ownership, location route, time-of-day continuity, and incoming/outgoing handoff.",
+                "Use the compact ordered scene context to compare this target with the whole authored order. Fail causal reversals, duplicate earliest reveals, skipped or reversed locations, unexplained daypart changes, and handoffs that do not connect to their neighbor.",
+                "The compact context is an index, not a replacement for the full target entry. Do not demand downstream scene_generation, cut, image, narration, video, or generated-media fields at scene_set stage.",
+                "Treat the shard collection as the complete stage-scoped review input. Open a source artifact only to resolve a specific ambiguity in the target entry or a named source reference; never scan an entire story, script, or manifest by default.",
+                "Do not reject useful abstract dramatic language by itself. Reject only when abstraction is not paired with concrete_event / story_grounding that comes from source story, user input, canonical reference, or asset bible.",
+                "Treat decorative concrete detail without story_function, absent required canonical events, invented details without approval, and subject/location/reveal contradictions as gate failures.",
+                "Do not fail solely because generated image/video/audio files do not exist yet.",
+                *registry_guidance,
+            ],
+            "reason_keys: ["
+            + "|".join(SCENE_SET_PROMPT_SEMANTIC_REASON_KEYS)
+            + "|"
+            + "|".join(registry_reason_keys)
+            + "|...]",
+        )
+    return (
+        [
+            "Gate this scene_detail entry on scene necessity, internal pressure, value_shift visibility, causal_turn visibility, scene_event sequence, scene_generation prompt separation, story-specific concrete grounding, non_replaceable_elements, concrete detail story_function, source grounding confidence, canonical event coverage, turning_event/end_situation alignment, cut summary support, reveal order, and neighbor handoff.",
+            "Treat `scene_generation.scene_prompt_payload.prompt` as the canonical scene authoring prompt. This review prompt is only a display/review artifact, not the scene generation canon.",
+            "Fail if scene_prompt_payload mixes downstream image/video/audio execution details, fixed cut count, or image directing terms instead of describing what the scene must establish in the story.",
+            "Do not reject useful abstract dramatic language by itself. Reject only when abstraction is not paired with concrete_event / story_grounding that comes from source story, user input, canonical reference, or asset bible.",
+            "Treat decorative concrete detail without story_function, asset names mentioned without story function, invented_candidate details without approval, and missing required canonical events as gate failures.",
+            "Do not require a fixed cut count. Judge whether this scene's actual visual obligations are sufficiently represented by its cut summaries and contracts.",
+            "Do not fail solely because generated image/video/audio files do not exist yet.",
+        ],
+        "reason_keys: [semantic_subject_mismatch|semantic_location_mismatch|semantic_timeline_mismatch|semantic_reveal_order_mismatch|scene_detail_obligation_missing|scene_detail_cut_support_weak|scene_detail_handoff_weak|scene_generation_payload_missing|scene_generation_payload_downstream_leak|scene_generation_payload_fixed_cut_count|scene_generation_debug_source_missing|scene_generation_contract_mismatch|scene_event_abstract_only|scene_event_concrete_but_not_story_specific|scene_event_concrete_but_decorative|scene_event_missing_non_replaceable_elements|scene_event_missing_source_grounding|scene_event_source_grounding_low_confidence|scene_event_missing_character_relationship_specificity|scene_event_missing_story_rule_specificity|scene_event_missing_object_story_function|scene_event_asset_mentioned_without_story_function|scene_event_canonical_event_missing|scene_event_canonical_order_broken|scene_event_invented_detail_without_approval|scene_event_specificity_overloaded|...]",
+    )
+
+
 def _write_scene_detail_shard_artifacts(
     *,
     run_dir: Path,
+    stage: str = "scene_detail",
     entry_id: str,
     entry_index: int,
     total_entries: int,
     collection_section: str,
+    compact_scene_context: list[dict[str, Any]] | None = None,
+    canonical_collection_path: Path,
     collection_path: Path,
     scope_path: Path,
     prompt_path: Path,
     report_path: Path,
     canonical_scope_path: Path,
     canonical_report_path: Path,
+    canonical_generation: _SceneSemanticReviewGeneration,
+    canonical_entry_projection_sha256: str,
     shard_id: str,
     scene_id: str,
 ) -> None:
+    if stage not in {"scene_set", "scene_detail"}:
+        raise ValueError(f"unsupported scene shard stage: {stage}")
+    _assert_scene_semantic_review_generation(
+        run_dir=run_dir,
+        collection_path=canonical_collection_path,
+        scope_path=canonical_scope_path,
+        expected=canonical_generation,
+    )
+    if hashlib.sha256(
+        collection_section.encode("utf-8")
+    ).hexdigest() != canonical_entry_projection_sha256:
+        raise RuntimeError(
+            f"canonical {stage} entry projection hash mismatch: {entry_id}"
+        )
+    stage_review_guidance, reason_key_line = _scene_shard_review_guidance(stage)
+    review_scope_instruction = (
+        f"Review only shard entry `{entry_id}`, but compare it with every row in "
+        "the compact ordered scene context for global causal and reveal order."
+        if stage == "scene_set"
+        else (
+            f"Review only shard entry `{entry_id}`. Ignore other scene ids except "
+            "as source context for neighbor handoff."
+        )
+    )
     collection_path.parent.mkdir(parents=True, exist_ok=True)
     if not collection_section:
-        collection_section = f"## {entry_id}\n\n```json\n{{\"id\": {json.dumps(entry_id, ensure_ascii=False)}}}\n```\n"
+        raise RuntimeError(
+            f"{stage} shard collection section is missing: {entry_id}"
+        )
+    collection_lines = [
+        f"# Semantic Review Collection: {stage} shard",
+        "",
+        f"Shard entry: `{entry_id}`",
+        f"Shard index: `{entry_index}` of `{total_entries}`",
+        "",
+    ]
+    if compact_scene_context:
+        collection_lines.extend(
+            [
+                "## Compact ordered scene context",
+                "",
+                "Use this projection only for cross-scene order, causality, reveal, "
+                "location/daypart, and handoff checks. Review the full target entry below.",
+                "",
+                "```json",
+                json.dumps(compact_scene_context, ensure_ascii=False, indent=2),
+                "```",
+                "",
+            ]
+        )
+    collection_lines.extend([collection_section.strip(), ""])
     _write_semantic_artifact_text(
         run_dir,
         collection_path,
-        "\n".join(
-            [
-                "# Semantic Review Collection: scene_detail shard",
-                "",
-                f"Shard entry: `{entry_id}`",
-                f"Shard index: `{entry_index}` of `{total_entries}`",
-                "",
-                collection_section.strip(),
-                "",
-            ]
-        ),
+        "\n".join(collection_lines),
     )
     canonical_scope = _load_semantic_scope(canonical_scope_path)
     source_artifacts = _semantic_scope_source_artifacts(canonical_scope_path)
     source_artifact_digests = canonical_scope.get("source_artifact_digests")
     if not isinstance(source_artifact_digests, list):
-        raise RuntimeError("canonical scene_detail scope is missing source artifact digests")
+        raise RuntimeError(
+            f"canonical {stage} scope is missing source artifact digests"
+        )
     scope_payload = {
-        "stage": "scene_detail",
+        "stage": stage,
         "run_dir": str(run_dir.resolve()),
         "entry_count": 1,
         "entry_ids": [entry_id],
         "review_scope": "single_scene_entry",
         "shard_id": shard_id,
         "scene_id": scene_id,
-        "canonical_stage": "scene_detail",
+        "canonical_stage": stage,
         "canonical_scope": str(canonical_scope_path.relative_to(run_dir)),
         "canonical_report": str(canonical_report_path.relative_to(run_dir)),
+        "canonical_review_generation_id": (
+            canonical_generation.generation_id
+        ),
+        "canonical_collection_sha256": (
+            canonical_generation.collection_sha256
+        ),
+        "canonical_semantic_review_input_digest": (
+            canonical_generation.input_digest
+        ),
+        "canonical_scope_binding_sha256": (
+            canonical_generation.scope_binding_sha256
+        ),
+        "canonical_entry_projection_sha256": (
+            canonical_entry_projection_sha256
+        ),
         "source_artifacts": source_artifacts,
         "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
         "source_artifact_digests": source_artifact_digests,
@@ -22888,10 +24669,10 @@ def _write_scene_detail_shard_artifacts(
         prompt_path,
         "\n".join(
             [
-                "You are a contextless semantic review agent for a single ToC `scene_detail` entry.",
+                f"You are a contextless semantic review agent for a single ToC `{stage}` entry.",
                 "",
                 "Do semantic judgment only. The workspace is read-only; do not edit any artifact or repair outputs.",
-                f"Review only shard entry `{entry_id}`. Ignore other scene ids except as source context for neighbor handoff.",
+                review_scope_instruction,
                 "",
                 "Read these artifacts in order:",
                 f"1. `{scope_path}`",
@@ -22904,13 +24685,7 @@ def _write_scene_detail_shard_artifacts(
                 "Return the complete machine-readable report as your final response. The trusted orchestrator will validate and save it.",
                 f"The pending report path is `{report_path}`; do not write it yourself.",
                 "",
-                "Gate this scene_detail entry on scene necessity, internal pressure, value_shift visibility, causal_turn visibility, scene_event sequence, scene_generation prompt separation, story-specific concrete grounding, non_replaceable_elements, concrete detail story_function, source grounding confidence, canonical event coverage, turning_event/end_situation alignment, cut summary support, reveal order, and neighbor handoff.",
-                "Treat `scene_generation.scene_prompt_payload.prompt` as the canonical scene authoring prompt. This review prompt is only a display/review artifact, not the scene generation canon.",
-                "Fail if scene_prompt_payload mixes downstream image/video/audio execution details, fixed cut count, or image directing terms instead of describing what the scene must establish in the story.",
-                "Do not reject useful abstract dramatic language by itself. Reject only when abstraction is not paired with concrete_event / story_grounding that comes from source story, user input, canonical reference, or asset bible.",
-                "Treat decorative concrete detail without story_function, asset names mentioned without story function, invented_candidate details without approval, and missing required canonical events as gate failures.",
-                "Do not require a fixed cut count. Judge whether this scene's actual visual obligations are sufficiently represented by its cut summaries and contracts.",
-                "Do not fail solely because generated image/video/audio files do not exist yet.",
+                *stage_review_guidance,
                 "",
                 "Report format:",
                 "status: passed|failed",
@@ -22919,7 +24694,7 @@ def _write_scene_detail_shard_artifacts(
                 "blocked_entries: [...]",
                 "findings: [...]",
                 "failed_selectors: [...]",
-                "reason_keys: [semantic_subject_mismatch|semantic_location_mismatch|semantic_timeline_mismatch|semantic_reveal_order_mismatch|scene_detail_obligation_missing|scene_detail_cut_support_weak|scene_detail_handoff_weak|scene_generation_payload_missing|scene_generation_payload_downstream_leak|scene_generation_payload_fixed_cut_count|scene_generation_debug_source_missing|scene_generation_contract_mismatch|scene_event_abstract_only|scene_event_concrete_but_not_story_specific|scene_event_concrete_but_decorative|scene_event_missing_non_replaceable_elements|scene_event_missing_source_grounding|scene_event_source_grounding_low_confidence|scene_event_missing_character_relationship_specificity|scene_event_missing_story_rule_specificity|scene_event_missing_object_story_function|scene_event_asset_mentioned_without_story_function|scene_event_canonical_event_missing|scene_event_canonical_order_broken|scene_event_invented_detail_without_approval|scene_event_specificity_overloaded|...]",
+                reason_key_line,
                 "notes: [...]",
                 "",
                 f"Run dir: `{run_dir.resolve()}`",
@@ -22932,10 +24707,10 @@ def _write_scene_detail_shard_artifacts(
         report_path,
         "\n".join(
             [
-                "# Semantic Review Report: scene_detail shard",
+                f"# Semantic Review Report: {stage} shard",
                 "",
                 f"- run_dir: `{run_dir.resolve()}`",
-                "- stage: `scene_detail`",
+                f"- stage: `{stage}`",
                 f"- entry_id: `{entry_id}`",
                 f"- scope: `{scope_path}`",
                 f"- collection: `{collection_path}`",
@@ -22966,17 +24741,25 @@ def _semantic_scope_source_artifacts(scope_path: Path) -> list[str]:
     return [str(item) for item in raw if isinstance(item, str) and item.strip()] if isinstance(raw, list) else []
 
 
-def _scene_detail_transport_failure_result(*, entry_id: str, exc: BaseException) -> dict[str, Any]:
+def _scene_detail_transport_failure_result(
+    *,
+    entry_id: str,
+    exc: BaseException,
+    stage: str = "scene_detail",
+) -> dict[str, Any]:
     transport_kind = classify_codex_transport_error(str(exc)) or "unknown"
-    reason_keys = ["scene_detail_shard_transport_failed"]
+    reason_keys = [f"{stage}_shard_transport_failed"]
     if transport_kind == "timeout":
-        reason_keys.append("scene_detail_shard_transport_timeout")
+        reason_keys.append(f"{stage}_shard_transport_timeout")
     return {
         "entry_id": entry_id,
         "status": "transport_failed",
         "errors": [f"app-server transport {transport_kind}: {type(exc).__name__}: {exc}"],
         "blocked_entries": [entry_id],
-        "findings": [f"scene_detail shard transport failed before a terminal report: {type(exc).__name__}: {exc}"],
+        "findings": [
+            f"{stage} shard transport failed before a terminal report: "
+            f"{type(exc).__name__}: {exc}"
+        ],
         "reason_keys": reason_keys,
         "transport_error_kind": transport_kind,
         "transport_error": f"{type(exc).__name__}: {exc}",
@@ -23024,10 +24807,52 @@ def _semantic_report_inline_values(value: str) -> list[str]:
     if not cleaned or cleaned in {"[]", "[ ]"}:
         return []
     if cleaned.startswith("[") and cleaned.endswith("]"):
+        try:
+            decoded = json.loads(cleaned)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, list) and all(
+            isinstance(item, str) for item in decoded
+        ):
+            return [
+                scalar
+                for item in decoded
+                if (scalar := _semantic_report_scalar(item))
+            ]
         body = cleaned[1:-1].strip()
         if not body:
             return []
-        return [_semantic_report_scalar(item) for item in body.split(",") if _semantic_report_scalar(item)]
+        items: list[str] = []
+        start = 0
+        depth = 0
+        quote = ""
+        escaped = False
+        for index, character in enumerate(body):
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\" and quote:
+                escaped = True
+                continue
+            if quote:
+                if character == quote:
+                    quote = ""
+                continue
+            if character in {'"', "'"}:
+                quote = character
+            elif character in "[({":
+                depth += 1
+            elif character in "])}":
+                depth = max(0, depth - 1)
+            elif character == "," and depth == 0:
+                items.append(body[start:index])
+                start = index + 1
+        items.append(body[start:])
+        return [
+            scalar
+            for item in items
+            if (scalar := _semantic_report_scalar(item))
+        ]
     scalar = _semantic_report_scalar(cleaned)
     return [scalar] if scalar else []
 
@@ -23059,13 +24884,14 @@ def _scene_detail_shard_descriptor(
     run_dir: Path,
     shard_dir: Path,
     *,
+    stage: str = "scene_detail",
     entry_id: str,
     entry_index: int,
 ) -> dict[str, Any]:
     shard_label = _safe_scene_detail_shard_label(entry_id)
     base = shard_dir / f"{entry_index:03d}_{shard_label}"
     return {
-        "shard_id": f"scene_detail_{entry_index:03d}_{shard_label}",
+        "shard_id": f"{stage}_{entry_index:03d}_{shard_label}",
         "scene_id": entry_id,
         "entry_count": 1,
         "entry_ids": [entry_id],
@@ -23082,6 +24908,7 @@ def _touch_scene_detail_canonical_progress(
     run_dir: Path,
     canonical_report_path: Path,
     *,
+    stage: str = "scene_detail",
     status: str,
     message: str,
 ) -> None:
@@ -23091,7 +24918,7 @@ def _touch_scene_detail_canonical_progress(
             canonical_report_path,
             "\n".join(
                 [
-                    "# Semantic Review Report: scene_detail",
+                    f"# Semantic Review Report: {stage}",
                     "",
                     f"status: {status}",
                     "reviewed_entries: []",
@@ -23107,10 +24934,12 @@ def _touch_scene_detail_canonical_progress(
 def _write_scene_detail_shard_activity(
     *,
     run_dir: Path,
+    stage: str = "scene_detail",
     report_path: Path,
     canonical_report_path: Path,
     notification: dict[str, Any],
 ) -> None:
+    del stage
     _write_semantic_turn_activity_marker(run_dir, report_path, notification)
     with _scene_detail_canonical_progress_lock:
         _write_semantic_turn_activity_marker(run_dir, canonical_report_path, notification)
@@ -23120,6 +24949,7 @@ def _write_scene_detail_shard_aggregate_report(
     run_dir: Path,
     report_path: Path,
     *,
+    stage: str = "scene_detail",
     semantic_review_input_digest_value: str,
     status: str,
     reviewed_entries: list[str],
@@ -23133,7 +24963,7 @@ def _write_scene_detail_shard_aggregate_report(
         report_path,
         "\n".join(
             [
-                "# Semantic Review Report: scene_detail",
+                f"# Semantic Review Report: {stage}",
                 "",
                 f"status: {status}",
                 f"semantic_review_input_digest: {semantic_review_input_digest_value}",
@@ -23188,6 +25018,7 @@ def _semantic_review_report_completed(report_path: Path) -> bool:
 
 SEMANTIC_TURN_ARTIFACT_POLL_SECONDS = 2.0
 SEMANTIC_TURN_COMPLETION_GRACE_SECONDS = 15.0
+SEMANTIC_WATCHDOG_STATE_UPDATE_SECONDS = 30.0
 
 
 def _semantic_report_text_from_transcript(
@@ -23402,6 +25233,7 @@ def _semantic_failure_selector_scope_key(
     value: Any,
     *,
     scope_entry_ids: Iterable[str],
+    source_artifacts: Iterable[str] = (),
 ) -> str | None:
     """Resolve one reported failure selector to its current canonical scope."""
 
@@ -23416,25 +25248,45 @@ def _semantic_failure_selector_scope_key(
         if normalized.startswith("cut:"):
             normalized = normalized[4:]
         cut_match = re.fullmatch(
-            r"scene[_:]?(\d+)[_:]?cut[_:]?(\d+)",
+            r"scene[_:]?(\d+(?:\.\d+)*)[_:]?cut[_:]?(\d+(?:\.\d+)*)",
             normalized,
         )
         if cut_match:
-            return (
-                f"scene{int(cut_match.group(1))}_cut"
-                f"{int(cut_match.group(2))}"
+            scene_id = ".".join(
+                str(int(part)) for part in cut_match.group(1).split(".")
             )
-        scene_match = re.fullmatch(r"scene[_:]?(\d+)", normalized)
+            cut_id = ".".join(
+                str(int(part)) for part in cut_match.group(2).split(".")
+            )
+            return (
+                f"scene{scene_id}_cut"
+                f"{cut_id}"
+            )
+        scene_match = re.fullmatch(r"scene[_:]?(\d+(?:\.\d+)*)", normalized)
         if scene_match:
-            return f"scene:{int(scene_match.group(1))}"
+            scene_id = ".".join(
+                str(int(part)) for part in scene_match.group(1).split(".")
+            )
+            return f"scene:{scene_id}"
         return normalized
 
+    field_selector_pattern = re.compile(
+        r"[A-Za-z_][A-Za-z0-9_-]*"
+        r"(?:"
+        r"\.[A-Za-z_][A-Za-z0-9_-]*"
+        r"|\[(?:\*|\d+|[\w.-]+|[A-Za-z_][A-Za-z0-9_-]*="
+        r"[\w.-]+(?:, *[\w.-]+)*)\]"
+        r")*"
+    )
+
+    current_scope = tuple(
+        str(entry_id or "").strip()
+        for entry_id in scope_entry_ids
+        if str(entry_id or "").strip()
+    )
     scope_by_key: dict[str, str] = {}
     ambiguous_keys: set[str] = set()
-    for entry_id in scope_entry_ids:
-        canonical = str(entry_id or "").strip()
-        if not canonical:
-            continue
+    for canonical in current_scope:
         key = normalized_selector(canonical)
         previous = scope_by_key.get(key)
         if previous is not None and previous != canonical:
@@ -23444,13 +25296,78 @@ def _semantic_failure_selector_scope_key(
     selector_key = normalized_selector(raw)
     if selector_key in ambiguous_keys:
         return None
-    return scope_by_key.get(selector_key)
+    if canonical := scope_by_key.get(selector_key):
+        return canonical
+    cut_scope_match = re.fullmatch(
+        r"scene[_:]?(\d+(?:\.\d+)*)[_:]?cut[_:]?\d+(?:\.\d+)*"
+        r"(?:\.(.+))?",
+        raw.lower(),
+    )
+    if cut_scope_match:
+        nested_field_path = str(cut_scope_match.group(2) or "").strip()
+        if nested_field_path:
+            first_segment = nested_field_path.split(".", 1)[0].split("[", 1)[0]
+            if (
+                field_selector_pattern.fullmatch(nested_field_path) is None
+                or re.fullmatch(
+                    r"scene[_:]?\d+(?:\.\d+)*",
+                    first_segment,
+                )
+                is not None
+                or re.fullmatch(
+                    r"scene[_:]?\d+(?:\.\d+)*[_:]?cut[_:]?\d+(?:\.\d+)*",
+                    first_segment,
+                )
+                is not None
+            ):
+                return None
+        parent_scene_key = "scene:" + ".".join(
+            str(int(part))
+            for part in cut_scope_match.group(1).split(".")
+        )
+        if parent_scene_key in ambiguous_keys:
+            return None
+        if canonical := scope_by_key.get(parent_scene_key):
+            return canonical
+    nested_scope_matches: set[str] = set()
+    raw_lower = raw.lower()
+    for canonical in current_scope:
+        canonical_lower = canonical.lower()
+        aliases = {canonical_lower}
+        if canonical_lower.startswith("scene:"):
+            aliases.add("scene" + canonical_lower.split(":", 1)[1])
+        for alias in aliases:
+            prefix = alias + "."
+            if not raw_lower.startswith(prefix):
+                continue
+            field_path = raw[len(prefix) :]
+            if field_selector_pattern.fullmatch(field_path) is not None:
+                nested_scope_matches.add(canonical)
+    if len(nested_scope_matches) == 1:
+        return next(iter(nested_scope_matches))
+    if len(nested_scope_matches) > 1:
+        return None
+
+    if len(current_scope) != 1:
+        return None
+    artifact, separator, field_path = raw.partition(":")
+    in_scope_artifacts = {
+        str(source_artifact).strip()
+        for source_artifact in source_artifacts
+        if str(source_artifact).strip()
+    }
+    if separator != ":" or artifact not in in_scope_artifacts:
+        return None
+    if field_selector_pattern.fullmatch(field_path) is None:
+        return None
+    return current_scope[0]
 
 
 def _semantic_negative_verdict_contract_errors(
     report_text: str,
     *,
     scope_entry_ids: Iterable[str],
+    source_artifacts: Iterable[str] = (),
 ) -> tuple[str, ...]:
     """Require a negative verdict to identify concrete, current repair scope."""
 
@@ -23495,6 +25412,7 @@ def _semantic_negative_verdict_contract_errors(
         )
 
     current_scope = tuple(scope_entry_ids)
+    current_source_artifacts = tuple(source_artifacts)
     for field, selectors in (
         ("failed_selectors", failed_selectors),
         ("blocked_entries", blocked_entries),
@@ -23505,6 +25423,7 @@ def _semantic_negative_verdict_contract_errors(
             if _semantic_failure_selector_scope_key(
                 selector,
                 scope_entry_ids=current_scope,
+                source_artifacts=current_source_artifacts,
             )
             is None
         ]
@@ -28445,7 +30364,10 @@ async def api_regenerate_prompts(req: RegeneratePromptsRequest) -> dict[str, Any
                     run_dir / "asset_generation_requests.md",
                     run_dir / "asset_generation_request_snapshot.json",
                 )
-                before = _capture_file_transaction(rollback_paths)
+                before = _capture_file_transaction(
+                    rollback_paths,
+                    state_paths=(run_dir / "state.txt",),
+                )
                 try:
                     compiled = _recompile_v2_scene_manifest(run_dir, v2_revisions) if v2_revisions else {}
                     if v2_revisions:
@@ -28610,7 +30532,11 @@ async def api_insert_bulk(req: BulkInsertRequest) -> dict[str, Any]:
             # revisions are frozen.  Preserve canonical bytes so an unexpected
             # copy failure cannot leave a half-inserted bulk request.
             before_outputs = _capture_file_transaction(
-                plan["target"] for plan in planned
+                (plan["target"] for plan in planned),
+                state_paths=(
+                    planned_run_dir / "state.txt"
+                    for planned_run_dir in run_dirs.values()
+                ),
             )
             try:
                 owners_by_run: dict[Path, list[tuple[str, str, Path, Path]]] = {}

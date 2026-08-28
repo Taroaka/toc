@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 from toc.harness import append_state_snapshot, parse_state_file
 from toc import stage_evaluator as STAGE_EVALUATOR
 from toc.stage_evaluation import manifest as MANIFEST_EVALUATION
+from toc.stage_evaluation import script as SCRIPT_EVALUATION
 from toc.review_loop import (
     REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE,
     REVIEW_LOOP_SPECS,
@@ -1304,6 +1305,182 @@ def _motion_redundancy_cut(
 
 
 class TestStageEvaluatorScripts(unittest.TestCase):
+    def _timeline_binding_scene(
+        self,
+        *,
+        expected_character_ids: list[str],
+        characters: list[dict],
+    ) -> dict:
+        beat_ids = ["scene1_event_setup", "scene1_event_turn", "scene1_event_payoff"]
+        return {
+            "scene_id": 1,
+            "scene_event": {
+                "schema_version": "scene_event_v1",
+                "event_sequence": [
+                    {"beat_id": beat_id, "beat_function": beat_id.rsplit("_", 1)[-1]}
+                    for beat_id in beat_ids
+                ],
+            },
+            "scene_character_state_timeline": {
+                "policy_version": "character_emotion_continuity_v1",
+                "linked_scene_event_beat_ids": beat_ids,
+                "characters": characters,
+            },
+            "cuts": [
+                {
+                    "cut_id": index,
+                    "cut_contract": {
+                        "asset_dependency": {
+                            "character_ids_required": [character_id],
+                        },
+                    },
+                }
+                for index, character_id in enumerate(expected_character_ids, start=1)
+            ],
+        }
+
+    def _timeline_character(
+        self,
+        character_id: str,
+        *,
+        appearance_asset_ids: object | None = None,
+    ) -> dict:
+        character = {
+            "character_id": character_id,
+            "start_state": {
+                "emotion": "不安",
+                "trigger_event_beat_id": "scene1_event_setup",
+            },
+            "midpoint_state": {
+                "emotion": "決意",
+                "trigger_event_beat_id": "scene1_event_turn",
+            },
+            "end_state": {
+                "emotion": "安堵",
+                "trigger_event_beat_id": "scene1_event_payoff",
+            },
+            "emotional_no_return_point": {
+                "event_beat_id": "scene1_event_turn",
+            },
+        }
+        if appearance_asset_ids is not None:
+            character["appearance_asset_ids"] = appearance_asset_ids
+        return character
+
+    def test_timeline_identity_record_covers_cut_required_appearance_assets(self) -> None:
+        scene = self._timeline_binding_scene(
+            expected_character_ids=["cinderella_transformed", "cinderella_post_midnight"],
+            characters=[
+                self._timeline_character(
+                    "cinderella",
+                    appearance_asset_ids=[
+                        "cinderella",
+                        "cinderella_transformed",
+                        "cinderella_post_midnight",
+                    ],
+                )
+            ],
+        )
+
+        issues = SCRIPT_EVALUATION._scene_emotion_film_issue_map(scene)
+
+        self.assertNotIn("timeline_states_complete", issues)
+
+    def test_timeline_appearance_assets_do_not_replace_identity_state_requirements(self) -> None:
+        character = self._timeline_character(
+            "cinderella",
+            appearance_asset_ids=["cinderella_transformed"],
+        )
+        del character["midpoint_state"]
+        scene = self._timeline_binding_scene(
+            expected_character_ids=["cinderella_transformed"],
+            characters=[character],
+        )
+
+        issues = SCRIPT_EVALUATION._scene_emotion_film_issue_map(scene)
+
+        self.assertIn(
+            "scene1:character[1].midpoint_state",
+            issues["timeline_states_complete"],
+        )
+
+    def test_timeline_malformed_appearance_assets_fail_closed(self) -> None:
+        malformed_values = {
+            "not_a_list": "cinderella_transformed",
+            "blank": ["cinderella_transformed", "   "],
+            "non_string": ["cinderella_transformed", 7],
+            "duplicate": ["cinderella_transformed", " cinderella_transformed "],
+        }
+        for label, appearance_asset_ids in malformed_values.items():
+            with self.subTest(label=label):
+                scene = self._timeline_binding_scene(
+                    expected_character_ids=["cinderella_transformed"],
+                    characters=[
+                        self._timeline_character(
+                            "cinderella",
+                            appearance_asset_ids=appearance_asset_ids,
+                        )
+                    ],
+                )
+
+                issues = SCRIPT_EVALUATION._scene_emotion_film_issue_map(scene)
+
+                timeline_issues = issues["timeline_states_complete"]
+                self.assertIn(
+                    "scene1:character[1].appearance_asset_ids",
+                    timeline_issues,
+                )
+                self.assertIn(
+                    "scene1:scene_character_state_timeline.missing_characters:cinderella_transformed",
+                    timeline_issues,
+                )
+
+    def test_timeline_appearance_asset_must_have_one_identity_owner(self) -> None:
+        scene = self._timeline_binding_scene(
+            expected_character_ids=["shared_costume_asset"],
+            characters=[
+                self._timeline_character(
+                    "hero",
+                    appearance_asset_ids=["shared_costume_asset"],
+                ),
+                self._timeline_character(
+                    "supporting",
+                    appearance_asset_ids=["shared_costume_asset"],
+                ),
+            ],
+        )
+
+        issues = SCRIPT_EVALUATION._scene_emotion_film_issue_map(scene)
+
+        timeline_issues = issues["timeline_states_complete"]
+        self.assertIn(
+            "scene1:scene_character_state_timeline.appearance_asset_ids.not_unique:shared_costume_asset",
+            timeline_issues,
+        )
+        self.assertIn(
+            "scene1:scene_character_state_timeline.missing_characters:shared_costume_asset",
+            timeline_issues,
+        )
+
+    def test_timeline_appearance_asset_cannot_claim_another_character_id(self) -> None:
+        scene = self._timeline_binding_scene(
+            expected_character_ids=["supporting"],
+            characters=[
+                self._timeline_character(
+                    "hero",
+                    appearance_asset_ids=["supporting"],
+                ),
+                self._timeline_character("supporting"),
+            ],
+        )
+
+        issues = SCRIPT_EVALUATION._scene_emotion_film_issue_map(scene)
+
+        self.assertIn(
+            "scene1:character[1].appearance_asset_ids.conflicts_with_character_id:supporting",
+            issues["timeline_states_complete"],
+        )
+
     def test_adjacent_distinct_cuts_reusing_canonical_motion_and_end_state_are_redundant(self) -> None:
         cuts = [
             _motion_redundancy_cut(
@@ -1982,6 +2159,7 @@ class TestStageEvaluatorScripts(unittest.TestCase):
                     "scene_time_of_day_continuity",
                     "scene_location_route_continuity",
                     "duration_scene_readiness",
+                    "adaptation_value_fidelity",
                 )
             ]
             (review_dir / "story.report.md").write_text(

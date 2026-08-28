@@ -971,6 +971,41 @@ constraints:
 
 ---
 
+## 既存物語 adaptation の追加契約
+
+既に完成し評価されている物語を映像化する場合、`story_metadata.adaptation_value_contract: required_v1` と `adaptation_source_contract` を必須にする。ここでは新しい筋を発明せず、原作の `core_values[].value_id`、失ってはいけない event / meaning、iconic moment、禁止する価値の歪曲を固定する。完全な key 定義と authoring 例は [既存物語の価値増幅契約](adaptation-value-amplification.md) および `workflow/story-template.yaml` を正本とする。
+
+## Scene acceptance の前倒し（contract-first）
+
+scene-set を作る agent は、会話履歴や前回の reviewer transcript を前提にしてはならない。作成前に、stage grounding readset から次の順序で契約を読む。
+
+```text
+review済み research / story / visual_value
+  -> scene_set_authoring_contract_v1 を計画
+  -> contract を validate / freeze
+  -> sceneごとの contract slice を authoring agent へ投影
+  -> scene draft を出力
+  -> deterministic authoring_preflight
+  -> 全 scene pass 後に cut / manifest を materialize
+```
+
+`scene_set_authoring_contract_v1` は、scene prose の後付け説明ではなく、全 scene の正典イベント所有、beat 順、役割、reveal、時刻・場所の遷移、handoff、source-specific evidence を先に固定する machine-readable artifact である。scene author は契約を変更せず、`event_id`、`beat_id`、`evidence_id`、`role_id`、`character_id`、`handoff_anchor_id`、`transition_cue_id`、`reveal_transition_id` を exact reference として出力する。自由文だけで同じ事実を表した場合、preflight の根拠としては扱わない。
+
+### 作成前に凍結する項目
+
+- canonical event の順序、scene ownership、required beat
+- 各 beat の required role / character / evidence / non-replaceable element
+- 情報・artifact の `withheld -> revealed -> carried|known` の遷移と開示所有 scene
+- scene 間の incoming / outgoing handoff anchor、producer / consumer、state
+- time-of-day / location route と discontinuity に必要な transition cue
+- source artifact digest、pointer、expected ID による grounding readset
+
+scene author の prompt には、その scene の slice、前後 handoff、criterion registry の authoring instruction だけを渡す。全編の自己採点や前回会話の要約を渡して合格扱いにしない。authoring 後の `authoring_preflight` は追加 provider turnを必要としない決定論的チェックであり、canonical event の欠落・重複・順序破壊、reveal rollback、required role closure、handoff 不一致、transition cue 欠落、source evidence 欠落を cut 作成前に停止する。
+
+causal proof の説得力、story-specificity、価値増幅など意味判断を要する criterion は prompt に明示するが、author の自己宣言で合格にしない。最終 contextless reviewer は frozen contract と canonical artifact を読み、同じ criterion ID を独立に再評価する。最終 reviewer が deterministic-owned criterion を見つけた場合は `shift_left_escape` として記録し、reviewerの指摘をそのまま producer repair に渡さず、validator / fixture の欠陥へ戻す。
+
+既知の legacy artifact は `scene_set_authoring_contract_v1` marker がなくても読み取り互換経路を持つ。ただし marker がある artifact の部分契約、unsupported version、digest mismatch、未知 ID は fail-close とし、legacy 互換を理由に新契約の欠落を隠してはならない。
+
 ## 実行フロー
 
 ```

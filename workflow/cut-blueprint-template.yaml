@@ -124,6 +124,20 @@ cuts:
     deletion_reason: ""
     cut_contract:
       schema_version: "3.0"
+      # scene価値のうち、このcutが担当する一つの表現機能。内部trace用でprovider proseへ直送しない。
+      expressive_contract:
+        schema_version: "cut_expressive_contract_v1"
+        source_value_refs: ["REPLACE_ME_STORY_VALUE_ID"]
+        scene_amplification_ref: "scene1.scene_intent.scene_value_amplification"
+        audience_experience_delta: "cut前後の観客体験差"
+        expressive_function: "recognition|withhold|pressure|release|contrast|reaction|reframe|afterimage|spectacle|transition"
+        performance_beat: "観察可能な一つの演技beat"
+        visual_pressure: "距離・遮蔽・運動・光で作る圧力"
+        attention_shift: "観客の注意を何から何へ移すか"
+        edit_trigger: "切り替えを正当化する観察可能な契機"
+        sound_function: "環境音、沈黙、音の先行・残響の役割"
+        emotional_afterimage: "cut後に残す感覚"
+        must_not_reduce_to: ["genericな説明ショットへの縮退"]
       source_event_contract:
         primary_event_beat_id: "scene1_event_turn"
         source_event_beat_ids: ["scene1_event_turn"]

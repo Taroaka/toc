@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import os
 import re
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -18,12 +19,13 @@ from toc.run_index import build_run_index_markdown
 from toc.run_root_binding import (
     RunRootBinding,
     RunRootBindingError,
-    append_run_file_text,
     current_run_root_binding,
     read_run_file_bytes,
+    read_run_file_bytes_serialized,
     require_bound_run_root,
     write_run_file_text,
 )
+from toc.state_store import append_state_delta, read_current_state, with_current_state
 from scripts.world_walk_source import (
     read_regular_file_nofollow,
     write_regular_file_nofollow,
@@ -63,20 +65,29 @@ def _read_bound_text(path: Path, *, missing_ok: bool = False) -> str:
             except FileNotFoundError:
                 return ""
         try:
-            return read_run_file_bytes(path.parent, path.name).decode(
-                "utf-8"
+            reader = (
+                read_run_file_bytes_serialized
+                if path.name == "state.txt"
+                else read_run_file_bytes
             )
+            return reader(path.parent, path.name).decode("utf-8")
         except FileNotFoundError:
             if missing_ok:
                 return ""
             raise
     binding, relative = bound
     try:
-        data = read_regular_file_nofollow(
-            Path(binding.lexical_root),
-            relative,
-            expected_root_identity=binding.identity,
-        )
+        if relative == Path("state.txt"):
+            data = read_run_file_bytes_serialized(
+                Path(binding.lexical_root),
+                relative,
+            )
+        else:
+            data = read_regular_file_nofollow(
+                Path(binding.lexical_root),
+                relative,
+                expected_root_identity=binding.identity,
+            )
     except FileNotFoundError:
         if missing_ok:
             return ""
@@ -95,21 +106,6 @@ def _write_bound_text(path: Path, text: str) -> None:
         destination_relative=relative,
         data=text.encode("utf-8"),
         expected_destination_root_identity=binding.identity,
-    )
-
-
-def _append_bound_state(path: Path, block: str) -> None:
-    bound = _bound_artifact(path, require_within_binding=True)
-    if bound is None:
-        append_run_file_text(path.parent, path.name, block)
-        return
-    binding, relative = bound
-    if len(relative.parts) != 1:
-        raise ValueError("state file must be a direct run artifact")
-    append_run_file_text(
-        Path(binding.lexical_root),
-        relative,
-        block,
     )
 
 
@@ -155,20 +151,11 @@ def load_structured_document(path: Path) -> tuple[str, dict[str, Any]]:
 
 
 def parse_state_file(state_path: Path) -> dict[str, str]:
-    text = _read_bound_text(state_path, missing_ok=True)
-    if not text:
+    try:
+        state_path.lstat()
+    except FileNotFoundError:
         return {}
-    merged: dict[str, str] = {}
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line == "---" or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().replace("\n", " ")
-        if key:
-            merged[key] = value
-    return merged
+    return dict(read_current_state(state_path).state)
 
 
 def _order_keys(state: dict[str, str]) -> list[str]:
@@ -336,9 +323,8 @@ def run_report_path(run_dir: Path) -> Path:
     return run_dir / "run_report.md"
 
 
-def sync_run_status(run_dir: Path, state: dict[str, str] | None = None) -> Path:
+def _sync_run_status_locked(run_dir: Path, merged: dict[str, str]) -> Path:
     state_path = run_dir / "state.txt"
-    merged = state or parse_state_file(state_path)
     index_path = run_dir / "p000_index.md"
     index_text = build_run_index_markdown(run_dir, state=merged)
     _write_bound_text(index_path, index_text)
@@ -375,24 +361,48 @@ def sync_run_status(run_dir: Path, state: dict[str, str] | None = None) -> Path:
     return output_path
 
 
+def sync_run_status(run_dir: Path, state: dict[str, str] | None = None) -> Path:
+    """Rebuild projections while the canonical state head cannot advance."""
+
+    del state  # callers may pass a hint; the lock-held current view is authoritative
+    return with_current_state(
+        run_dir / "state.txt",
+        lambda replay: _sync_run_status_locked(
+            run_dir,
+            dict(replay.state),
+        ),
+    )
+
+
 def append_state_snapshot(state_path: Path, updates: dict[str, str]) -> dict[str, str]:
-    merged = parse_state_file(state_path)
+    timestamp = now_iso()
+    replay = append_state_delta(
+        state_path,
+        updates,
+        event_type="state.snapshot_compat.updated",
+        occurred_at=timestamp,
+        committed_at=timestamp,
+        defaults={
+            "job_id": new_job_id(),
+            "status": "INIT",
+            "artifact.run_index": str(
+                (state_path.parent / "p000_index.md").resolve()
+            ),
+        },
+    )
+    merged = dict(replay.state)
 
-    if "job_id" not in merged or not merged["job_id"].strip():
-        merged["job_id"] = new_job_id()
-    if "status" not in merged or not merged["status"].strip():
-        merged["status"] = "INIT"
-    merged.setdefault("artifact.run_index", str((state_path.parent / "p000_index.md").resolve()))
-
-    cleaned = {key: value.replace("\n", " ").strip() for key, value in updates.items()}
-    merged.update(cleaned)
-    merged["timestamp"] = now_iso()
-
-    lines = [f"{key}={merged[key]}" for key in _order_keys(merged)]
-    block = "\n".join(lines) + "\n---\n"
-    _append_bound_state(state_path, block)
-
-    sync_run_status(state_path.parent, merged)
+    try:
+        sync_run_status(state_path.parent, merged)
+    except RunRootBindingError:
+        raise
+    except Exception as exc:
+        warnings.warn(
+            "state delta committed but derived run projections could not be "
+            f"rebuilt: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return merged
 
 

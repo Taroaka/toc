@@ -1,6 +1,9 @@
 # Minimal script output template (from docs/script-creation.md)
 script_metadata:
   topic: "string"
+  # 既存物語 adaptation の場合のみ、次のコメントを外し、story / visual_value の markerを一方向projectionする。
+  # original_story では key 自体を出力しない。
+  # adaptation_value_contract: "required_v1"
   # story_metadata.scene_time_of_day_contract の exact one-way projection。
   scene_time_of_day_contract: "required_v1"
   # story_metadata.scene_time_of_day_visual_basis_contract の exact one-way projection。
@@ -29,6 +32,99 @@ script_metadata:
     prompt_contract_version: "v3_tagged_context_v1"
     default_stability_profile: "creative"
     text_policy: "hiragana_plus_audio_tags"
+
+# === Scene acceptance contract（p400 planner が先に freeze する） ===
+# 会話履歴ではなく stage grounding readset と upstream artifact だけで作成する。
+# scene / cut authoring の自由文から後付け推定しない。scene/cutは契約の read-only projection とする。
+# legacy artifact は markerなしでも読み取り互換。
+scene_set_authoring_contract:
+  schema_version: "scene_set_authoring_contract_v1"
+  generation_id: "scene-authoring-<id>"
+  criterion_registry_version: "scene_acceptance_criteria_v1"
+  criterion_registry_sha256: "sha256:<hex>"
+  source_bindings:
+    # source_refs が指す構造化台帳。JSON Pointer と expected_id をfreeze時に実検証する。
+    authoring_source_ledger:
+      path: "logs/authoring/staging/<generation_id>/source_ledger.json"
+      sha256: "sha256:<canonical-json-hex>"
+    story:
+      path: "story.md"
+      sha256: "sha256:<raw-file-hex>"
+    visual_value:
+      path: "visual_value.md"
+      sha256: "sha256:<raw-file-hex>"
+  source_refs:
+    - source_ref_id: "source-event-01"
+      artifact: "authoring_source_ledger"
+      artifact_sha256: "sha256:<canonical-json-hex>"
+      pointer: "/events/0"
+      expected_id: "source_event_01"
+  canonical_events:
+    - event_id: "E01"
+      canonical_order_index: 1
+      owner_scene_id: 1
+      required_beat_ids: ["scene1_beat_01"]
+      source_ref_ids: ["source-event-01"]
+  evidence_catalog:
+    - evidence_id: "evidence_E01"
+      owner_scene_id: 1
+      element_id: "element_E01"
+      source_ref_ids: ["source-event-01"]
+      visible_form: "原作固有の人物・物・行動で読める画面上の証拠"
+  reveal_ledger:
+    - information_id: "artifact_example"
+      initial_state: "withheld"
+      allowed_states: ["withheld", "revealed", "carried", "known"]
+      transitions: []
+  handoff_chain:
+    - anchor_id: "handoff_1_2"
+      owner_scene_id: 1
+      consumer_scene_id: 2
+      state_id: "state_after_scene1"
+      producer_beat_id: "scene1_beat_01"
+      consumer_beat_id: "scene2_beat_01"
+      evidence_ids: ["evidence_E01"]
+  transition_cues:
+    - transition_cue_id: "cue_1_2"
+      owner_scene_id: 2
+      from_time_of_day: ""
+      to_time_of_day: ""
+      from_location_ids: []
+      to_location_ids: []
+      owner_beat_id: "scene2_beat_01"
+      evidence_ids: []
+  scenes:
+    - scene_id: 1
+      owned_event_ids: ["E01"]
+      required_beat_specs: []
+      role_bindings: []
+      reveal_state_before: {}
+      allowed_reveal_transition_ids: []
+      reveal_state_after: {}
+      time_location_transition:
+        time_of_day: ""
+        continuity_from_previous: "opening"
+        transition_cue_required: false
+        transition_cue_ids: []
+        location_sequence: []
+      incoming_handoff_anchor_id: "story_opening"
+      outgoing_handoff_anchor_id: "handoff_1_2"
+      causal_proof_contract:
+        cause_beat_id: "scene1_beat_01"
+        action_beat_id: "scene1_beat_01"
+        result_state_id: "state_after_scene1"
+        required_evidence_ids: []
+      non_replaceable_elements: []
+# planner が freeze 後に計算する script top-level derived block。agentが passed を手入力しない。
+authoring_preflight:
+  status: "pending"
+  generation_id: "scene-authoring-<id>"
+  contract_digest: ""
+  criterion_registry_digest: ""
+  source_digest: ""
+  preflight_digest: ""
+  checks: []
+  blocking_reason_keys: []
 
 audio_story_plan:
   schema_version: "audio_story_plan_v1"
@@ -316,6 +412,44 @@ timeline:
 
 scenes:
   - scene_id: 1   # dotted numeric string も可: 3.1
+    # frozen contract の該当 slice。scene authorはcanonical ownership / reveal / role / digestを変更しない。
+    scene_contract_slice:
+      schema_version: "scene_contract_slice_v1"
+      scene_id: 1
+      generation_id: "scene-authoring-<id>"
+      contract_digest: "sha256:<hex>"
+      scene_slice_digest: "sha256:<hex>"
+      canonical_event_ids: []
+      required_beat_specs: []
+      role_bindings: []
+      reveal_state_before: {}
+      allowed_reveal_transition_ids: []
+      reveal_state_after: {}
+      time_location_transition:
+        time_of_day: ""
+        continuity_from_previous: "opening"
+        transition_cue_required: false
+        transition_cue_ids: []
+        location_sequence: []
+      incoming_handoff_anchor_id: "story_opening"
+      outgoing_handoff_anchor_id: "handoff_1_2"
+      causal_proof_contract:
+        cause_beat_id: "scene1_beat_01"
+        action_beat_id: "scene1_beat_01"
+        result_state_id: "state_after_scene1"
+        required_evidence_ids: []
+      non_replaceable_elements: []
+    # validatorのderived block。agentが手入力でpassedにしない。
+    authoring_preflight:
+      schema_version: "scene_authoring_preflight_v1"
+      status: "pending"
+      generation_id: "scene-authoring-<id>"
+      contract_digest: "sha256:<hex>"
+      scene_slice_digest: "sha256:<hex>"
+      source_digest: "sha256:<hex>"
+      preflight_digest: ""
+      checks: []
+      blocking_reason_keys: []
     # story.md の同一 scene から一方向 projection する open string。新規 artifact では非空必須。
     # contract marker がない Legacy の missing/empty だけ、読み込み時に "" として扱い、時間帯 prompt fragment を生成しない。
     time_of_day: "朝"
@@ -424,6 +558,24 @@ scenes:
       narration_policy: "spoken|silent"
     scene_intent:
       story_purpose: "string"
+      # visual_value.md の同scene契約を具体scene eventへ接地した正本。provider proseへ内部IDを直接送らない。
+      scene_value_amplification:
+        schema_version: "scene_value_amplification_v1"
+        source_value_refs: ["REPLACE_ME_STORY_VALUE_ID"]
+        why_this_scene_matters: "原作全体に対してこのsceneが不可欠な理由"
+        audience_state_before: "scene開始時の観客状態"
+        audience_state_after: "scene終了時の観客状態"
+        emotional_contradiction: "同時に存在する相反感情や圧力"
+        cinematic_gain:
+          performance: "呼吸、視線、抑制、身体反応の具体差"
+          blocking_and_space: "距離、遮蔽、孤立、接近、退路の変化"
+          camera_and_composition: "認識、見せる順序、構図の変化"
+          edit_and_rhythm: "hold、reaction、reveal、余韻"
+          sound: "環境音、沈黙、音の先行・残響"
+        iconic_moment_target: "再体験・再発見させる一瞬"
+        must_preserve_story_facts: ["このsceneで変えてはいけない原作事実"]
+        must_not_reduce_to: ["説明絵や美麗な壁紙への縮退"]
+        success_evidence: ["映像だけでも価値増幅が成立したと分かる証拠"]
       dramatic_question: "この scene の間、観客が追う問い"
       scene_spine: "scene 固有の authored event progression の1文要約。候補ラベルを固定順で埋めない"
       value_shift:
@@ -553,6 +705,20 @@ scenes:
       - cut_id: 1  # dotted numeric string も可: 2.1
         cut_contract:
           schema_version: "3.0"
+          # sceneの価値増幅をこのcutが一つだけどう担当するか。review/compile sourceでありprovider直送禁止。
+          expressive_contract:
+            schema_version: "cut_expressive_contract_v1"
+            source_value_refs: ["REPLACE_ME_STORY_VALUE_ID"]
+            scene_amplification_ref: "scene1.scene_intent.scene_value_amplification"
+            audience_experience_delta: "このcut前後の観客体験差"
+            expressive_function: "recognition|withhold|pressure|release|contrast|reaction|reframe|afterimage|spectacle|transition"
+            performance_beat: "表情ラベルではなく観察可能な演技beat"
+            visual_pressure: "画面内で圧力を作る距離・遮蔽・運動・光"
+            attention_shift: "観客の注意を何から何へ移すか"
+            edit_trigger: "このcutへ入り、次へ切る観察可能な契機"
+            sound_function: "環境音、沈黙、音の先行・残響の役割"
+            emotional_afterimage: "cut後に残す感覚"
+            must_not_reduce_to: ["genericな説明ショットへの縮退"]
           source_event_contract:
             primary_event_beat_id: "scene1_event_turn"
             source_event_beat_ids: ["scene1_event_turn"]

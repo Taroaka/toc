@@ -1,45 +1,48 @@
-# ToC native lead form contract
+# ToC サイト内フォーム設計
 
-更新日: 2026-07-19
+更新日: 2026-08-09
 
-用途: 独立した ToC marketing site 内に実装する idea intake / lead form。Google Forms、Notion Forms、Typeform を canonical route にしない。
+用途: 独立した ToC 公開サイト内に実装する、画像・動画案の受付と問い合わせフォーム。Google Forms、Notion Forms、Typeform は正式な公開経路にしない。
 
-## Conversion principle
+## 基本原則
 
-長い個人情報入力から始めず、visitor が作りたい動画を一行で入力するところから始める。
+長い個人情報入力から始めず、訪問者が作りたい画像・動画を一行で入力するところから始める。
+
+共通サイト:
 
 ```text
-persona selection
-  -> one-line video idea
-  -> minimum contact details
-  -> consent
-  -> thank-you page
+一行の案
+  -> 目的
+  -> 制作形式
+  -> 商談条件の最小確認
+  -> 連絡先と同意
+  -> 送信完了
 ```
 
-## Step 1: purpose
+顧客層別ページ:
 
-Required, single select.
+```text
+流入元から顧客層を保持
+  -> 一行の案
+  -> 制作形式
+  -> その顧客層に必要な最小確認
+  -> 連絡先と同意
+  -> 送信完了
+```
 
-- `side_business`: 副業のために動画を作りたい
-- `personal_brand`: 自分のブランドを構築したい
-- `other`: その他
+最初の販売対象は `副業に取り組む個人 × 動画制作` である。共通サイトでは画像・動画の両方を選べるが、副業向けページでは動画を初期選択し、小規模ビジネス向けページは次市場として計測を分ける。
 
-Preserve campaign-provided persona when the visitor came from a persona-specific LP. Allow editing.
+## 1. 作りたいもの
 
-Do not ask `あなたはどのタイプですか？`. Ask what the visitor wants to build:
+### `content_idea`
 
-- `副業の可能性を試したい`
-- `自分のブランドを育てたい`
+必須、10〜500文字。
 
-## Step 2: video idea
+表示名: `どんな画像・動画を作りたいですか？`
 
-### `video_idea`
+補足: `まだまとまっていなくても構いません。一行から始められます。`
 
-Required, 10–500 characters.
-
-Label: `どんな動画を作りたいですか？`
-
-Placeholder:
+入力例:
 
 ```text
 例: 30代会社員向けに、睡眠改善を分かりやすく伝えるYouTube動画
@@ -47,77 +50,107 @@ Placeholder:
 
 ### `target_audience`
 
-Optional, 0–200 characters.
+任意、0〜200文字。
 
-Label: `誰に届けたいですか？`
+表示名: `誰に届けたいですか？`
 
-### `desired_format`
+## 2. 目的
 
-Optional, multi select.
+`customer_segment` は必須、一つだけ選ぶ。
 
-- YouTube long-form
+- `side_business`: 副業の可能性を試したい
+- `small_business`: ビジネスの価値を伝えたい
+- `other`: その他
+
+顧客層別ページから来た場合は、その顧客層を保持する。訪問者は変更できる。`あなたはどのタイプですか？` とは聞かない。
+
+## 3. 制作形式
+
+`production_mode` は必須、一つだけ選ぶ。
+
+- `image_batch`: 必要な画像をまとめて作りたい
+- `video`: 一本の動画を作りたい
+- `undecided`: まだ決めていない
+
+顧客層と制作形式を一つの質問に混ぜない。副業向けページでは `video` を初期値にするが、訪問者は変更できる。
+
+`desired_use` は任意、複数選択できる。
+
+- YouTube 長尺
 - Shorts / Reels / TikTok
 - 解説・教育
 - 商品・サービス紹介
-- personal brand / thought leadership
-- story / entertainment
-- not decided
+- SNS / ウェブサイト用画像
+- サムネイル
+- 広告用の画像・動画
+- 運営者本人の知識や信用を伝える発信
+- 物語・娯楽
+- まだ決めていない
 
-## Step 3: current obstacle
+## 4. 現在止まっている場所
 
-Optional, multi select.
+`current_obstacle` は任意、複数選択できる。
 
 - 時間がない
 - 編集できない
-- 企画や台本で止まる
-- 生成AIツールが多すぎる
+- 企画や構成で止まる
+- 生成 AI サービスが多すぎる
+- 必要な画像を揃えられない
 - 発信を継続できない
-- ブランドの一貫性を保てない
+- 見た目の一貫性を保てない
 - 外注費が高い
 - 品質が不安
 - その他
 
-Use this for routing and product learning, not for manipulative messaging.
+不安を煽る文章には使わず、相談の振り分けと商品改善に使う。
 
-## Step 3a: persona-specific qualification
+## 5. 顧客層別の最小確認
 
-Show no more than two fields for the selected persona.
+連絡先より前に見せる項目は、顧客層ごとに最大2つまでにする。
 
-For `side_business`:
+`side_business`:
 
 - `side_business_stage`: アイデアだけ / 制作途中 / 公開経験あり / 継続中
-- `side_business_goal`: 最初の1本 / niche 検証 / 投稿継続 / 収益化検証
+- `side_business_goal`: 最初の一本 / テーマ検証 / 投稿継続 / 収益化の検証
 
-For `personal_brand`:
+`small_business`:
 
-- `expertise_topic`: `何について知られる人になりたいですか？`
-- `brand_video_goal`: 認知 / 信頼 / 問い合わせ / 教育 / launch support
+- `business_use`: 集客 / サービス説明 / 顧客教育 / 採用 / 信頼形成 / 運営者本人の発信
+- `business_timing`: すぐに必要 / 3か月以内 / 時期未定
 
-Collect optional research fields such as weekly time, existing assets, desired cadence, channel URLs, and format preference only after lead submission or during follow-up. Do not turn the first form into a survey.
+商談対象の条件を確認する次の項目は、スレッド1の決定をそのまま反映する。
 
-## Step 4: contact
+- `has_specific_purpose`: 具体的なテーマまたは事業目的がある
+- `has_production_obstacle`: 制作上の障壁がある
+- `paid_intent`: 有料導入を検討できる
+- `human_review_acceptance`: 目的、品質、公開を人間が判断することを受け入れる
+
+週に使える時間、既存素材、現在の道具や外注、希望頻度などは、送信後または相談時に聞く。最初のフォームを調査票にしない。
+
+## 6. 連絡先
 
 ### `name`
 
-Optional, 0–100 characters.
+任意、0〜100文字。
 
 ### `email`
 
-Required, normalized email address.
+必須。正規化したメールアドレスを保存する。
 
 ### `reply_preference`
 
-Required, single select.
+必須、一つだけ選ぶ。
 
 - 利用方法を知りたい
-- 最初の1本について相談したい
-- 開発・提供開始の案内だけ受け取りたい
+- 最初の制作について相談したい
+- 提供開始の案内だけ受け取りたい
 
-## Step 5: source and consent
+## 7. 流入元と同意
 
-Hidden / derived fields:
+画面に直接入力させず保存する項目:
 
-- `landing_persona`
+- `landing_segment`
+- `landing_production_mode`
 - `utm_source`
 - `utm_medium`
 - `utm_campaign`
@@ -127,41 +160,41 @@ Hidden / derived fields:
 - `submitted_at`
 - `privacy_policy_version`
 
-Required checkbox:
+必須の同意:
 
 `プライバシーポリシーを確認し、入力内容の取扱いに同意します。`
 
-Marketing email consent must be separate and optional:
+宣伝メールの同意は分け、任意にする。
 
 `ToCの提供開始、制作事例、改善情報をメールで受け取る。`
 
-## Validation and security
+## 入力確認と安全対策
 
-- client and server validation
-- honeypot or equivalent hidden trap
-- Cloudflare Turnstile or equivalent bot verification
-- rate limit by normalized client signal
-- idempotency key to prevent duplicate leads
-- do not expose provider keys to the browser
-- escape stored and rendered user input
-- log consent version and acquisition source
-- define retention and deletion process before launch
+- ブラウザ側とサーバー側の両方で入力を確認する
+- bot 対策と送信回数制限を設ける
+- 同じ問い合わせの重複保存を防ぐ
+- 外部サービスの秘密鍵をブラウザへ出さない
+- 保存・表示する入力内容を安全に処理する
+- 同意した規約の版と流入元を記録する
+- 公開前に保存期間と削除手順を決める
 
-## Submit behavior
+## 送信後
 
-On success:
+成功時:
 
-1. persist the lead
-2. notify the operator
-3. send a receipt email when deliverability is configured
-4. emit `generate_lead` with persona and acquisition source, without raw personal data
-5. navigate to `/thanks`
+1. 問い合わせを保存する
+2. 運営者へ通知する
+3. 送信確認メールを送る
+4. 個人情報を含めず、`generate_lead` を顧客層・制作形式・流入元とともに記録する
+5. `/thanks` へ移動する
 
-Success message:
+最初に入力した `content_idea`、顧客層、制作形式、流入元を相談記録へ保持し、確認画面や通信の再試行で入力し直させない。
+
+送信完了文:
 
 ```text
-動画のアイデアを受け取りました。
+画像・動画のアイデアを受け取りました。
 入力内容を確認し、選択した案内方法に合わせてご連絡します。
 ```
 
-On recoverable failure, retain the entered idea and explain the next action. Never clear the entire form after a server or network error.
+再試行できる失敗では、入力内容を保持したまま次の操作を説明する。通信エラーでフォーム全体を消さない。

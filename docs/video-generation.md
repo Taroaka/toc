@@ -1084,6 +1084,10 @@ scripts/build-clip-lists.py \
 
 `scripts/build-clip-lists.py` は `*_generation_exclusions.md` も出力する。`cut_status: deleted` の cut は動画・ナレーションの concat list に入らない。
 
+## Existing-story value boundary
+
+`video_manifest.md` は `script_metadata.adaptation_value_contract`、scene の `scene_value_amplification`、cut の `expressive_contract` を一方向 projection する。これらは原作価値の trace / review 正本であり、provider-facing prompt には `performance_beat` 等の描画・観察可能な断片だけを既存 compiler contract 経由で投影する。`value_id`、schema 名、reference path、抽象的な audience 文を provider prose へ直送しない。詳細は [既存物語の価値増幅契約](adaptation-value-amplification.md) を参照する。
+
 ## Human Change Request Expansion
 
 script review で image / video まで踏み込む修正要求が来る前提では、`script.md` の `human_change_requests[]` を正本にし、`video_manifest.md` には実行用の trace を materialize する。

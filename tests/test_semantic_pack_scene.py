@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -122,6 +123,18 @@ scenes:
 """
 
 
+def _count_dict_key(value: object, target: str) -> int:
+    if isinstance(value, dict):
+        return sum((key == target) + _count_dict_key(item, target) for key, item in value.items())
+    if isinstance(value, list):
+        return sum(_count_dict_key(item, target) for item in value)
+    return 0
+
+
+def _serialized_size(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
+
 class TestSemanticPackScene(unittest.TestCase):
     def test_collects_scene_set_entries_from_script(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_scene_pack_") as td:
@@ -140,7 +153,6 @@ class TestSemanticPackScene(unittest.TestCase):
         self.assertEqual(entries[0]["time_of_day_status"], "valid")
         self.assertIn("シンデレラは灰の中で希望を保てるか", entries[0]["summary"])
         self.assertEqual(entries[0]["semantic_contract"]["dramatic_question"], "シンデレラは灰の中で希望を保てるか")
-        self.assertEqual(entries[0]["scene_generation"]["schema_version"], "scene_generation_v1")
         self.assertTrue(entries[0]["semantic_contract_present"])
         self.assertFalse(entries[0]["semantic_contract_missing"])
         self.assertEqual(
@@ -154,6 +166,9 @@ class TestSemanticPackScene(unittest.TestCase):
         )
         self.assertNotIn("contract_required_fields_missing", entries[0])
         self.assertEqual(entries[1]["semantic_contract"]["must_preserve"], ["時間制限", "ガラスの靴の意味"])
+        self.assertNotIn("scene_generation", entries[0])
+        self.assertNotIn("scene_character_state_timeline", entries[0])
+        self.assertNotIn("scene_film_coverage_plan", entries[0])
 
     def test_scene_intent_done_when_satisfies_scene_contract(self) -> None:
         fixture = """# Script
@@ -196,6 +211,212 @@ scenes:
         self.assertEqual(entries[0]["scene_generation"]["scene_prompt_payload"]["schema_version"], "scene_prompt_payload_v1")
         self.assertEqual(entries[0]["cut_summaries"][0]["must_show"], ["シンデレラ", "灰の台所"])
         self.assertEqual(entries[0]["handoff_to_next_scene"], "灰の台所から舞踏会の予感へつなぐ")
+
+    def test_scene_set_is_compact_and_keeps_scene_event_once(self) -> None:
+        scene_event = {
+            "schema_version": "scene_event_v1",
+            "event_sequence": [
+                {
+                    "beat_id": f"scene42_event_{index:02d}",
+                    "beat_function": "pressure" if index % 2 else "threshold",
+                    "what_happens": f"出来事 {index} が起きる",
+                    "concrete_event": "主人公が封印された扉の前で証拠を突きつけられる",
+                    "story_grounding": "原典の約束と代償をこの場面の選択へ接続する",
+                    "visible_action": "手を伸ばし、ためらい、扉を開く",
+                    "visible_reaction": "仲間が息をのみ、主人公の決断を見守る",
+                    "must_be_seen": True,
+                }
+                for index in range(12)
+            ],
+            "turning_event_ref": "scene42_event_07",
+            "end_situation_ref": "scene42_event_11",
+            "forbidden_event_changes": ["結末の先取り", "未承認の正体開示"],
+        }
+        scene = {
+            "scene_id": 42,
+            "phase": "ordeal",
+            "importance": "high",
+            "time_of_day": "夜",
+            "location_mode": "sequence",
+            "location_sequence": ["封印回廊", "扉の間"],
+            "location_segments": [
+                {
+                    "location": "封印回廊",
+                    "responsibility": "証拠を受け取り退路を断たれる",
+                    "primary_subject": "主人公",
+                    "visible_action": "証拠を握って扉へ進む",
+                    "visible_reaction": "仲間が回廊の入口で足を止める",
+                    "required_visual_evidence": ["封印", "証拠"],
+                    "required_roles": ["protagonist", "witness"],
+                },
+                {
+                    "location": "扉の間",
+                    "responsibility": "主人公が扉を開く決断をする",
+                    "primary_subject": "主人公",
+                    "visible_action": "封印扉へ手をかける",
+                    "visible_reaction": "門番が道を譲る",
+                    "required_visual_evidence": ["封印扉", "門番"],
+                    "required_roles": ["protagonist", "authority_or_community"],
+                },
+            ],
+            "scene_intent": {
+                "dramatic_question": "主人公は代償を受け入れて扉を開くか",
+                "value_shift": "ためらいから決断へ",
+                "causal_turn": "証拠を突きつけられたことで扉を開く理由が生まれる",
+                "done_when": ["決断と次の危機への理由が読める"],
+                "role_coverage": {
+                    "required_roles": [
+                        "protagonist",
+                        "witness",
+                        "authority_or_community",
+                    ],
+                    "must_not_collapse_to_protagonist_only": True,
+                },
+                "story_event_obligations": [
+                    {
+                        "event_id": "scene42_event_turn",
+                        "required_roles": ["protagonist", "witness"],
+                        "visual_evidence": ["証拠", "封印扉"],
+                    }
+                ],
+            },
+            "scene_event": scene_event,
+            "semantic_contract": {
+                "scene_event": scene_event,
+                "dramatic_question": "主人公は代償を受け入れて扉を開くか",
+                "value_shift": "ためらいから決断へ",
+                "causal_turn": "証拠を突きつけられたことで扉を開く理由が生まれる",
+                "done_when": ["決断と次の危機への理由が読める"],
+            },
+            "scene_generation": {
+                "schema_version": "scene_generation_v1",
+                "scene_authoring_context": {"source_beats": ["原典の重要出来事"] * 40},
+                "scene_prompt_payload": {"prompt": "scene prompt payload " * 500},
+                "scene_debug_prompt_source": {"source_beats": ["debug source"] * 40},
+                "scene_generation_contract": {"required_outputs": ["scene_event"] * 40},
+            },
+            "scene_character_state_timeline": {
+                "characters": [
+                    {
+                        "character_id": f"character_{index:02d}",
+                        "character_name": f"登場人物 {index}",
+                        "scene_role": (
+                            "protagonist" if index == 0 else "witness"
+                        ),
+                        "appearance_asset_ids": [
+                            f"character_{index:02d}_default"
+                        ],
+                        "state_before": "秘密を隠している",
+                        "state_after": "決断を共有する",
+                        "transition": "証拠によって選択を迫られる",
+                        "evidence": ["視線", "手の震え", "扉の音"] * 20,
+                    }
+                    for index in range(8)
+                ]
+            },
+            "scene_film_coverage_plan": {
+                "shot_mix": {
+                    "required_coverage": [
+                        {
+                            "coverage_id": f"coverage_{index:02d}",
+                            "shot_role": "decision",
+                            "shot_scale": "medium close-up",
+                            "composition": "人物と封印扉を同一画面に置く",
+                            "rationale": "選択の因果を視覚的に読ませる",
+                        }
+                        for index in range(12)
+                    ]
+                },
+                "continuity_rules": ["扉の位置", "手元の証拠", "夜の光"] * 30,
+            },
+            "coverage_review": {"audience_information_covered": True, "visualizable_action_covered": True},
+            "handoff_to_next_scene": "開いた扉の先で代償の正体が明らかになる",
+            "terminal_resolution": "決断は成立するが、代償は未解決のまま次へ渡る",
+            "cuts": [{"cut_id": "01", "cut_blueprint": {"target_beat": "扉を開く"}}],
+        }
+        source = {
+            "script_metadata": {"scene_time_of_day_contract": "required_v1"},
+            "canonical_event_coverage_matrix": {
+                "policy_version": "canonical_event_coverage_matrix_v1",
+                "assignments": [{"event_id": f"event_{index}", "scene_id": 42} for index in range(8)],
+            },
+            "scenes": [scene],
+        }
+
+        scene_set_entries = collect_entries(
+            "scene_set",
+            Path("."),
+            source_document=("script.md", source),
+        )
+        scene_detail_entries = collect_entries(
+            "scene_detail",
+            Path("."),
+            source_document=("script.md", source),
+        )
+
+        scene_set_entry = scene_set_entries[0]
+        scene_detail_entry = scene_detail_entries[0]
+        self.assertEqual(_count_dict_key(scene_set_entry, "scene_event"), 1)
+        self.assertNotIn("scene_event", scene_set_entry["semantic_contract"])
+        self.assertNotIn("scene_event", scene_set_entry["normalized_semantic_contract"])
+        self.assertEqual(scene_set_entry["scene_event"], scene_event)
+        self.assertEqual(
+            scene_set_entry["location_sequence"],
+            ["封印回廊", "扉の間"],
+        )
+        self.assertEqual(
+            scene_set_entry["location_segments"],
+            scene["location_segments"],
+        )
+        self.assertEqual(scene_set_entry["location_mode"], "sequence")
+        self.assertEqual(
+            scene_set_entry["participants"][0],
+            {
+                "character_id": "character_00",
+                "character_name": "登場人物 0",
+                "scene_role": "protagonist",
+                "appearance_asset_ids": ["character_00_default"],
+            },
+        )
+        self.assertEqual(
+            scene_set_entry["role_coverage"]["required_roles"],
+            ["protagonist", "witness", "authority_or_community"],
+        )
+        self.assertEqual(
+            scene_set_entry["scene_intent"]["role_coverage"]["required_roles"],
+            ["protagonist", "witness", "authority_or_community"],
+        )
+        self.assertEqual(
+            scene_set_entry["scene_intent"]["story_event_obligations"][0][
+                "required_roles"
+            ],
+            ["protagonist", "witness"],
+        )
+        for field in ("scene_generation", "scene_character_state_timeline", "scene_film_coverage_plan"):
+            self.assertNotIn(field, scene_set_entry)
+        for field in (
+            "scene_intent",
+            "coverage_review",
+            "handoff_to_next_scene",
+            "terminal_resolution",
+            "time_of_day",
+            "time_of_day_contract_declared",
+            "canonical_event_coverage_matrix",
+            "phase",
+            "importance",
+            "summary",
+        ):
+            self.assertIn(field, scene_set_entry)
+
+        self.assertEqual(scene_detail_entry["scene_event"], scene_event)
+        self.assertIn("scene_event", scene_detail_entry["semantic_contract"])
+        self.assertIn("scene_event", scene_detail_entry["normalized_semantic_contract"])
+        for field in ("scene_generation", "scene_character_state_timeline", "scene_film_coverage_plan"):
+            self.assertIn(field, scene_detail_entry)
+
+        scene_set_size = _serialized_size(scene_set_entry)
+        scene_detail_size = _serialized_size(scene_detail_entry)
+        self.assertLess(scene_set_size, scene_detail_size * 0.4)
 
     def test_collects_cut_blueprint_entries_from_script(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_scene_pack_") as td:

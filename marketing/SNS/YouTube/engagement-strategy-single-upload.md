@@ -1,5 +1,7 @@
 # 単発公開時のエンゲージメント戦略
 
+> Status: legacy Urashima single-upload campaign artifact. 現行の community / CRM、persona route、privacy は `community-crm-strategy.md` を優先する。この文書の `AIを一緒に育てる初期メンバー` は historical hypothesis であり、現行 audience identity に使わない。
+
 最終更新: 2026-04-27
 対象: `にわかのAI` の初回通常動画 `浦島太郎`  
 目的: 視聴回数を最大化しつつ、次の視聴に繋がるコメントを増やす
@@ -12,7 +14,7 @@
 - 公開物は `長尺1本 + サムネイル` が中心
 - いま欲しいのは `雑な反応` ではなく、`動画内容に触れたコメント`
 - コメントは飾りではなく、アルゴリズムへの追加シグナルと次回改善の材料
-- CRM方針は `community-crm-strategy.md` を優先し、視聴者を `AIを一緒に育てる初期メンバー` として扱う
+- 現行運用では `community-crm-strategy.md` を優先する。以下の early-member framing は浦島太郎初回公開時の historical experiment としてのみ読む
 
 この前提では、`たくさんコメントしてください` よりも、`何について話してほしいか` を先に決めるほうが強い。
 

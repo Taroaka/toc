@@ -19,7 +19,7 @@ from pathlib import Path
 from contextlib import suppress
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Iterable
 from unittest.mock import AsyncMock, Mock, patch
 
 import yaml
@@ -396,6 +396,87 @@ def semantic_agent_report_transcript(
             },
         }
     ]
+
+
+def write_fake_semantic_collection(
+    run_dir: Path,
+    stage: str,
+    entry_ids: list[str],
+) -> None:
+    paths = image_gen_app.semantic_review_relpaths(stage)
+    collection_path = run_dir / paths["collection"]
+    collection_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"# Semantic Review Collection: {stage}", ""]
+    for entry_id in entry_ids:
+        lines.extend(
+            [
+                f"## {entry_id}",
+                "",
+                "```json",
+                json.dumps(
+                    {"id": entry_id, "summary": "scene meaning under review"},
+                    ensure_ascii=False,
+                ),
+                "```",
+                "",
+            ]
+        )
+    collection_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_fake_semantic_review_pack(
+    run_dir: Path,
+    stage: str,
+    entry_ids: list[str],
+) -> None:
+    """Write a complete current pack for app-server semantic-loop tests."""
+
+    paths = image_gen_app.semantic_review_relpaths(stage)
+    write_fake_semantic_collection(run_dir, stage, entry_ids)
+    source_artifacts = ["script.md"]
+    if not (run_dir / "script.md").is_file():
+        source_relpath = Path("logs/review/semantic") / f"{stage}.source.md"
+        source_path = run_dir / source_relpath
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text(
+            f"# Semantic Review Source\n\nstage: {stage}\n",
+            encoding="utf-8",
+        )
+        source_artifacts = [source_relpath.as_posix()]
+    (run_dir / paths["scope"]).write_text(
+        json.dumps(
+            {
+                "stage": stage,
+                "entry_count": len(entry_ids),
+                "entry_ids": entry_ids,
+                "selectors": entry_ids,
+                "review_scope": "all_entries",
+                "source_artifacts": source_artifacts,
+                "artifacts": {
+                    key: value.as_posix()
+                    for key, value in paths.items()
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / paths["prompt"]).write_text(
+        f"# Semantic Review Prompt\n\nstage: {stage}\n",
+        encoding="utf-8",
+    )
+    (run_dir / paths["report"]).write_text(
+        "status: pending\n",
+        encoding="utf-8",
+    )
+    image_gen_app._refresh_semantic_review_input_digest(
+        run_dir=run_dir,
+        scope_path=run_dir / paths["scope"],
+        collection_path=run_dir / paths["collection"],
+        prompt_path=run_dir / paths["prompt"],
+        report_path=run_dir / paths["report"],
+    )
 
 
 def terminal_semantic_report_text(
@@ -1882,34 +1963,10 @@ class ImageGenParserTests(unittest.TestCase):
             repair = AsyncMock()
 
             def fake_build_pack(cmd, **_kwargs):
-                paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(
-                    parents=True,
-                    exist_ok=True,
-                )
-                (run_dir / paths["collection"]).write_text(
-                    "# collection\n\n## scene:10\nscene meaning\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["scope"]).write_text(
-                    json.dumps(
-                        {
-                            "entry_count": 1,
-                            "entry_ids": ["scene:10"],
-                            "source_artifacts": ["script.md"],
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["prompt"]).write_text(
-                    "# review prompt\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["report"]).write_text(
-                    "status: pending\n",
-                    encoding="utf-8",
+                write_fake_semantic_review_pack(
+                    run_dir,
+                    stage,
+                    ["scene:10"],
                 )
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -1917,14 +1974,17 @@ class ImageGenParserTests(unittest.TestCase):
                 async def start_thread(self, **_kwargs):
                     return "thread-1"
 
-                async def run_turn(self, **_kwargs):
+                async def run_turn(self, *, text: str, **_kwargs):
+                    marker = "The pending report path is `"
+                    report_path = Path(
+                        text.split(marker, 1)[1].split("`", 1)[0]
+                    )
+                    scope_path = report_path.with_name(
+                        report_path.name.removesuffix(".report.md")
+                        + ".scope.json"
+                    )
                     scope = json.loads(
-                        (
-                            run_dir
-                            / image_gen_app.semantic_review_relpaths(stage)[
-                                "scope"
-                            ]
-                        ).read_text(encoding="utf-8")
+                        scope_path.read_text(encoding="utf-8")
                     )
                     verdict = {
                         "status": "failed",
@@ -12875,23 +12935,11 @@ base b prompt
             repair_turns = 0
 
             def fake_build_pack(cmd, **_kwargs):
-                paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
-                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(
-                    json.dumps(
-                        {
-                            "entry_count": 1,
-                            "entry_ids": ["scene_1"],
-                            "source_artifacts": ["script.md"],
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
+                write_fake_semantic_review_pack(
+                    run_dir,
+                    stage,
+                    ["scene_1"],
                 )
-                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
-                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
             class FakeClient:
@@ -12910,13 +12958,18 @@ base b prompt
                         (run_dir / repair_paths["report"]).write_text("status: done\nchanged_artifacts: [script.md]\n", encoding="utf-8")
                         return None
                     review_turns += 1
-                    paths = image_gen_app.semantic_review_relpaths(stage)
                     status = "failed" if review_turns == 1 else "passed"
-                    (run_dir / paths["report"]).write_text(
-                        terminal_semantic_report_text(status),
-                        encoding="utf-8",
+                    return semantic_agent_report_transcript(
+                        text,
+                        status=status,
+                        entry_id="scene_1",
+                        finding="wrong meaning" if status == "failed" else "",
+                        reason_key=(
+                            "semantic_subject_mismatch"
+                            if status == "failed"
+                            else ""
+                        ),
                     )
-                    return None
 
                 async def stop(self):
                     return None
@@ -12985,6 +13038,43 @@ base b prompt
         self.assertEqual(state["review.semantic.asset_plan.loop.attempt"], "0")
         self.assertEqual(state["review.semantic.asset_plan.reuse.status"], "reused_passed_report")
         self.assertEqual(state["slot.p540.status"], "done")
+
+    def test_semantic_review_resolves_default_attempts_for_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "output" / "sample_run"
+            run_dir.mkdir(parents=True)
+            passed = image_gen_app.SemanticReviewStatus(
+                status="passed",
+                entry_count=1,
+                errors=(),
+            )
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app.semantic_review_max_attempts",
+                    return_value=3,
+                ) as resolve_attempts,
+                patch(
+                    "server.image_gen_app._reusable_passed_semantic_review",
+                    return_value=passed,
+                ),
+                patch(
+                    "server.image_gen_app._record_reused_semantic_review"
+                ) as record_reuse,
+                patch("server.image_gen_app._clear_partial_media_stage"),
+            ):
+                asyncio.run(
+                    image_gen_app._run_semantic_review(
+                        "job-1",
+                        run_dir=run_dir,
+                        stage="scene_set",
+                    )
+                )
+
+        resolve_attempts.assert_called_once_with("scene_set")
+        self.assertEqual(record_reuse.call_args.kwargs["max_attempts"], 3)
 
     def test_image_prompt_semantic_review_rejects_request_revision_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -13216,23 +13306,11 @@ base b prompt
             review_prompts: list[str] = []
 
             def fake_build_pack(cmd, **_kwargs):
-                paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
-                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(
-                    json.dumps(
-                        {
-                            "entry_count": 1,
-                            "entry_ids": ["scene_1"],
-                            "source_artifacts": ["script.md"],
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
+                write_fake_semantic_review_pack(
+                    run_dir,
+                    stage,
+                    ["scene_1"],
                 )
-                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
-                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
             class FakeClient:
@@ -13259,16 +13337,22 @@ base b prompt
                         return None
                     review_turns += 1
                     review_prompts.append(text)
-                    paths = image_gen_app.semantic_review_relpaths(stage)
                     status = "passed" if review_turns == 3 else "failed"
-                    (run_dir / paths["report"]).write_text(
-                        terminal_semantic_report_text(
-                            status,
-                            finding="remaining semantic drift",
+                    return semantic_agent_report_transcript(
+                        text,
+                        status=status,
+                        entry_id="scene_1",
+                        finding=(
+                            "remaining semantic drift"
+                            if status == "failed"
+                            else ""
                         ),
-                        encoding="utf-8",
+                        reason_key=(
+                            "semantic_subject_mismatch"
+                            if status == "failed"
+                            else ""
+                        ),
                     )
-                    return None
 
                 async def stop(self):
                     return None
@@ -13305,23 +13389,11 @@ base b prompt
             repair_turns = 0
 
             def fake_build_pack(cmd, **_kwargs):
-                paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
-                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(
-                    json.dumps(
-                        {
-                            "entry_count": 1,
-                            "entry_ids": ["scene_1"],
-                            "source_artifacts": ["script.md"],
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
+                write_fake_semantic_review_pack(
+                    run_dir,
+                    stage,
+                    ["scene_1"],
                 )
-                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
-                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
             class FakeClient:
@@ -13337,15 +13409,13 @@ base b prompt
                         repair_turns += 1
                         return None
                     review_prompts.append(text)
-                    paths = image_gen_app.semantic_review_relpaths(stage)
-                    (run_dir / paths["report"]).write_text(
-                        terminal_semantic_report_text(
-                            "failed",
-                            finding="remaining semantic drift",
-                        ),
-                        encoding="utf-8",
+                    return semantic_agent_report_transcript(
+                        text,
+                        status="failed",
+                        entry_id="scene_1",
+                        finding="remaining semantic drift",
+                        reason_key="semantic_subject_mismatch",
                     )
-                    return None
 
                 async def stop(self):
                     return None
@@ -13378,23 +13448,11 @@ base b prompt
             stage = "scene_set"
 
             def fake_build_pack(cmd, **_kwargs):
-                paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
-                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(
-                    json.dumps(
-                        {
-                            "entry_count": 2,
-                            "entry_ids": ["scene:10", "scene:20"],
-                            "source_artifacts": ["script.md"],
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
+                write_fake_semantic_review_pack(
+                    run_dir,
+                    stage,
+                    ["scene:10", "scene:20"],
                 )
-                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
-                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
             class FakeClient:
@@ -13404,24 +13462,41 @@ base b prompt
                 async def start_thread(self, **_kwargs):
                     return "thread-1"
 
-                async def run_turn(self, **_kwargs):
-                    paths = image_gen_app.semantic_review_relpaths(stage)
-                    (run_dir / paths["report"]).write_text(
-                        "\n".join(
-                            [
-                                "status: failed",
-                                "reviewed_entries: [scene:10, scene:20]",
-                                "blocked_entries: [scene:10]",
-                                "failed_selectors: [scene10]",
-                                "reason_keys: [semantic_contract_missing, causal_proof_weak]",
-                                "findings:",
-                                "  - concrete scene meaning is missing",
-                                "",
-                            ]
-                        ),
-                        encoding="utf-8",
+                async def run_turn(self, *, text: str, **_kwargs):
+                    entry_id = text.split("Review only shard entry `", 1)[1].split("`", 1)[0]
+                    report_path = Path(
+                        text.split("The pending report path is `", 1)[1].split("`", 1)[0]
                     )
-                    return []
+                    scope_path = report_path.with_name(
+                        report_path.name.removesuffix(".report.md") + ".scope.json"
+                    )
+                    digest = json.loads(scope_path.read_text(encoding="utf-8"))[
+                        "semantic_review_input_digest"
+                    ]
+                    failed = entry_id == "scene:10"
+                    report = "\n".join(
+                        [
+                            f"status: {'failed' if failed else 'passed'}",
+                            f"semantic_review_input_digest: {digest}",
+                            f"reviewed_entries: [{entry_id}]",
+                            f"blocked_entries: [{entry_id}]" if failed else "blocked_entries: []",
+                            "findings: [concrete scene meaning is missing]" if failed else "findings: []",
+                            f"failed_selectors: [{entry_id}]" if failed else "failed_selectors: []",
+                            "reason_keys: [semantic_contract_missing, causal_proof_weak]" if failed else "reason_keys: []",
+                        ]
+                    )
+                    return [
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "item": {
+                                    "type": "agentMessage",
+                                    "phase": "final_answer",
+                                    "text": report,
+                                }
+                            },
+                        }
+                    ]
 
                 async def stop(self):
                     return None
@@ -13443,14 +13518,14 @@ base b prompt
 
         self.assertEqual(state["review.semantic.scene_set.loop.status"], "failed")
         self.assertEqual(state["review.semantic.scene_set.failure.report_status"], "failed")
-        self.assertEqual(state["review.semantic.scene_set.failure.failed_selectors"], "scene10")
+        self.assertEqual(state["review.semantic.scene_set.failure.failed_selectors"], "scene:10")
         self.assertEqual(state["review.semantic.scene_set.failure.blocked_entries"], "scene:10")
-        self.assertEqual(state["review.semantic.scene_set.failure.reason_keys"], "semantic_contract_missing, causal_proof_weak")
+        self.assertEqual(state["review.semantic.scene_set.failure.reason_keys"], "causal_proof_weak, semantic_contract_missing")
         self.assertEqual(state["review.semantic.scene_set.repair.skipped"], "true")
         self.assertEqual(state["review.semantic.scene_set.repair.skipped_reason"], "max_attempts_1")
         self.assertEqual(state["slot.p410.note"], "contextless semantic scene_set review failed without repair")
-        self.assertEqual(final_logs[-1]["response"]["failedSelectors"], ["scene10"])
-        self.assertEqual(final_logs[-1]["response"]["reasonKeys"], ["semantic_contract_missing", "causal_proof_weak"])
+        self.assertEqual(final_logs[-1]["response"]["failedSelectors"], ["scene:10"])
+        self.assertEqual(final_logs[-1]["response"]["reasonKeys"], ["causal_proof_weak", "semantic_contract_missing"])
 
     def test_semantic_review_transport_failure_does_not_invoke_producer_repair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -13461,19 +13536,11 @@ base b prompt
             review_turns = 0
 
             def fake_build_pack(cmd, **_kwargs):
-                paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
-                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(
-                    json.dumps(
-                        {"entry_count": 1, "entry_ids": ["scene_1"]},
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
+                write_fake_semantic_review_pack(
+                    run_dir,
+                    stage,
+                    ["scene_1"],
                 )
-                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
-                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
             class FakeClient:
@@ -13505,7 +13572,10 @@ base b prompt
             repair_paths = semantic_repair_relpaths(stage, 1)
             repair_prompt_exists = (run_dir / repair_paths["prompt"]).exists()
 
-        self.assertEqual(review_turns, 1)
+        self.assertEqual(
+            review_turns,
+            image_gen_app.scene_set_transport_retry_attempts(),
+        )
         self.assertEqual(state["review.semantic.scene_set.transport.status"], "failed")
         self.assertEqual(state["review.semantic.scene_set.loop.status"], "blocked_transport")
         self.assertFalse(repair_prompt_exists)
@@ -13523,34 +13593,10 @@ base b prompt
             review_turns = 0
 
             def fake_build_pack(cmd, **_kwargs):
-                paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(
-                    parents=True,
-                    exist_ok=True,
-                )
-                (run_dir / paths["collection"]).write_text(
-                    "# collection\n\nscene meaning under review\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["scope"]).write_text(
-                    json.dumps(
-                        {
-                            "entry_count": 1,
-                            "entry_ids": ["scene:10"],
-                            "source_artifacts": ["script.md"],
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["prompt"]).write_text(
-                    "# review prompt\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["report"]).write_text(
-                    "status: pending\n",
-                    encoding="utf-8",
+                write_fake_semantic_review_pack(
+                    run_dir,
+                    stage,
+                    ["scene:10"],
                 )
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -13561,7 +13607,7 @@ base b prompt
                 async def start_thread(self, **_kwargs):
                     return "thread-1"
 
-                async def run_turn(self, **_kwargs):
+                async def run_turn(self, *, text: str, **_kwargs):
                     nonlocal review_turns
                     review_turns += 1
                     if review_turns == 1:
@@ -13580,9 +13626,14 @@ base b prompt
                                 },
                             }
                         ]
-                    paths = image_gen_app.semantic_review_relpaths(stage)
+                    report_path = Path(
+                        text.split("The pending report path is `", 1)[1].split("`", 1)[0]
+                    )
+                    scope_path = report_path.with_name(
+                        report_path.name.removesuffix(".report.md") + ".scope.json"
+                    )
                     scope = json.loads(
-                        (run_dir / paths["scope"]).read_text(encoding="utf-8")
+                        scope_path.read_text(encoding="utf-8")
                     )
                     verdict = {
                         "status": "passed",
@@ -13646,15 +13697,21 @@ base b prompt
         self.assertIn("status: passed", report_text)
         self.assertEqual(
             state["review.semantic.scene_set.report.source"],
-            "agent_message_transport_fallback",
+            "immutable_workspace_agent_output",
         )
         self.assertEqual(
             state["review.semantic.scene_set.output_contract.status"],
-            "recovered",
+            "passed",
         )
         self.assertEqual(
             state["review.semantic.scene_set.output_contract.retry_count"],
-            "1",
+            "0",
+        )
+        self.assertEqual(
+            state[
+                "review.semantic.scene_set.shards.scene_10.transport.status"
+            ],
+            "recovered",
         )
         self.assertEqual(
             state["review.semantic.scene_set.transport.status"],
@@ -13675,34 +13732,10 @@ base b prompt
             repair = AsyncMock()
 
             def fake_build_pack(cmd, **_kwargs):
-                paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(
-                    parents=True,
-                    exist_ok=True,
-                )
-                (run_dir / paths["collection"]).write_text(
-                    "# collection\n\nscene meaning under review\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["scope"]).write_text(
-                    json.dumps(
-                        {
-                            "entry_count": 1,
-                            "entry_ids": ["scene:10"],
-                            "source_artifacts": ["script.md"],
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["prompt"]).write_text(
-                    "# review prompt\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["report"]).write_text(
-                    "status: pending\n",
-                    encoding="utf-8",
+                write_fake_semantic_review_pack(
+                    run_dir,
+                    stage,
+                    ["scene:10"],
                 )
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -13784,34 +13817,10 @@ base b prompt
             review_turns = 0
 
             def fake_build_pack(cmd, **_kwargs):
-                paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(
-                    parents=True,
-                    exist_ok=True,
-                )
-                (run_dir / paths["collection"]).write_text(
-                    "# collection\n\nscene meaning under review\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["scope"]).write_text(
-                    json.dumps(
-                        {
-                            "entry_count": 1,
-                            "entry_ids": ["scene:10"],
-                            "source_artifacts": ["script.md"],
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["prompt"]).write_text(
-                    "# review prompt\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["report"]).write_text(
-                    "status: pending\n",
-                    encoding="utf-8",
+                write_fake_semantic_review_pack(
+                    run_dir,
+                    stage,
+                    ["scene:10"],
                 )
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -13822,12 +13831,19 @@ base b prompt
                 async def start_thread(self, **_kwargs):
                     return "thread-1"
 
-                async def run_turn(self, **_kwargs):
+                async def run_turn(self, *, text: str, **_kwargs):
                     nonlocal review_turns
                     review_turns += 1
-                    paths = image_gen_app.semantic_review_relpaths(stage)
+                    marker = "The pending report path is `"
+                    report_path = Path(
+                        text.split(marker, 1)[1].split("`", 1)[0]
+                    )
+                    scope_path = report_path.with_name(
+                        report_path.name.removesuffix(".report.md")
+                        + ".scope.json"
+                    )
                     scope = json.loads(
-                        (run_dir / paths["scope"]).read_text(encoding="utf-8")
+                        scope_path.read_text(encoding="utf-8")
                     )
                     verdict = {
                         "status": "passed",
@@ -13881,6 +13897,13 @@ base b prompt
                     "server.image_gen_app._run_semantic_review_producer_repair",
                     repair,
                 ),
+                patch.dict(
+                    os.environ,
+                    {
+                        "TOC_SCENE_SET_REVIEW_CONCURRENCY": "1",
+                        "TOC_SCENE_SET_TRANSPORT_RETRY_ATTEMPTS": "2",
+                    },
+                ),
             ):
                 with self.assertRaisesRegex(
                     CodexAppServerTransportError,
@@ -13917,34 +13940,10 @@ base b prompt
             stage = "scene_set"
 
             def fake_build_pack(cmd, **_kwargs):
-                paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(
-                    parents=True,
-                    exist_ok=True,
-                )
-                (run_dir / paths["collection"]).write_text(
-                    "# collection\n\nscene meaning under review\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["scope"]).write_text(
-                    json.dumps(
-                        {
-                            "entry_count": 1,
-                            "entry_ids": ["scene:10"],
-                            "source_artifacts": ["script.md"],
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["prompt"]).write_text(
-                    "# review prompt\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["report"]).write_text(
-                    "status: pending\n",
-                    encoding="utf-8",
+                write_fake_semantic_review_pack(
+                    run_dir,
+                    stage,
+                    ["scene:10"],
                 )
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -14030,34 +14029,10 @@ base b prompt
             stage = "scene_set"
 
             def fake_build_pack(cmd, **_kwargs):
-                paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(
-                    parents=True,
-                    exist_ok=True,
-                )
-                (run_dir / paths["collection"]).write_text(
-                    "# collection\n\nscene meaning under review\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["scope"]).write_text(
-                    json.dumps(
-                        {
-                            "entry_count": 1,
-                            "entry_ids": ["scene:10"],
-                            "source_artifacts": ["script.md"],
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["prompt"]).write_text(
-                    "# review prompt\n",
-                    encoding="utf-8",
-                )
-                (run_dir / paths["report"]).write_text(
-                    "status: pending\n",
-                    encoding="utf-8",
+                write_fake_semantic_review_pack(
+                    run_dir,
+                    stage,
+                    ["scene:10"],
                 )
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -14068,10 +14043,18 @@ base b prompt
                 async def start_thread(self, **_kwargs):
                     return "thread-1"
 
-                async def run_turn(self, **_kwargs):
-                    paths = image_gen_app.semantic_review_relpaths(stage)
+                async def run_turn(self, *, text: str, **_kwargs):
+                    report_path = Path(
+                        text.split(
+                            "The pending report path is `", 1
+                        )[1].split("`", 1)[0]
+                    )
+                    scope_path = report_path.with_name(
+                        report_path.name.removesuffix(".report.md")
+                        + ".scope.json"
+                    )
                     scope = json.loads(
-                        (run_dir / paths["scope"]).read_text(encoding="utf-8")
+                        scope_path.read_text(encoding="utf-8")
                     )
                     verdict = {
                         "status": "passed",
@@ -14147,6 +14130,8 @@ base b prompt
             with (
                 patch("server.image_gen_app._run_semantic_review_once", never_finishes),
                 patch("server.image_gen_app._semantic_review_no_progress_timeout_seconds", lambda: 0.01),
+                patch("server.image_gen_app._semantic_review_operation_no_progress_timeout_seconds", lambda: 0.01),
+                patch("server.image_gen_app._semantic_review_once_hard_timeout_seconds", lambda: 0.1),
                 patch("server.image_gen_app.SEMANTIC_TURN_ARTIFACT_POLL_SECONDS", 0.01),
             ):
                 with self.assertRaisesRegex(CodexAppServerTransportError, "timed out"):
@@ -14178,6 +14163,8 @@ base b prompt
             with (
                 patch("server.image_gen_app._run_semantic_review_once", progressing_review),
                 patch("server.image_gen_app._semantic_review_no_progress_timeout_seconds", lambda: 0.03),
+                patch("server.image_gen_app._semantic_review_operation_no_progress_timeout_seconds", lambda: 0.03),
+                patch("server.image_gen_app._semantic_review_once_hard_timeout_seconds", lambda: 0.1),
                 patch("server.image_gen_app.SEMANTIC_TURN_ARTIFACT_POLL_SECONDS", 0.005),
             ):
                 asyncio.run(image_gen_app._run_semantic_review("job-1", run_dir=run_dir, stage=stage, max_attempts=1))
@@ -14186,6 +14173,153 @@ base b prompt
 
         self.assertEqual(state["review.semantic.scene_set.loop.status"], "passed")
         self.assertEqual(state["review.semantic.scene_set.watchdog.status"], "completed")
+
+    def test_semantic_watchdog_heartbeat_skips_expensive_run_projections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+
+            async def completes_after_heartbeats() -> str:
+                await asyncio.sleep(0.04)
+                return "done"
+
+            with (
+                patch("server.image_gen_app.append_state_snapshot") as snapshot,
+                patch(
+                    "server.image_gen_app.append_state_delta",
+                    create=True,
+                ) as delta,
+                patch(
+                    "server.image_gen_app.SEMANTIC_TURN_ARTIFACT_POLL_SECONDS",
+                    0.005,
+                ),
+                patch(
+                    "server.image_gen_app.SEMANTIC_WATCHDOG_STATE_UPDATE_SECONDS",
+                    0.01,
+                    create=True,
+                ),
+            ):
+                result = asyncio.run(
+                    image_gen_app._await_semantic_operation_with_progress_watchdog(
+                        completes_after_heartbeats(),
+                        run_dir=run_dir,
+                        stage="scene_set",
+                        operation="review",
+                        timeout_seconds=1.0,
+                        fingerprint=lambda: {"report": "unchanged"},
+                        pending_state=lambda elapsed: {
+                            "review.semantic.scene_set.elapsed": f"{elapsed:.3f}"
+                        },
+                    )
+                )
+
+            self.assertEqual(result, "done")
+            self.assertEqual(snapshot.call_count, 2)
+            self.assertGreaterEqual(delta.call_count, 1)
+            for call in delta.call_args_list:
+                self.assertEqual(
+                    call.kwargs["event_type"],
+                    "semantic.watchdog.heartbeat",
+                )
+
+    def test_semantic_watchdog_hard_timeout_is_not_extended_by_notifications(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            fingerprint_version = 0
+            snapshots: list[dict[str, str]] = []
+
+            async def never_finishes() -> None:
+                await asyncio.Event().wait()
+
+            def changing_fingerprint() -> dict[str, str]:
+                nonlocal fingerprint_version
+                fingerprint_version += 1
+                return {"activity": str(fingerprint_version)}
+
+            def record_snapshot(_path, updates, *_args, **_kwargs):
+                snapshots.append(dict(updates))
+                return dict(updates)
+
+            with (
+                patch(
+                    "server.image_gen_app.append_state_snapshot",
+                    side_effect=record_snapshot,
+                ),
+                patch(
+                    "server.image_gen_app.append_state_delta",
+                    return_value=None,
+                ),
+                patch(
+                    "server.image_gen_app.SEMANTIC_TURN_ARTIFACT_POLL_SECONDS",
+                    0.005,
+                ),
+            ):
+                with self.assertRaises(asyncio.TimeoutError):
+                    asyncio.run(
+                        asyncio.wait_for(
+                            image_gen_app._await_semantic_operation_with_progress_watchdog(
+                                never_finishes(),
+                                run_dir=run_dir,
+                                stage="scene_set",
+                                operation="review",
+                                timeout_seconds=0.03,
+                                hard_timeout_seconds=0.03,
+                                fingerprint=changing_fingerprint,
+                            ),
+                            timeout=0.2,
+                        )
+                    )
+
+            self.assertTrue(
+                any(
+                    update.get("review.semantic.scene_set.watchdog.status")
+                    == "hard_timeout"
+                    for update in snapshots
+                )
+            )
+
+    def test_semantic_watchdog_rejects_completion_after_hard_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            snapshots: list[dict[str, str]] = []
+
+            async def completes_too_late() -> str:
+                await asyncio.sleep(0.05)
+                return "late"
+
+            def record_snapshot(_path, updates, *_args, **_kwargs):
+                snapshots.append(dict(updates))
+                return dict(updates)
+
+            with (
+                patch(
+                    "server.image_gen_app.append_state_snapshot",
+                    side_effect=record_snapshot,
+                ),
+                patch(
+                    "server.image_gen_app.SEMANTIC_TURN_ARTIFACT_POLL_SECONDS",
+                    0.2,
+                ),
+            ):
+                with self.assertRaises(asyncio.TimeoutError):
+                    asyncio.run(
+                        image_gen_app._await_semantic_operation_with_progress_watchdog(
+                            completes_too_late(),
+                            run_dir=run_dir,
+                            stage="scene_set",
+                            operation="review",
+                            timeout_seconds=1.0,
+                            hard_timeout_seconds=0.01,
+                            fingerprint=lambda: {"activity": "unchanged"},
+                        )
+                    )
+
+            self.assertTrue(
+                any(
+                    update.get("review.semantic.scene_set.watchdog.status")
+                    == "hard_timeout"
+                    for update in snapshots
+                )
+            )
 
     def test_scene_detail_semantic_review_runs_per_scene_shards_with_env_concurrency(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -14829,23 +14963,11 @@ base b prompt
             repair_turns = 0
 
             def fake_build_pack(cmd, **_kwargs):
-                paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
-                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(
-                    json.dumps(
-                        {
-                            "entry_count": 1,
-                            "entry_ids": ["scene_1"],
-                            "source_artifacts": ["script.md"],
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
+                write_fake_semantic_review_pack(
+                    run_dir,
+                    stage,
+                    ["scene_1"],
                 )
-                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
-                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
             class FakeClient:
@@ -14861,15 +14983,13 @@ base b prompt
                         repair_turns += 1
                         raise CodexAppServerTransportError("turn timed out")
                     review_turns += 1
-                    paths = image_gen_app.semantic_review_relpaths(stage)
-                    (run_dir / paths["report"]).write_text(
-                        terminal_semantic_report_text(
-                            "failed",
-                            finding="wrong meaning",
-                        ),
-                        encoding="utf-8",
+                    return semantic_agent_report_transcript(
+                        text,
+                        status="failed",
+                        entry_id="scene_1",
+                        finding="wrong meaning",
+                        reason_key="semantic_subject_mismatch",
                     )
-                    return None
 
                 async def stop(self):
                     return None
@@ -14902,23 +15022,11 @@ base b prompt
             repair_turns = 0
 
             def fake_build_pack(cmd, **_kwargs):
-                paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
-                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(
-                    json.dumps(
-                        {
-                            "entry_count": 1,
-                            "entry_ids": ["scene_1"],
-                            "source_artifacts": ["script.md"],
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
+                write_fake_semantic_review_pack(
+                    run_dir,
+                    stage,
+                    ["scene_1"],
                 )
-                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
-                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
             class FakeClient:
@@ -14935,13 +15043,22 @@ base b prompt
                         (run_dir / "script.md").write_text("# Script\n\nrepaired scene meaning\n", encoding="utf-8")
                         raise CodexAppServerTransportError("turn timed out")
                     review_turns += 1
-                    paths = image_gen_app.semantic_review_relpaths(stage)
                     status = "passed" if "repaired scene meaning" in (run_dir / "script.md").read_text(encoding="utf-8") else "failed"
-                    (run_dir / paths["report"]).write_text(
-                        terminal_semantic_report_text(status),
-                        encoding="utf-8",
+                    return semantic_agent_report_transcript(
+                        text,
+                        status=status,
+                        entry_id="scene_1",
+                        finding=(
+                            "wrong meaning"
+                            if status == "failed"
+                            else ""
+                        ),
+                        reason_key=(
+                            "semantic_subject_mismatch"
+                            if status == "failed"
+                            else ""
+                        ),
                     )
-                    return None
 
                 async def stop(self):
                     return None
@@ -15067,23 +15184,11 @@ base b prompt
             repair_turns = 0
 
             def fake_build_pack(cmd, **_kwargs):
-                paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
-                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(
-                    json.dumps(
-                        {
-                            "entry_count": 1,
-                            "entry_ids": ["scene_1"],
-                            "source_artifacts": ["script.md"],
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
+                write_fake_semantic_review_pack(
+                    run_dir,
+                    stage,
+                    ["scene_1"],
                 )
-                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
-                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
             class FakeClient:
@@ -15105,13 +15210,22 @@ base b prompt
                         (run_dir / repair_paths["report"]).write_text("status: done\nchanged_artifacts: [script.md]\n", encoding="utf-8")
                         raise CodexAppServerTransportError("turn timed out")
                     review_turns += 1
-                    paths = image_gen_app.semantic_review_relpaths(stage)
                     status = "failed" if review_turns == 1 else "passed"
-                    (run_dir / paths["report"]).write_text(
-                        terminal_semantic_report_text(status),
-                        encoding="utf-8",
+                    return semantic_agent_report_transcript(
+                        text,
+                        status=status,
+                        entry_id="scene_1",
+                        finding=(
+                            "wrong meaning"
+                            if status == "failed"
+                            else ""
+                        ),
+                        reason_key=(
+                            "semantic_subject_mismatch"
+                            if status == "failed"
+                            else ""
+                        ),
                     )
-                    return None
 
                 async def stop(self):
                     return None
@@ -15147,8 +15261,7 @@ base b prompt
 
             def fake_build_pack(cmd, **_kwargs):
                 paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
-                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
+                write_fake_semantic_collection(run_dir, stage, ["scene_1"])
                 (run_dir / paths["scope"]).write_text(
                     json.dumps(
                         {
@@ -15184,18 +15297,24 @@ base b prompt
                         (run_dir / repair_paths["report"]).write_text("status: done\nchanged_artifacts: [script.md]\n", encoding="utf-8")
                         return None
                     review_turns += 1
-                    paths = image_gen_app.semantic_review_relpaths(stage)
                     status = "failed" if review_turns == 1 else "passed"
-                    (run_dir / paths["report"]).write_text(
-                        terminal_semantic_report_text(
-                            status,
-                            finding="semantic drift",
+                    transcript = semantic_agent_report_transcript(
+                        text,
+                        status=status,
+                        entry_id="scene_1",
+                        finding="semantic drift" if status == "failed" else "",
+                        reason_key=(
+                            "semantic_subject_mismatch"
+                            if status == "failed"
+                            else ""
                         ),
-                        encoding="utf-8",
                     )
                     if review_turns == 1:
-                        raise CodexAppServerTransportError("turn timed out")
-                    return None
+                        raise CodexAppServerTransportError(
+                            "turn timed out",
+                            transcript=transcript,
+                        )
+                    return transcript
 
                 async def stop(self):
                     return None
@@ -15229,23 +15348,11 @@ base b prompt
             repair_turns = 0
 
             def fake_build_pack(cmd, **_kwargs):
-                paths = image_gen_app.semantic_review_relpaths(stage)
-                (run_dir / paths["collection"]).parent.mkdir(parents=True, exist_ok=True)
-                (run_dir / paths["collection"]).write_text("# collection\n\nscene meaning under review\n", encoding="utf-8")
-                (run_dir / paths["scope"]).write_text(
-                    json.dumps(
-                        {
-                            "entry_count": 1,
-                            "entry_ids": ["scene_1"],
-                            "source_artifacts": ["script.md"],
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n",
-                    encoding="utf-8",
+                write_fake_semantic_review_pack(
+                    run_dir,
+                    stage,
+                    ["scene_1"],
                 )
-                (run_dir / paths["prompt"]).write_text("# review prompt\n", encoding="utf-8")
-                (run_dir / paths["report"]).write_text("status: pending\n", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
             class FakeClient:
@@ -15267,18 +15374,33 @@ base b prompt
                         (run_dir / repair_paths["report"]).write_text("status: done\nchanged_artifacts: [script.md]\n", encoding="utf-8")
                         await asyncio.Event().wait()
                     review_turns += 1
-                    paths = image_gen_app.semantic_review_relpaths(stage)
                     status = "failed" if review_turns == 1 else "passed"
-                    (run_dir / paths["report"]).write_text(
-                        terminal_semantic_report_text(
-                            status,
-                            finding="semantic drift",
+                    transcript = semantic_agent_report_transcript(
+                        text,
+                        status=status,
+                        entry_id="scene_1",
+                        finding=(
+                            "semantic drift"
+                            if status == "failed"
+                            else ""
                         ),
+                        reason_key=(
+                            "semantic_subject_mismatch"
+                            if status == "failed"
+                            else ""
+                        ),
+                    )
+                    marker = "The pending report path is `"
+                    report_path = Path(
+                        text.split(marker, 1)[1].split("`", 1)[0]
+                    )
+                    report_path.write_text(
+                        str(transcript[0]["params"]["item"]["text"]),
                         encoding="utf-8",
                     )
                     if review_turns == 1:
                         await asyncio.Event().wait()
-                    return None
+                    return transcript
 
                 async def stop(self):
                     return None
@@ -21981,6 +22103,8 @@ scene two
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
             calls: list[str] = []
+            manifest_revision = 0
+            p400_reviewed_revision = -1
             for relpath in (
                 "research.md",
                 "story.md",
@@ -22002,22 +22126,48 @@ scene two
 
                 @staticmethod
                 def _refresh_p400_review_artifacts(_run_dir: Path) -> None:
+                    nonlocal p400_reviewed_revision
                     calls.append("p400_reviews")
+                    p400_reviewed_revision = manifest_revision
 
                 @staticmethod
                 def _require_fresh_p400_readiness(_run_dir: Path) -> None:
                     calls.append("p400_gate")
+                    self.assertEqual(p400_reviewed_revision, manifest_revision)
 
                 @staticmethod
-                def prepare_grounding(_run_dir: Path) -> None:
+                def prepare_grounding(
+                    _run_dir: Path,
+                    *,
+                    verify_p450: bool = True,
+                ) -> None:
+                    self.assertFalse(verify_p450)
                     calls.append("downstream_grounding")
 
                 @staticmethod
                 def _refresh_downstream_review_artifacts(_run_dir: Path) -> None:
                     calls.append("downstream_reviews")
 
-            def sync(_run_dir: Path) -> None:
+            def sync(
+                _run_dir: Path,
+                *,
+                precompiled_selectors: Iterable[str] | None = None,
+            ) -> None:
+                nonlocal manifest_revision
                 calls.append("request_sync")
+                self.assertEqual(list(precompiled_selectors or ()), ["scene01.cut01"])
+                calls.append("request_materialization")
+                self.assertEqual(p400_reviewed_revision, manifest_revision)
+                # generate-assets compiles the request revision back into the
+                # manifest, so the final P400 refresh must still happen.
+                manifest_revision += 1
+                calls.append("request_manifest_compiled")
+
+            def compile_prompts(_run_dir: Path) -> list[str]:
+                nonlocal manifest_revision
+                manifest_revision += 1
+                calls.append("prompt_compile")
+                return ["scene01.cut01"]
 
             with (
                 patch(
@@ -22026,8 +22176,18 @@ scene two
                     create=True,
                 ),
                 patch(
+                    "server.image_gen_app._reconcile_semantic_repair_authoring_projections",
+                    side_effect=lambda _run_dir: calls.append(
+                        "authoring_projection"
+                    ),
+                ),
+                patch(
                     "server.image_gen_app._synchronize_image_prompt_repair_outputs",
                     side_effect=sync,
+                ),
+                patch(
+                    "server.image_gen_app._recompile_image_prompt_payloads_from_plans",
+                    side_effect=compile_prompts,
                 ),
             ):
                 asyncio.run(
@@ -22043,10 +22203,14 @@ scene two
         self.assertEqual(
             calls,
             [
+                "authoring_projection",
+                "prompt_compile",
                 "authoring_grounding",
                 "p400_reviews",
                 "p400_gate",
                 "request_sync",
+                "request_materialization",
+                "request_manifest_compiled",
                 "authoring_grounding",
                 "p400_reviews",
                 "p400_gate",
@@ -22201,7 +22365,12 @@ scene two
                     )
 
                 @staticmethod
-                def prepare_grounding(_run_dir: Path) -> None:
+                def prepare_grounding(
+                    _run_dir: Path,
+                    *,
+                    verify_p450: bool = True,
+                ) -> None:
+                    self.assertFalse(verify_p450)
                     order.append("downstream_grounding")
 
                 @staticmethod
@@ -22210,8 +22379,13 @@ scene two
                 ) -> None:
                     order.append("downstream_reviews")
 
-            def synchronize(_run_dir: Path) -> None:
+            def synchronize(
+                _run_dir: Path,
+                *,
+                precompiled_selectors: Iterable[str] | None = None,
+            ) -> None:
                 nonlocal sync_count
+                self.assertIsNotNone(precompiled_selectors)
                 sync_count += 1
                 order.append(f"sync_{sync_count}")
                 image_gen_app.append_state_snapshot(
@@ -22277,6 +22451,12 @@ scene two
                 patch(
                     "server.image_gen_app._load_frontend_review_runner",
                     return_value=FakeFrontend,
+                ),
+                patch(
+                    "server.image_gen_app._reconcile_semantic_repair_authoring_projections",
+                    side_effect=lambda _run_dir: order.append(
+                        "authoring_projection"
+                    ),
                 ),
                 patch(
                     "server.image_gen_app._synchronize_image_prompt_repair_outputs",
@@ -22531,6 +22711,43 @@ scene two
                     )
 
         generate_outputs.assert_not_awaited()
+
+
+class FileTransactionStateBoundaryTests(unittest.TestCase):
+    def test_artifacts_are_restored_before_state_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            state_path = run_dir / "state.txt"
+            artifact = run_dir / "video_manifest.md"
+            state_path.write_bytes(b"status=before\n---\n")
+            artifact.write_bytes(b"before")
+            snapshot = image_gen_app._capture_file_transaction(
+                [artifact, state_path]
+            )
+            artifact.write_bytes(b"partial")
+
+            image_gen_app._restore_file_transaction(snapshot)
+
+            self.assertEqual(artifact.read_bytes(), b"before")
+
+    def test_artifact_rollback_is_skipped_after_state_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            state_path = run_dir / "state.txt"
+            artifact = run_dir / "video_manifest.md"
+            state_path.write_bytes(b"status=before\n---\n")
+            artifact.write_bytes(b"before")
+            snapshot = image_gen_app._capture_file_transaction(
+                [artifact, state_path]
+            )
+            artifact.write_bytes(b"committed-artifact")
+            with state_path.open("ab") as stream:
+                stream.write(b"status=after\n---\n")
+
+            with self.assertWarnsRegex(RuntimeWarning, "rollback skipped"):
+                image_gen_app._restore_file_transaction(snapshot)
+
+            self.assertEqual(artifact.read_bytes(), b"committed-artifact")
 
 
 if __name__ == "__main__":

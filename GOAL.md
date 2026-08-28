@@ -1,176 +1,150 @@
 <goal>
-Implement safe high-concurrency Codex app-server image generation for ToC frontend story creation. Set the effective image generation parallelism to 100, run asset and scene image generation in dependency-safe parallel groups, and make generated-image fallback safe enough that concurrent requests cannot claim each other's images.
+Fix semantic producer repair reconciliation so repaired story/scene meaning is deterministically propagated into script cuts, manifest cuts, character timelines, asset references, image request inputs, and review evidence before P400 review is refreshed. Then prove the complete behavior by resuming the existing Cinderella run to P680 and creating one brand-new frontend story that generates real reusable assets and scene images through P680 without manual artifact edits.
 </goal>
 
 <context>
-Read these first:
+Read first:
 
 - `SPEC.md`
-- `server/image_gen_app.py`
-- `server/codex_app_server.py`
-- `tests/test_image_gen_server.py`
+- `.steering/20260826-semantic-repair-reconciliation/requirements.md`
+- `.steering/20260826-semantic-repair-reconciliation/design.md`
+- `.steering/20260826-semantic-repair-reconciliation/tasklist.md`
 - `docs/root-pointer-guide.md`
-- `docs/system-architecture.md`
-- `docs/orchestration-and-ops.md`
+- `docs/data-contracts.md`, especially P400 and P500 resume contracts
+- `server/image_gen_app.py`, especially `_reconcile_after_semantic_repair`
+- `scripts/toc-immersive-frontend-run.py`, especially P400 review refresh and readiness
+- `toc/stage_evaluation/script.py`
+- `toc/stage_evaluation/manifest.py`
+- `tests/test_image_gen_server.py`
+- `tests/test_toc_immersive_frontend_run.py`
+- `tests/test_p500_resume.py`
 
-Useful discovery commands:
+Useful discovery:
 
 ```bash
-rg "IMAGE_GENERATION_PARALLELISM|_generate_request_outputs|_generate_request_item_output|wait_for_unclaimed_generated_image_after|claim_latest_generated_image_after|generated_images" server tests -n
-rg "request_generation_batch|request_generation_group|request_item_generation_retry" server tests -n
-rg "semantic_review|producer_repair|check_semantic_review|verify-pipeline" server scripts tests -n
+rg "_reconcile_after_semantic_repair|_refresh_p400_review_artifacts|_require_fresh_p400_readiness|source_event_preservation|timeline_states_complete" server scripts toc tests -n
 ```
 </context>
 
 <constraints>
-- `IMAGE_GENERATION_PARALLELISM` must be 100 in production code.
-- Asset generation must preserve dependency-safe generation groups and run items inside a group concurrently.
-- Scene generation must use the same safe concurrency model where dependencies allow it.
-- Do not use shared timestamp-only fallback from `CODEX_HOME/generated_images` in a way that can assign one item's image to another item.
-- A generated image may be copied to an item output only when identity is proven for that item. If identity is ambiguous, fail or retry the item.
-- Do not introduce local raster placeholders or any non-Codex image fallback.
-- Do not bypass semantic QA, producer repair, verifier, or human review gates.
-- Preserve app-server transport failure state separately from semantic QA failure state.
-- Preserve unrelated user changes and do not clean or delete output run directories as part of this goal.
+- Keep semantic QA, deterministic verifiers, provider gates, and human review fail-closed.
+- Do not forge passed reviews, relax acceptance criteria, or infer pass from file existence.
+- Preserve earliest-source-first propagation: story -> script -> manifest -> requests/snapshots.
+- Reconciliation must be deterministic and idempotent.
+- Remove stale appearance/reference dependencies when repair removes them; do not reintroduce semantically invalid characters merely to satisfy timeline validation.
+- Preserve append-only state history and same-run P500 resume behavior.
+- Do not manually patch production run artifacts as the final solution.
+- Do not use local raster placeholders.
+- Stop at P680; narration/video/render are out of scope.
+- Preserve unrelated user changes and avoid marketing/LINE/unrelated modules.
 </constraints>
 
 <scorecard>
-Primary checklist with pass threshold: all items must pass.
+Pass threshold: all checklist items pass.
 
-- Parallelism: production code sets `IMAGE_GENERATION_PARALLELISM = 100`.
-- Asset logs: batch logs expose `parallelism: 100`, and dependency-safe asset groups still gate downstream groups.
-- Scene logs: batch logs expose `parallelism: 100`, and scene items run concurrently without output misassignment.
-- Fallback safety: tests prove concurrent fallback cannot claim another item's generated image.
-- Timeout isolation: tests prove a timed-out item is retried or failed without corrupting siblings or adopting their images.
-- Regression checks: existing image generation, semantic QA, producer repair, app-server transport, and verifier-related tests touched by the change still pass.
+1. Repaired event action, reaction, facts, visual evidence, and event context are exactly projected into every affected cut contract.
+2. Repaired participant/appearance changes are consistently reflected in timelines, cut asset dependencies, manifest image-generation IDs, and request references.
+3. P400 reviews are materialized only after deterministic reconciliation passes.
+4. A second reconciliation pass on unchanged input is idempotent.
+5. Semantic and provider gates remain fail-closed and transport failures remain distinct.
+6. Existing Cinderella reaches P680 with real assets and scene images.
+7. One new frontend-created story reaches P680 without manual artifact edits.
 
-Scoring command/inspection paths:
+Fast scoring command:
 
 ```bash
-rg "IMAGE_GENERATION_PARALLELISM = 100" server/image_gen_app.py
-PYTHONPATH=. python -m unittest test_image_gen_server.ImageGenApiTests
-PYTHONPATH=. python -m unittest test_image_gen_server.ImageGenParserTests.test_generate_image_keeps_fallback_watcher_for_item_timeout
-python -m unittest discover -s tests -p 'test_semantic_review.py'
+cd tests
+PYTHONPATH=.. python -m unittest test_semantic_repair_reconciliation
 ```
 
-Stop condition: the done_when list is satisfied, focused tests pass, and code inspection shows no remaining shared time-order fallback path that can misassign generated images under concurrency.
+Regression inspection paths include the focused P400/frontend tests, P500 resume tests, semantic review tests, and `verify-pipeline.py` for both final runs.
+
+Stop only when every done_when item is satisfied. Do not stop merely because unit tests pass if real P680 verification has not completed.
 </scorecard>
 
 <done_when>
-1. `server/image_gen_app.py` has effective `IMAGE_GENERATION_PARALLELISM = 100`.
-2. Asset batch logs are produced with `parallelism: 100` and asset generation runs by dependency-safe parallel groups.
-3. Scene batch logs are produced with `parallelism: 100` and scene generation runs by dependency-safe parallel groups.
-4. Fallback image recovery is safely tied to the requesting item, so parallel generation cannot adopt another item's generated image.
-5. TimeoutError handling records retry/failure for the affected item without assigning sibling images or blocking unrelated successful items.
-6. Existing semantic QA, producer repair loop, and verifier gates are not bypassed or weakened.
-7. Tests cover parallel fallback misassignment prevention, asset/scene parallel scheduling, and timeout isolation.
+1. A focused failing-first test reproduces repaired scene events with stale cut contracts and passes only after production reconciliation projects exact action/evidence/event-context fields.
+2. A focused failing-first test reproduces a removed appearance variant and proves stale cut/image references are removed while timeline integrity passes.
+3. A focused test proves reconciliation idempotence.
+4. A focused ordering test proves P400 review refresh never occurs before repair reconciliation has passed deterministic validation.
+5. Relevant semantic review, P400, frontend runner, P500 resume, run-root binding, and image-generation regression tests pass.
+6. `output/シンデレラ_20260812_2341` reaches `p560=done`, `p660=done`, and `p680=awaiting_approval` through canonical resume tooling, with nonzero real asset and scene-image files and request-bound Codex provenance.
+7. A brand-new run created through the frontend-button-equivalent backend create route reaches the same P680 state without manual edits to canonical artifacts or review/request files.
+8. Both final runs pass `python scripts/verify-pipeline.py --run-dir <run> --flow immersive --profile standard` or the canonical frontend P680 validator when it is stricter, with any provider transport retry recorded separately from semantic results.
 </done_when>
 
 <feedback_loop>
-Fast iterative check:
+Use TDD. Add the focused reproduction tests before implementation and confirm they fail for the observed reason.
+
+Fast check, expected under one minute, after every projection/reconciliation edit:
 
 ```bash
-PYTHONPATH=. python -m unittest test_image_gen_server.ImageGenApiTests.test_request_generation_group_cancels_sibling_items_after_failure test_image_gen_server.ImageGenApiTests.test_request_generation_group_does_not_start_queued_items_after_failure
+PYTHONPATH=. python -m unittest tests.test_image_gen_server.SemanticRepairReconciliationTests
 ```
 
-Expected runtime: under one minute. Run after each scheduling or failure-handling edit. This is representative for group cancellation and sibling isolation, but not sufficient for fallback identity.
-
-Add and run new focused tests as soon as the fallback design is implemented:
-
-```bash
-PYTHONPATH=. python -m unittest test_image_gen_server.ImageGenApiTests -k fallback
-```
-
-If `-k` is unsupported in the local unittest runner, run the explicit new test method names from the `tests` directory with `PYTHONPATH=.`.
-
-Slower final check:
-
-```bash
-python3 -m py_compile server/image_gen_app.py server/codex_app_server.py tests/test_image_gen_server.py
-PYTHONPATH=. python -m unittest test_image_gen_server.ImageGenApiTests
-PYTHONPATH=. python -m unittest test_image_gen_server.ImageGenParserTests.test_generate_image_keeps_fallback_watcher_for_item_timeout
-python -m unittest discover -s tests -p 'test_semantic_review.py'
-python scripts/validate-pointer-docs.py
-```
+Run the focused frontend/P400 integration tests after each coherent step. Run real provider-backed Cinderella and fresh-story P680 flows only after focused and regression tests are green because they are slow and consume external resources.
 </feedback_loop>
 
 <workflow>
-1. Inspect current generation scheduling, group construction, generated image fallback, and provenance logging.
-2. Decide the fallback identity strategy. Prefer a provable per-item isolation or explicit item/turn correlation. If impossible, disable ambiguous fallback for parallel contexts and rely on explicit app-server image result paths.
-3. Implement `IMAGE_GENERATION_PARALLELISM = 100` and preserve dependency-safe group sequencing.
-4. Update image generation fallback and provenance logging so each generated image is tied to exactly one item.
-5. Update TimeoutError handling so retry/failure is item-local and cannot copy sibling output.
-6. Add focused tests for asset parallel scheduling, scene parallel scheduling, fallback misassignment prevention, and timeout isolation.
-7. Run focused feedback checks, then final verification commands.
-8. Update architecture/ops docs only if the implementation changes the app-server runtime boundary or fallback contract.
+1. Inspect current reconciliation and existing helpers; record the exact stale fields and ordering defect.
+2. Add failing tests for event projection, appearance/reference removal, idempotence, and review ordering.
+3. Implement the smallest canonical reconciliation helper and invoke it before P400 review refresh.
+4. Run focused tests, refactor while green, and update working memory.
+5. Run broader semantic/P400/P500/frontend regression tests.
+6. Resume the existing Cinderella run via canonical resume tooling and verify P680 plus real image provenance.
+7. Use the frontend-button-equivalent backend create route to create a new story from scratch and verify P680 plus real image provenance.
+8. Run final verification, inspect the diff, and report only after the scorecard reaches 100%.
 </workflow>
 
 <working_memory>
-This goal can run for hours and touches concurrency, fallback behavior, and app-server transport. Maintain these files during execution:
+Maintain goal-local working memory under `.steering/20260826-semantic-repair-reconciliation/`:
 
-- `ATTEMPTS.md`: record each fallback identity design tried, why it passed or failed, and exact test results.
-- `NOTES.md`: record discoveries about app-server image notifications, generated image paths, transport timeouts, and group scheduling.
+- `PLAN.md`: current phase, strategy, next action, blockers.
+- `ATTEMPTS.md`: every meaningful implementation or runtime attempt with commands and evidence.
+- `NOTES.md`: durable discoveries and contract details.
 
-Do not overwrite the existing root `PLAN.md`; it appears unrelated to this ToC task. If a plan file is needed, create a short goal-local section in `ATTEMPTS.md` instead.
+Update `ATTEMPTS.md` after each meaningful attempt and `PLAN.md` whenever the phase or strategy changes. Do not overwrite the unrelated root `PLAN.md`.
 </working_memory>
 
 <human_control_surface>
-Report before making a strategic fallback tradeoff. The user should be able to see:
+Maintain `.steering/20260826-semantic-repair-reconciliation/CONTROL.md`. Reread it before phase changes, strategic pivots, and real provider-backed P680 runs.
 
-- whether fallback is proven safe by identity, isolated by runtime, or disabled for ambiguous parallel cases;
-- whether the implementation keeps full configured parallelism at 100 or introduces an internal resource guard;
-- whether any final verification command could not run.
-
-Require explicit user approval before reducing the configured `IMAGE_GENERATION_PARALLELISM` below 100.
+The user may narrow scope, pause expensive provider work, or add a nudge. Explicit approval is required for destructive changes, dependency/schema/public API changes, weakening QA, or expanding past P680. The control surface cannot weaken done_when.
 </human_control_surface>
 
 <verification_loop>
-Run focused checks first:
+Focused verification first:
 
 ```bash
-python3 -m py_compile server/image_gen_app.py server/codex_app_server.py tests/test_image_gen_server.py
-PYTHONPATH=. python -m unittest test_image_gen_server.ImageGenApiTests.test_request_generation_group_cancels_sibling_items_after_failure test_image_gen_server.ImageGenApiTests.test_request_generation_group_does_not_start_queued_items_after_failure
+python3 -m py_compile server/image_gen_app.py scripts/toc-immersive-frontend-run.py toc/semantic_repair_reconciliation.py toc/stage_evaluation/script.py toc/stage_evaluation/manifest.py tests/test_image_gen_server.py tests/test_toc_immersive_frontend_run.py tests/test_semantic_repair_reconciliation.py
+cd tests
+PYTHONPATH=.. python -m unittest test_semantic_repair_reconciliation
 ```
 
-Then run the new fallback/concurrency tests by explicit method name.
-
-Final verification:
-
-```bash
-PYTHONPATH=. python -m unittest test_image_gen_server.ImageGenApiTests
-PYTHONPATH=. python -m unittest test_image_gen_server.ImageGenParserTests.test_generate_image_keeps_fallback_watcher_for_item_timeout
-python -m unittest discover -s tests -p 'test_semantic_review.py'
-python scripts/validate-pointer-docs.py
-```
-
-If FastAPI or environment dependencies prevent a broad test from running, record the exact error and run the narrow tests that cover the changed code paths.
+Then run relevant P400, semantic repair, P500 resume, run-root, and frontend runner tests. Run pointer-doc validation if pointer docs change. Final verification includes canonical P680 validation for Cinderella and one new frontend-created run.
 </verification_loop>
 
 <execution_rules>
-- Check git status before edits.
-- Preserve unrelated user changes.
-- Prefer `rg` over `grep` when available.
-- Use the runtime's patch/edit tool for manual edits when available.
-- Read context files before implementation.
-- Batch independent file reads in parallel when the runtime supports it.
-- Keep the goal scorecard current: know the primary metric, passing threshold, regression checks, scoring method, and stop condition.
-- Use the fastest representative feedback check while iterating; reserve slower checks for escalation points and final verification.
-- Maintain `ATTEMPTS.md` and `NOTES.md` for this long-running goal.
-- Update `ATTEMPTS.md` after each meaningful approach so future iterations do not repeat work without new evidence.
-- Run focused tests before broad tests.
-- Do not paper over failures.
+- Check git status before edits and preserve unrelated user changes.
+- Prefer `rg` for discovery.
+- Use the patch tool for manual edits.
+- Follow tests-first TDD and keep focused feedback fast.
+- Maintain the goal scorecard and working-memory files.
+- Do not paper over failures or weaken gates.
 - Do not widen scope.
-- Keep the final answer concise.
+- Run focused tests before broad tests and broad tests before expensive provider-backed verification.
+- Keep final communication concise and evidence-based.
 </execution_rules>
 
 <output_contract>
-Final output must summarize:
+Required outputs:
 
-- the fallback identity strategy implemented;
-- the effective asset and scene parallel behavior;
-- the tests added or updated;
-- the verification commands run and their results;
-- any remaining operational caveats around Codex app-server transport.
+- production reconciliation fix and regression tests;
+- updated steering and working-memory evidence;
+- existing Cinderella P680 evidence with real generated assets/scenes;
+- one fresh frontend-created P680 run with real generated assets/scenes;
+- verification commands and results;
+- concise final report naming any remaining external transport caveats.
 
-Completion signal: all seven done_when items are satisfied and final verification has passed or any skipped check is explicitly justified with narrower passing evidence.
+Completion signal: all done_when items and scorecard checks pass. Unit tests without both real P680 proofs are not completion.
 </output_contract>

@@ -471,7 +471,11 @@ async def run_review(
             sys.stderr.write(completed.stderr or completed.stdout)
         return completed.returncode
 
-    attempts = max(1, max_attempts or semantic_review_max_attempts())
+    attempts = (
+        semantic_review_max_attempts(stage)
+        if max_attempts is None
+        else max(1, max_attempts)
+    )
     if not repair_loop:
         attempts = 1
     repair_timeout = repair_timeout_seconds or semantic_repair_timeout_seconds()
@@ -603,7 +607,7 @@ def main() -> int:
     parser.add_argument("--stage", required=True, choices=sorted(SEMANTIC_REVIEW_STAGES))
     parser.add_argument("--timeout-seconds", type=int, default=semantic_review_timeout_seconds())
     parser.add_argument("--repair-timeout-seconds", type=int, default=semantic_repair_timeout_seconds())
-    parser.add_argument("--max-attempts", type=int, default=semantic_review_max_attempts())
+    parser.add_argument("--max-attempts", type=int, default=None)
     parser.add_argument("--no-repair-loop", action="store_true", help="Run one semantic review pass and do not invoke the producer repair agent.")
     parser.add_argument("--build-only", action="store_true")
     args = parser.parse_args()

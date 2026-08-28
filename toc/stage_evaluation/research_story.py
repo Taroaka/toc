@@ -5,6 +5,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+from toc.adaptation_value_contract import (
+    source_value_ids as adaptation_source_value_ids,
+    story_adaptation_issues,
+    visual_value_adaptation_issues,
+)
 from toc.harness import load_structured_document, parse_state_file
 from toc.image_prompt_projection_registry import projection_trace_issues
 from toc.immersive_manifest import dotted_id_sort_key, make_scene_cut_selector
@@ -202,6 +207,24 @@ def _story_scene_keys(run_dir: Path) -> set[str]:
         if key:
             keys.add(key)
     return keys
+
+
+def _story_scene_runtime_aliases(run_dir: Path) -> dict[str, str]:
+    """Map p400 runtime selectors (10, 20, ...) back to story scene IDs."""
+    path = run_dir / "story.md"
+    if not path.exists():
+        return {}
+    _, data = load_structured_document(path)
+    scenes = as_list(nested_get(data, ["script", "scenes"], [])) or as_list(data.get("scenes"))
+    aliases: dict[str, str] = {}
+    for index, scene in enumerate(scenes, start=1):
+        if not isinstance(scene, dict):
+            continue
+        story_key = _scene_selector_key(scene.get("scene_id") or scene.get("scene_selector") or index)
+        runtime_key = _scene_selector_key(index * 10)
+        if story_key and runtime_key:
+            aliases[runtime_key] = story_key
+    return aliases
 
 
 def _major_scene_coverage_ok(story_keys: set[str], covered_story_keys: set[str], scene_value_count: int) -> bool:
@@ -667,8 +690,20 @@ def check_visual_value(run_dir: Path, profile: str, *, forbid_production_artifac
     }
     scene_value_keys.discard("")
     story_keys = _story_scene_keys(run_dir)
-    covered_story_keys = story_keys & scene_value_keys
-    missing_story_keys = sorted(story_keys - scene_value_keys, key=lambda item: dotted_id_sort_key(item))
+    adaptation_marker = (
+        data.get("visual_value_metadata", {}).get("adaptation_value_contract")
+        if isinstance(data.get("visual_value_metadata"), dict)
+        else None
+    )
+    if adaptation_marker == "required_v1":
+        runtime_aliases = _story_scene_runtime_aliases(run_dir)
+        normalized_scene_value_keys = {
+            runtime_aliases.get(key, key) for key in scene_value_keys
+        }
+    else:
+        normalized_scene_value_keys = scene_value_keys
+    covered_story_keys = story_keys & normalized_scene_value_keys
+    missing_story_keys = sorted(story_keys - normalized_scene_value_keys, key=lambda item: dotted_id_sort_key(item))
     asset_candidate_count = _asset_bible_candidate_count(data.get("asset_bible_candidates"))
     anchor_candidates = as_list(data.get("anchor_cut_candidates"))
     reference_strategy = data.get("reference_strategy")
@@ -697,6 +732,19 @@ def check_visual_value(run_dir: Path, profile: str, *, forbid_production_artifac
     add_check(checks, "visual_value.regeneration_risks", len(regeneration_risks) >= 1, f"regeneration_risks are listed (got {len(regeneration_risks)})", kind="rubric")
     add_check(checks, "visual_value.handoff", handoff_keys.issubset(set(handoff)), "handoff includes p400_script, p500_asset, p600_scene_implementation, and p700_narration", kind="rubric")
     add_check(checks, "visual_value.no_p300_production_artifacts", not production_issues, "p300 has no production cut prompts, image/video request files, or generated asset/video artifacts", kind="rubric")
+    story_data = load_structured_document(run_dir / "story.md")[1] if (run_dir / "story.md").exists() else {}
+    adaptation_issues = visual_value_adaptation_issues(
+        data,
+        source_value_ids=adaptation_source_value_ids(story_data),
+    )
+    add_check(
+        checks,
+        "visual_value.adaptation_value_contract",
+        not adaptation_issues,
+        "declared adaptation value contract has complete intent, scene amplification, and valid source value references"
+        + (f" (issues: {', '.join(adaptation_issues[:8])})" if adaptation_issues else ""),
+        kind="rubric",
+    )
 
     updates["eval.visual_value.score"] = f"{score_from_checks(checks):.4f}"
     return make_stage("visual_value", path.name, checks, details=details), updates
@@ -756,6 +804,15 @@ def check_story(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, 
     details["chosen_candidate_id"] = chosen_id
 
     add_check(checks, "story.structured", bool(data), "story.md contains structured YAML output")
+    adaptation_issues = story_adaptation_issues(data)
+    add_check(
+        checks,
+        "story.adaptation_value_contract",
+        not adaptation_issues,
+        "declared adaptation source contract has stable values and preservation boundaries"
+        + (f" (issues: {', '.join(adaptation_issues[:8])})" if adaptation_issues else ""),
+        kind="rubric",
+    )
     add_check(checks, "story.candidates", 2 <= len(candidates) <= 4, f"selection has 2-4 candidates (got {len(candidates)})", kind="rubric")
     add_check(checks, "story.choice", non_empty(chosen_id), "chosen_candidate_id is set", kind="rubric")
     add_check(checks, "story.rationale", non_empty(rationale), "selection rationale is present", kind="rubric")
@@ -1046,5 +1103,3 @@ def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[st
     _append_rubric_findings(checks=checks, stage="research", rubric_scores=rubric_scores)
     updates["eval.research.score"] = f"{score_from_checks(checks):.4f}"
     return make_stage("research", path.name, checks, details=details, rubric_scores=rubric_scores), updates
-
-

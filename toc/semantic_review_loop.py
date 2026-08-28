@@ -23,10 +23,13 @@ from toc.semantic_review import (
 
 
 DEFAULT_SEMANTIC_REVIEW_MAX_ATTEMPTS = 2
+DEFAULT_SCENE_SET_SEMANTIC_REVIEW_MAX_ATTEMPTS = 3
 DEFAULT_SEMANTIC_REVIEW_TIMEOUT_SECONDS = 1800
 DEFAULT_SEMANTIC_REPAIR_TIMEOUT_SECONDS = 1800
 DEFAULT_SCENE_DETAIL_REVIEW_CONCURRENCY = 6
 DEFAULT_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS = 3
+DEFAULT_SCENE_SET_REVIEW_CONCURRENCY = 6
+DEFAULT_SCENE_SET_TRANSPORT_RETRY_ATTEMPTS = 3
 DEFAULT_SEMANTIC_REPAIR_SNAPSHOT_ATTEMPTS = 3
 SEMANTIC_REPAIR_COMMIT_SCHEMA = "semantic_repair_commit_v1"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -49,7 +52,7 @@ SEMANTIC_REVIEW_PRODUCER_TARGETS: dict[str, dict[str, object]] = {
     "scene_set": {
         "slot": "p410",
         "owner": "scene design producer",
-        "artifacts": ["story.md", "script.md", "video_manifest.md"],
+        "artifacts": ["script.md", "video_manifest.md"],
         "focus": "scene purpose, causal order, scene time-of-day and location continuity, and story meaning",
     },
     "scene_detail": {
@@ -91,14 +94,19 @@ SEMANTIC_REVIEW_PRODUCER_TARGETS: dict[str, dict[str, object]] = {
 }
 
 
-def semantic_review_max_attempts() -> int:
+def semantic_review_max_attempts(stage: str | None = None) -> int:
+    stage_default = (
+        DEFAULT_SCENE_SET_SEMANTIC_REVIEW_MAX_ATTEMPTS
+        if stage == "scene_set"
+        else DEFAULT_SEMANTIC_REVIEW_MAX_ATTEMPTS
+    )
     raw = os.environ.get("TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS", "").strip()
     if not raw:
-        return DEFAULT_SEMANTIC_REVIEW_MAX_ATTEMPTS
+        return stage_default
     try:
         return max(1, int(raw))
     except ValueError:
-        return DEFAULT_SEMANTIC_REVIEW_MAX_ATTEMPTS
+        return stage_default
 
 
 def semantic_repair_timeout_seconds() -> int:
@@ -131,6 +139,16 @@ def scene_detail_review_concurrency() -> int:
         return DEFAULT_SCENE_DETAIL_REVIEW_CONCURRENCY
 
 
+def scene_set_review_concurrency() -> int:
+    raw = os.environ.get("TOC_SCENE_SET_REVIEW_CONCURRENCY", "").strip()
+    if not raw:
+        return DEFAULT_SCENE_SET_REVIEW_CONCURRENCY
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_SCENE_SET_REVIEW_CONCURRENCY
+
+
 def scene_detail_transport_retry_attempts() -> int:
     raw = os.environ.get("TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS", "").strip()
     if not raw:
@@ -139,6 +157,16 @@ def scene_detail_transport_retry_attempts() -> int:
         return max(1, int(raw))
     except ValueError:
         return DEFAULT_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS
+
+
+def scene_set_transport_retry_attempts() -> int:
+    raw = os.environ.get("TOC_SCENE_SET_TRANSPORT_RETRY_ATTEMPTS", "").strip()
+    if not raw:
+        return DEFAULT_SCENE_SET_TRANSPORT_RETRY_ATTEMPTS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_SCENE_SET_TRANSPORT_RETRY_ATTEMPTS
 
 
 def semantic_repair_relpaths(stage: str, round_number: int) -> dict[str, Path]:
@@ -175,9 +203,36 @@ def _semantic_review_selector_values(raw: str) -> list[str]:
     if not value or value in {"[]", "[ ]"}:
         return []
     if value.startswith("[") and value.endswith("]"):
+        body = value[1:-1]
+        items: list[str] = []
+        start = 0
+        depth = 0
+        quote = ""
+        escaped = False
+        for index, character in enumerate(body):
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\" and quote:
+                escaped = True
+                continue
+            if quote:
+                if character == quote:
+                    quote = ""
+                continue
+            if character in {'"', "'"}:
+                quote = character
+            elif character in "[({":
+                depth += 1
+            elif character in "])}":
+                depth = max(0, depth - 1)
+            elif character == "," and depth == 0:
+                items.append(body[start:index])
+                start = index + 1
+        items.append(body[start:])
         return [
             cleaned
-            for item in value[1:-1].split(",")
+            for item in items
             if (cleaned := _semantic_review_selector_scalar(item))
         ]
     cleaned = _semantic_review_selector_scalar(value)
@@ -191,10 +246,56 @@ def _semantic_review_selector_scalar(raw: str) -> str:
 
 def _add_semantic_review_selector_aliases(selectors: set[str], value: str) -> None:
     selectors.add(value)
-    if value.startswith("scene:"):
+    scene_match = re.fullmatch(
+        r"scene:?(\d+(?:\.\d+)*)"
+        r"(?:\.[A-Za-z_][A-Za-z0-9_-]*"
+        r"(?:\.[A-Za-z_][A-Za-z0-9_-]*|\[\d+\])*)?",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if scene_match:
+        scene_id = ".".join(
+            str(int(part)) for part in scene_match.group(1).split(".")
+        )
+        selectors.add(f"scene:{scene_id}")
+        selectors.add(f"scene{scene_id}")
+        return
+    if value.startswith("scene:") and value.split(":", 1)[1].isdigit():
         selectors.add("scene" + value.split(":", 1)[1])
     elif value.startswith("scene") and value[5:].isdigit():
         selectors.add("scene:" + value[5:])
+
+
+def _semantic_collection_section_summary(section: str) -> str:
+    json_block = re.search(r"```json\s*(.*?)\s*```", section, flags=re.DOTALL)
+    if json_block:
+        try:
+            payload = json.loads(json_block.group(1))
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            for key in (
+                "summary",
+                "purpose",
+                "text",
+                "scene_event",
+                "semantic_contract",
+                "normalized_semantic_contract",
+            ):
+                value = payload.get(key)
+                if value in (None, "", [], {}):
+                    continue
+                if isinstance(value, str):
+                    return re.sub(r"\s+", " ", value).strip()
+                return json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+    body = section.split("\n", 1)[1] if "\n" in section else ""
+    return re.sub(r"\s+", " ", body).strip()
 
 
 def _semantic_collection_excerpt(collection_text: str, review_report: str, *, max_chars: int = 14000) -> str:
@@ -202,20 +303,63 @@ def _semantic_collection_excerpt(collection_text: str, review_report: str, *, ma
     if not failed_selectors:
         return collection_text[:max_chars]
 
-    selected_sections: list[str] = []
+    selected_sections: list[tuple[str, str]] = []
     chunks = collection_text.split("\n## ")
-    preamble = chunks[0].strip()
     for chunk in chunks[1:]:
         heading = chunk.splitlines()[0].strip().strip("`")
         if heading in failed_selectors:
-            selected_sections.append("## " + chunk.strip())
+            selected_sections.append((heading, "## " + chunk.strip()))
 
     if not selected_sections:
-        return collection_text[:max_chars]
+        missing_lines = [
+            f"- `{selector}` -> collection section not matched"
+            for selector in sorted(failed_selectors)
+        ]
+        return ("### Failed selector collection index\n\n" + "\n".join(missing_lines))[:max_chars]
 
-    excerpt = "\n\n".join(section[:5000] for section in selected_sections)
+    # A long all-scenes failure must not spend the entire budget on the first
+    # few verbose sections. Reserve the front of the excerpt for a compact
+    # summary of every matched selector, then use only the remaining bounded
+    # space for section detail.
+    index_header = "### Failed selector collection index\n\n"
+    index_budget = max_chars * 2 // 3
+    fixed_index_size = len(index_header) + sum(
+        len(heading) + len("- `` -> \n") for heading, _section in selected_sections
+    )
+    index_budget = min(max_chars, max(index_budget, fixed_index_size))
+    summary_budget = max(0, index_budget - fixed_index_size)
+    summary_chars = min(180, summary_budget // len(selected_sections))
+    index_lines: list[str] = []
+    for heading, section in selected_sections:
+        summary = _semantic_collection_section_summary(section)
+        if summary_chars and len(summary) > summary_chars:
+            summary = summary[: max(1, summary_chars - 1)].rstrip() + "…"
+        elif not summary_chars:
+            summary = ""
+        suffix = f" -> {summary}" if summary else ""
+        index_lines.append(f"- `{heading}`{suffix}")
+
+    index_text = index_header + "\n".join(index_lines)
+    remaining = max_chars - len(index_text)
+    if remaining <= 4:
+        return index_text[:max_chars]
+
+    detail_header = "\n\n### Bounded failed-section details\n\n"
+    detail_budget = remaining - len(detail_header)
+    if detail_budget <= 0:
+        return index_text[:max_chars]
+    per_section_chars = max(0, detail_budget // len(selected_sections) - 2)
+    detailed_sections = [
+        section[:per_section_chars]
+        for _heading, section in selected_sections
+        if per_section_chars > 0
+    ]
+    excerpt = index_text + detail_header + "\n\n".join(detailed_sections)
+    preamble = chunks[0].strip()
     if preamble:
-        excerpt = preamble + "\n\n" + excerpt
+        preamble_budget = max_chars - len(excerpt) - len("\n\n### Collection preamble\n\n")
+        if preamble_budget > 0:
+            excerpt += "\n\n### Collection preamble\n\n" + preamble[:preamble_budget]
     return excerpt[:max_chars]
 
 
@@ -273,7 +417,14 @@ def _semantic_report_input_digests(report_text: str) -> list[str]:
             line = line[1:].strip()
         key, separator, raw_value = line.partition(":")
         if separator and key.strip() == "semantic_review_input_digest":
-            values.append(raw_value.strip().strip("`"))
+            value = raw_value.strip()
+            if (
+                len(value) >= 2
+                and value[0] == value[-1]
+                and value[0] in {'"', "'", "`"}
+            ):
+                value = value[1:-1].strip()
+            values.append(value)
     return values
 
 
@@ -804,6 +955,18 @@ def write_semantic_repair_prompt(
 - Preserve scene order and authored transitions. If adjacent scenes change daypart, make the transition causally legible; do not infer or overwrite `time_of_day` from a location description or prompt prose.
 - Repair the earliest stage-owned scene projection, then keep the same value through downstream script/manifest projections. For a cut finding, fix the scene-level source and cut-local light plan rather than inventing a second historical-time field.
 """
+        if stage == "scene_set":
+            stage_specific_repair += """
+## Abstract Scene-Set Repair Contract
+
+- Preserve stable narrative identity vs appearance variants: keep one story entity across age, costume, condition, or other visual-state changes; never turn a variant into a replacement participant or duplicate entity.
+- Enforce exact participants and subject-specific timelines: use only the authored participant set for each scene, keep every subject's state consistent with global causal order, and never import an absent subject or later state from another scene.
+- Repair the local per-scene value shift: make `from`, visible turn, and `to` describe change inside that scene instead of copying the whole-story arc into every scene.
+- Keep a monotonic declared location route: advance through the authored order without silently jumping ahead, reversing, merging places, or reusing a destination as its origin unless an authored transition permits it.
+- Assign a single earliest reveal/proof owner: let earlier scenes prepare or withhold and later scenes react or elaborate, but never duplicate first disclosure or first causal proof ownership.
+- Require actual role coverage: derive roles from visible or audible actions by exact participants; every required role needs a real performer and evidence, not a label, absent entity, or generic atmosphere.
+- Use earliest-source-first synchronization: repair `story.md` -> `script.md` -> `video_manifest.md`, carry the corrected contract forward, then reconcile neighboring incoming/outgoing handoffs on both sides of every changed scene.
+"""
     elif stage == "asset_plan":
         stage_specific_repair = """
 ## Asset Plan Repair Boundary
@@ -869,7 +1032,7 @@ This is a real semantic repair, not a bypass. Do not advance the process slot to
 
 {failed_selector_text}
 
-## Bound Semantic Review Snapshot
+## Bound Semantic Review Snapshot (Canonical Orchestrator Binding)
 
 - semantic_review_input_digest: `{review_snapshot["semantic_review_input_digest"]}`
 - collection_sha256: `{review_snapshot["collection_sha256"]}`
@@ -882,7 +1045,7 @@ This is a real semantic repair, not a bypass. Do not advance the process slot to
 {source_digest_text}
 ```
 
-This repair prompt is valid only for the exact review snapshot and source digests above. If any bound artifact has changed, stop and require the orchestrator to rebuild the repair prompt from a fresh semantic review.
+The hashes above are a canonical orchestrator binding for the original run bytes. They must not be compared to path-rebased staged-copy bytes in an isolated repair workspace. The orchestrator appends a separate trusted staged hash mapping when isolation is active and remains authoritative for both baselines. Do not stop merely because an intentionally path-rebased staged copy differs from its canonical hash. If the orchestrator detects that a canonical bound artifact changed, stop and require it to rebuild the repair prompt from a fresh semantic review.
 
 ## Failed Semantic Review Report
 

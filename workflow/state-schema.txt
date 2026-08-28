@@ -1,10 +1,15 @@
-# State log schema (append-only, key=value)
+# State log schema (append-only delta events, key=value payload)
 #
 # - Stored in project folder: output/<topic>_<timestamp>/state.txt
-# - Each block is a snapshot of the latest state.
+# - Each committed block contains only one atomic update's changed keys.
 # - Blocks are separated by a line containing only "---".
-# - Resume by reading the last block.
-# - Rollback by copying a previous block and appending it as the newest.
+# - Current state is the global last-write-wins merge of every committed block.
+# - state.current.json is a replaceable derived cache bound to the canonical log head.
+# - Every delta binds the resulting full-state digest as state_hash; the view must match the final event.
+# - The view carries state_sha256, log inode/timestamps, and 128 recent events.
+# - Every explicit event-id retry scans canonical history; the derived event index is never authoritative.
+# - Resume never truncates or restores old state bytes; it appends a named invalidation event.
+# - Legacy full/partial blocks remain replayable. Once delta mode begins, legacy writers are forbidden.
 #
 # 変更内容:
 # - production order を asset/image-first に切り替えた

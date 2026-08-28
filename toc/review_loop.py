@@ -19,6 +19,11 @@ from toc.review_projection import (
     ReviewProjectionError,
     review_source_fingerprint,
 )
+from toc.scene_acceptance_contract import (
+    CRITERION_REGISTRY_VERSION,
+    criterion_registry_digest,
+    criterion_registry_payload,
+)
 
 
 MAX_REVIEW_LOOP_ROUNDS = 5
@@ -543,6 +548,9 @@ def build_review_input_snapshot(
         "source_artifacts": sources,
         "readset": readset,
     }
+    if stage in {"scene_set", "scene_detail", "cut_blueprint"}:
+        digest_payload["criterion_registry_version"] = CRITERION_REGISTRY_VERSION
+        digest_payload["criterion_registry_sha256"] = criterion_registry_digest()
     input_digest = hashlib.sha256(
         json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -593,6 +601,11 @@ def review_input_snapshot_issues(
         issues.append("review input snapshot schema_version mismatch")
     if snapshot.get("stage") != stage or snapshot.get("round") != round_number:
         issues.append("review input snapshot stage/round mismatch")
+    if stage in {"scene_set", "scene_detail", "cut_blueprint"}:
+        if snapshot.get("criterion_registry_version") != CRITERION_REGISTRY_VERSION:
+            issues.append("review input criterion registry version mismatch")
+        if snapshot.get("criterion_registry_sha256") != criterion_registry_digest():
+            issues.append("review input criterion registry digest mismatch")
 
     raw_sources = snapshot.get("source_artifacts")
     expected_paths = list(REVIEW_LOOP_SPECS[stage].source_artifacts)
@@ -679,6 +692,13 @@ def review_input_snapshot_issues(
         "source_artifacts": snapshot.get("source_artifacts"),
         "readset": snapshot.get("readset"),
     }
+    if stage in {"scene_set", "scene_detail", "cut_blueprint"}:
+        digest_payload["criterion_registry_version"] = snapshot.get(
+            "criterion_registry_version"
+        )
+        digest_payload["criterion_registry_sha256"] = snapshot.get(
+            "criterion_registry_sha256"
+        )
     expected_digest = hashlib.sha256(
         json.dumps(digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -719,7 +739,7 @@ def review_input_digest(*, run_dir: Path, stage: str, round_number: int) -> str:
 
 def review_guidance_for_stage(stage: str) -> str:
     if stage == "scene_set":
-        return dedent(
+        base_guidance = dedent(
             """
             Stage-specific review criteria:
             - Apply `maximal_meaningful` scene count strategy: do not approve a compressed scene set while an approved story beat can stand as its own production scene.
@@ -732,6 +752,25 @@ def review_guidance_for_stage(stage: str) -> str:
             - Check story coverage, scene order, reveal order, visual production handoff, and scene-to-scene causality. Consider scene-level target_duration_seconds only when supplied; it is advisory and its absence alone is non-blocking.
             """
         ).strip()
+        registry_lines = [
+            (
+                f"- Registry `{criterion['criterion_id']}` "
+                f"({criterion['canonical_reason_key']}): "
+                f"{criterion['reviewer_instruction']} "
+                "Deterministic ID equality is already preflighted; re-evaluate "
+                "only the semantic meaning named by this instruction."
+            )
+            for criterion in criterion_registry_payload()
+            if stage in criterion.get("semantic_recheck_stages", [])
+        ]
+        return "\n".join(
+            [
+                base_guidance,
+                "",
+                f"Criterion registry: {CRITERION_REGISTRY_VERSION} / {criterion_registry_digest()}",
+                *registry_lines,
+            ]
+        )
     if stage == "asset":
         return dedent(
             """
