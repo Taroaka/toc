@@ -143,6 +143,221 @@ def write_generic_pack(
     )
 
 
+def write_sharded_pack(
+    run_dir: Path,
+    *,
+    aggregate_status: str = "passed",
+    shard_statuses: list[str] | None = None,
+) -> dict[str, object]:
+    """Write a complete digest-bound scene_set pack with two scene shards."""
+
+    stage = "scene_set"
+    paths = semantic_review_relpaths(stage)
+    entry_ids = ["scene:10", "scene:20"]
+    statuses = shard_statuses or ["passed", "passed"]
+    if len(statuses) != len(entry_ids):
+        raise ValueError("shard_statuses must contain one status per entry")
+
+    source_path = run_dir / "script.md"
+    source_path.write_text("# script\n", encoding="utf-8")
+    source_artifacts = ["script.md"]
+    source_artifact_digests = [
+        {
+            "path": "script.md",
+            "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        }
+    ]
+
+    collection_path = run_dir / paths["collection"]
+    prompt_path = run_dir / paths["prompt"]
+    scope_path = run_dir / paths["scope"]
+    report_path = run_dir / paths["report"]
+    collection_path.parent.mkdir(parents=True, exist_ok=True)
+    collection_path.write_text(
+        "# Semantic Review Collection: scene_set\n\n"
+        + "\n\n".join(f"## {entry_id}" for entry_id in entry_ids)
+        + "\n",
+        encoding="utf-8",
+    )
+    prompt_path.write_text("# scene_set review prompt\n", encoding="utf-8")
+
+    shard_descriptors: list[dict[str, object]] = []
+    shard_paths: list[tuple[Path, Path]] = []
+    shard_root = Path("logs/review/semantic/scene_set_shards/attempt_01")
+    for index, (entry_id, shard_status) in enumerate(
+        zip(entry_ids, statuses),
+        start=1,
+    ):
+        shard_id = f"scene_{entry_id.split(':', 1)[1]}"
+        base = shard_root / f"{index:03d}_{shard_id}"
+        shard_artifacts = {
+            "collection": f"{base}.collection.md",
+            "scope": f"{base}.scope.json",
+            "prompt": f"{base}.prompt.md",
+            "report": f"{base}.report.md",
+        }
+        shard_collection_path = run_dir / shard_artifacts["collection"]
+        shard_scope_path = run_dir / shard_artifacts["scope"]
+        shard_prompt_path = run_dir / shard_artifacts["prompt"]
+        shard_report_path = run_dir / shard_artifacts["report"]
+        shard_collection_path.parent.mkdir(parents=True, exist_ok=True)
+        shard_collection_path.write_text(
+            f"# Semantic Review Collection: {shard_id}\n\n## {entry_id}\n",
+            encoding="utf-8",
+        )
+        shard_prompt_path.write_text(
+            f"# Review only shard entry `{entry_id}`\n",
+            encoding="utf-8",
+        )
+        shard_scope = {
+            "stage": stage,
+            "entry_count": 1,
+            "entry_ids": [entry_id],
+            "review_scope": "single_scene_entry",
+            "shard_id": shard_id,
+            "scene_id": entry_id.split(":", 1)[1],
+            "canonical_scope": paths["scope"].as_posix(),
+            "canonical_report": paths["report"].as_posix(),
+            "source_artifacts": source_artifacts,
+            "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
+            "source_artifact_digests": source_artifact_digests,
+            "collection_sha256": hashlib.sha256(
+                shard_collection_path.read_bytes()
+            ).hexdigest(),
+            "prompt_sha256": hashlib.sha256(shard_prompt_path.read_bytes()).hexdigest(),
+            "artifacts": shard_artifacts,
+        }
+        shard_scope_binding = semantic_review_scope_binding_sha256(shard_scope)
+        shard_scope["scope_binding_sha256"] = shard_scope_binding
+        shard_digest = semantic_review_input_digest(
+            stage=stage,
+            entry_ids=[entry_id],
+            collection_sha256=shard_scope["collection_sha256"],
+            prompt_sha256=shard_scope["prompt_sha256"],
+            source_artifact_digests=source_artifact_digests,
+            scope_binding_sha256=shard_scope_binding,
+        )
+        shard_scope["semantic_review_input_digest"] = shard_digest
+        shard_scope_path.write_text(
+            json.dumps(shard_scope, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        shard_report_path.write_text(
+            "\n".join(
+                [
+                    f"status: {shard_status}",
+                    f"semantic_review_input_digest: {shard_digest}",
+                    f"reviewed_entries: [{entry_id}]",
+                    "blocked_entries: []",
+                    "failed_selectors: []",
+                    "reason_keys: []",
+                    "findings: []",
+                    "notes: []",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        shard_descriptors.append(
+            {
+                "shard_id": shard_id,
+                "scene_id": entry_id.split(":", 1)[1],
+                "entry_count": 1,
+                "entry_ids": [entry_id],
+                "artifacts": shard_artifacts,
+            }
+        )
+        shard_paths.append((shard_scope_path, shard_report_path))
+
+    canonical_scope = {
+        "stage": stage,
+        "entry_count": len(entry_ids),
+        "entry_ids": entry_ids,
+        "review_scope": "per_scene_shards",
+        "shards": shard_descriptors,
+        "coverage": {
+            "status": "valid",
+            "expected_entry_count": len(entry_ids),
+            "assigned_entry_count": len(entry_ids),
+            "expected_entry_ids": entry_ids,
+            "assigned_entry_ids": entry_ids,
+            "missing_entry_ids": [],
+            "duplicate_entry_ids": [],
+        },
+        "source_artifacts": source_artifacts,
+        "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
+        "source_artifact_digests": source_artifact_digests,
+        "collection_sha256": hashlib.sha256(collection_path.read_bytes()).hexdigest(),
+        "prompt_sha256": hashlib.sha256(prompt_path.read_bytes()).hexdigest(),
+        "artifacts": {
+            "collection": paths["collection"].as_posix(),
+            "scope": paths["scope"].as_posix(),
+            "prompt": paths["prompt"].as_posix(),
+            "report": paths["report"].as_posix(),
+        },
+    }
+    scope_binding = semantic_review_scope_binding_sha256(canonical_scope)
+    canonical_scope["scope_binding_sha256"] = scope_binding
+    canonical_digest = semantic_review_input_digest(
+        stage=stage,
+        entry_ids=entry_ids,
+        collection_sha256=canonical_scope["collection_sha256"],
+        prompt_sha256=canonical_scope["prompt_sha256"],
+        source_artifact_digests=source_artifact_digests,
+        scope_binding_sha256=scope_binding,
+    )
+    canonical_scope["semantic_review_input_digest"] = canonical_digest
+    scope_path.write_text(
+        json.dumps(canonical_scope, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    report_path.write_text(
+        "\n".join(
+            [
+                f"status: {aggregate_status}",
+                f"semantic_review_input_digest: {canonical_digest}",
+                "reviewed_entries: [scene:10, scene:20]",
+                "blocked_entries: []",
+                "failed_selectors: []",
+                "reason_keys: []",
+                "findings: []",
+                "notes: []",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "scope": scope_path,
+        "report": report_path,
+        "shards": shard_descriptors,
+        "shard_paths": shard_paths,
+    }
+
+
+def rebind_shard_scope(scope_path: Path, report_path: Path) -> None:
+    scope = json.loads(scope_path.read_text(encoding="utf-8"))
+    scope_binding = semantic_review_scope_binding_sha256(scope)
+    scope["scope_binding_sha256"] = scope_binding
+    digest = semantic_review_input_digest(
+        stage=str(scope["stage"]),
+        entry_ids=scope["entry_ids"],
+        collection_sha256=scope["collection_sha256"],
+        prompt_sha256=scope["prompt_sha256"],
+        source_artifact_digests=scope["source_artifact_digests"],
+        scope_binding_sha256=scope_binding,
+    )
+    scope["semantic_review_input_digest"] = digest
+    scope_path.write_text(json.dumps(scope, ensure_ascii=False) + "\n", encoding="utf-8")
+    report = report_path.read_text(encoding="utf-8")
+    report = re.sub(
+        r"(?m)^semantic_review_input_digest:\s*.*$",
+        f"semantic_review_input_digest: {digest}",
+        report,
+    )
+    report_path.write_text(report, encoding="utf-8")
+
+
 def write_digest_bound_pack(run_dir: Path, stage: str = "asset_plan") -> tuple[Path, Path]:
     paths = semantic_review_relpaths(stage)
     source_path = run_dir / "asset_plan.md"
@@ -343,6 +558,117 @@ class TestSemanticReview(unittest.TestCase):
 
             self.assertTrue(result.passed)
             self.assertEqual(result.status, "passed")
+
+    def test_sharded_currentness_accepts_terminal_passed_reports(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_shards_") as td:
+            run_dir = Path(td)
+            write_sharded_pack(run_dir)
+
+            issues = semantic_review_currentness_issues(run_dir, "scene_set")
+
+        self.assertEqual(issues, ())
+
+    def test_sharded_currentness_requires_terminal_and_passed_status_for_passing_aggregate(
+        self,
+    ) -> None:
+        for replacement, expected_issue in (
+            ("status: pending", "terminal"),
+            ("status: failed", "must be passed"),
+        ):
+            with self.subTest(replacement=replacement), tempfile.TemporaryDirectory(
+                prefix="semantic_review_shards_"
+            ) as td:
+                run_dir = Path(td)
+                fixture = write_sharded_pack(run_dir)
+                _scope_path, report_path = fixture["shard_paths"][0]  # type: ignore[index]
+                report = report_path.read_text(encoding="utf-8")
+                report_path.write_text(
+                    report.replace("status: passed", replacement, 1),
+                    encoding="utf-8",
+                )
+
+                issues = semantic_review_currentness_issues(run_dir, "scene_set")
+
+                self.assertTrue(
+                    any(expected_issue in issue for issue in issues),
+                    issues,
+                )
+
+    def test_sharded_currentness_requires_exact_reviewed_entries_coverage(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="semantic_review_shards_") as td:
+            run_dir = Path(td)
+            fixture = write_sharded_pack(run_dir)
+            _scope_path, report_path = fixture["shard_paths"][0]  # type: ignore[index]
+            report_path.write_text(
+                report_path.read_text(encoding="utf-8").replace(
+                    "reviewed_entries: [scene:10]",
+                    "reviewed_entries: [scene:20]",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+
+            issues = semantic_review_currentness_issues(run_dir, "scene_set")
+
+        self.assertTrue(
+            any("reviewed_entries coverage" in issue for issue in issues),
+            issues,
+        )
+
+    def test_sharded_currentness_requires_empty_failure_fields_for_passed_shard(
+        self,
+    ) -> None:
+        for field in ("blocked_entries", "failed_selectors", "reason_keys"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory(
+                prefix="semantic_review_shards_"
+            ) as td:
+                run_dir = Path(td)
+                fixture = write_sharded_pack(run_dir)
+                _scope_path, report_path = fixture["shard_paths"][0]  # type: ignore[index]
+                report = report_path.read_text(encoding="utf-8")
+                report_path.write_text(
+                    report.replace(f"{field}: []", f"{field}: [scene:10]", 1),
+                    encoding="utf-8",
+                )
+
+                issues = semantic_review_currentness_issues(run_dir, "scene_set")
+
+                self.assertTrue(
+                    any(
+                        f"passed shard report must have empty {field}" in issue
+                        for issue in issues
+                    ),
+                    issues,
+                )
+
+    def test_sharded_currentness_requires_scene_shard_scope_and_canonical_linkage(
+        self,
+    ) -> None:
+        for field, replacement, expected_issue in (
+            ("review_scope", "all_entries", "review_scope"),
+            ("canonical_scope", "logs/review/semantic/other.scope.json", "canonical_scope"),
+            ("canonical_report", "logs/review/semantic/other.report.md", "canonical_report"),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory(
+                prefix="semantic_review_shards_"
+            ) as td:
+                run_dir = Path(td)
+                fixture = write_sharded_pack(run_dir)
+                scope_path, report_path = fixture["shard_paths"][0]  # type: ignore[index]
+                shard_scope = json.loads(scope_path.read_text(encoding="utf-8"))
+                shard_scope[field] = replacement
+                scope_path.write_text(
+                    json.dumps(shard_scope, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                rebind_shard_scope(scope_path, report_path)
+
+                issues = semantic_review_currentness_issues(run_dir, "scene_set")
+
+                self.assertTrue(
+                    any(expected_issue in issue for issue in issues),
+                    issues,
+                )
 
     def test_foundation_semantic_review_requires_exact_scope_coverage(self) -> None:
         with tempfile.TemporaryDirectory(prefix="semantic_review_") as td:

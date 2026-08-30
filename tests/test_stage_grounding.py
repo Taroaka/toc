@@ -192,6 +192,34 @@ class TestStageGrounding(unittest.TestCase):
             self.assertFalse(report["approved_input_checks"][0]["approval_required"])
             self.assertEqual(report["review_policy"]["story"], "optional")
 
+    def test_script_grounding_allows_skipped_preapproved_story_review_policy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_0002c"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "story.md").write_text(_good_story_yaml(), encoding="utf-8")
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "runtime.review_mode": "preapproved",
+                    "review.policy.story": "skipped",
+                    "review.story.status": "approved",
+                },
+            )
+
+            result = _run_grounding(run_dir, "script")
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            report = json.loads(
+                (run_dir / "logs/grounding/script.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(report["status"], "ready")
+            self.assertFalse(
+                report["approved_input_checks"][0]["approval_required"]
+            )
+            self.assertEqual(report["review_policy"]["story"], "skipped")
+
     def test_manifest_grounding_is_separate_from_downstream_image_prompt_gate(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0003"

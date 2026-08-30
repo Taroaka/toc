@@ -24,6 +24,7 @@ from toc.review_loop import (
     review_input_digest,
     review_input_snapshot_issues,
 )
+from toc.review_mode import review_mode_is_bound_preapproved
 from toc.semantic_pack_scene import scene_acceptance_currentness_issues
 from toc.story_duration import (
     MAX_TARGET_DURATION_SECONDS,
@@ -39,6 +40,7 @@ from .common import (
     IMAGE_API_PROMPT_POLICY_VERSION_V2,
     MOTION_LEAK_TOKENS,
     P400_READINESS_CHECK_IDS,
+    SCENE_COVERAGE_REVIEW_REQUIRED_KEYS,
     UNRESOLVED_GATE_VALUES,
     _append_grounding_checks,
     _append_rubric_findings,
@@ -224,6 +226,16 @@ def _script_readiness_issues_from_run(
     if not scenes:
         issues.append("script.scenes:missing")
     readiness_issues = _scene_readiness_issues(scenes)
+    if review_mode_is_bound_preapproved(run_dir):
+        review_suffixes = {
+            "coverage_review",
+            *SCENE_COVERAGE_REVIEW_REQUIRED_KEYS,
+        }
+        readiness_issues = [
+            issue
+            for issue in readiness_issues
+            if issue.rsplit(":", 1)[-1] not in review_suffixes
+        ]
     issues.extend(readiness_issues)
     issues.extend(_scene_event_readiness_issues(scenes, prefix="script"))
     script_metadata = as_dict(data.get("script_metadata"))
@@ -249,7 +261,8 @@ def _script_readiness_issues_from_run(
     if acceptance_preflight_passed:
         accepted_cut_blueprint_statuses.add("pending_independent_review")
     if _review_status(data, "cut_blueprint_review") not in accepted_cut_blueprint_statuses:
-        issues.append("script.cut_blueprint_review_approved")
+        if not review_mode_is_bound_preapproved(run_dir):
+            issues.append("script.cut_blueprint_review_approved")
     renderable_scenes = [scene for scene in scenes if isinstance(scene, dict) and str(scene.get("kind") or "").strip() != "reference"]
     missing_cuts = [
         as_dotted_str(scene.get("scene_id")) or str(index + 1)

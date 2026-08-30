@@ -84,7 +84,7 @@ def render_collection(stage: str, entries: list[dict[str, object]]) -> str:
         "",
     ]
     for index, entry in enumerate(entries, start=1):
-        entry_id = str(entry.get("id") or entry.get("selector") or f"entry_{index:03d}")
+        entry_id = _entry_id(entry, index)
         lines.extend(
             [
                 f"## {entry_id}",
@@ -111,7 +111,10 @@ def render_scope_json(
     source_fingerprint_cache: dict[tuple[object, ...], Any] | None = None,
 ) -> str:
     diagnostics = entry_diagnostics(entries)
-    entry_ids = [str(entry.get("id") or entry.get("selector") or "") for entry in entries]
+    entry_ids = [
+        _entry_id(entry, index)
+        for index, entry in enumerate(entries, start=1)
+    ]
     source_artifacts = _source_artifacts(run_dir, stage)
     source_artifact_digests = _source_artifact_digest_records(
         run_dir,
@@ -172,27 +175,39 @@ def render_scope_json(
 
 
 def _entry_id(entry: dict[str, object], index: int) -> str:
-    return str(entry.get("id") or entry.get("selector") or f"entry_{index:03d}").strip()
+    return str(
+        entry.get("id")
+        or entry.get("selector")
+        or entry.get("asset_id")
+        or f"entry_{index:03d}"
+    ).strip()
 
 
 def _image_prompt_scene_token(entry: dict[str, object], entry_id: str) -> str:
     raw_scene_id = str(entry.get("scene_id") or "").strip()
     if raw_scene_id:
-        match = re.search(r"scene[_:\s-]*(\d+)", raw_scene_id, re.I)
+        match = re.search(r"scene[_:\s-]*(\d+(?:\.\d+)*)", raw_scene_id, re.I)
         if match:
-            return str(int(match.group(1)))
+            return _normalize_scene_token(match.group(1))
         label = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_scene_id).strip("._-").lower()
         if label:
             return label
-    match = re.search(r"scene[_:\s-]*(\d+)", entry_id, re.I)
+    match = re.search(r"scene[_:\s-]*(\d+(?:\.\d+)*)", entry_id, re.I)
     if match:
-        return str(int(match.group(1)))
+        return _normalize_scene_token(match.group(1))
     return ""
 
 
+def _normalize_scene_token(raw_token: str) -> str:
+    """Normalize numeric scene labels without collapsing dotted identities."""
+
+    components = raw_token.split(".")
+    return ".".join(str(int(component)) for component in components)
+
+
 def _scene_token_sort_key(token: str) -> tuple[int, object, str]:
-    if token.isdigit():
-        return (0, int(token), token)
+    if re.fullmatch(r"\d+(?:\.\d+)*", token):
+        return (0, tuple(int(component) for component in token.split(".")), token)
     return (1, token, token)
 
 
@@ -383,6 +398,11 @@ def entry_diagnostics(entries: list[dict[str, object]]) -> dict[str, object]:
     blocking_quality_issue_entries: list[str] = []
     blocking_quality_issue_codes: list[str] = []
     blocking_quality_issue_count = 0
+    internal_reference_unresolved_entries: list[dict[str, object]] = []
+    story_event_unassigned_entries: list[str] = []
+    invalid_declared_daypart_entries: list[dict[str, object]] = []
+    invalid_declared_route_entries: list[dict[str, object]] = []
+    foundation_issue_entry_ids: list[str] = []
     for index, entry in enumerate(entries, start=1):
         entry_id = str(entry.get("id") or entry.get("selector") or f"entry_{index:03d}")
         if _truthy(entry.get("semantic_contract_missing")) or _truthy(entry.get("motion_contract_missing")):
@@ -404,6 +424,74 @@ def entry_diagnostics(entries: list[dict[str, object]]) -> dict[str, object]:
                 )
                 for issue in blocking_issues
             )
+        foundation_diagnostics = entry.get("internal_reference_diagnostics")
+        entry_unresolved_refs: list[dict[str, object]] = []
+        entry_unassigned_event_ids: list[str] = []
+        if isinstance(foundation_diagnostics, dict):
+            unresolved_refs = foundation_diagnostics.get("unresolved_refs")
+            if isinstance(unresolved_refs, list):
+                entry_unresolved_refs = [
+                    {str(key): value for key, value in raw_ref.items()}
+                    for raw_ref in unresolved_refs
+                    if isinstance(raw_ref, dict)
+                ]
+                internal_reference_unresolved_entries.extend(entry_unresolved_refs)
+            unassigned_event_ids = foundation_diagnostics.get("unassigned_event_ids")
+            if isinstance(unassigned_event_ids, list):
+                entry_unassigned_event_ids = [
+                    str(event_id)
+                    for event_id in unassigned_event_ids
+                    if str(event_id).strip()
+                ]
+                story_event_unassigned_entries.extend(entry_unassigned_event_ids)
+
+        entry_invalid_daypart_statuses: list[dict[str, object]] = []
+        if entry.get("time_of_day_contract_declared") is True:
+            raw_daypart_statuses = entry.get("scene_time_of_day_statuses")
+            if isinstance(raw_daypart_statuses, list):
+                entry_invalid_daypart_statuses = [
+                    {
+                        str(key): value
+                        for key, value in status.items()
+                    }
+                    for status in raw_daypart_statuses
+                    if isinstance(status, dict) and status.get("status") != "valid"
+                ]
+                invalid_declared_daypart_entries.extend(entry_invalid_daypart_statuses)
+
+        entry_invalid_route_statuses: list[dict[str, object]] = []
+        raw_route_statuses = entry.get("scene_location_route_statuses")
+        if isinstance(raw_route_statuses, list):
+            entry_invalid_route_statuses = [
+                {
+                    str(key): value
+                    for key, value in status.items()
+                }
+                for status in raw_route_statuses
+                if isinstance(status, dict) and status.get("status") == "invalid"
+            ]
+            invalid_declared_route_entries.extend(entry_invalid_route_statuses)
+
+        if (
+            entry_unresolved_refs
+            or entry_unassigned_event_ids
+            or entry_invalid_daypart_statuses
+            or entry_invalid_route_statuses
+        ):
+            foundation_issue_entry_ids.append(entry_id)
+
+    foundation_issue_count = (
+        len(internal_reference_unresolved_entries)
+        + len(story_event_unassigned_entries)
+        + len(invalid_declared_daypart_entries)
+        + len(invalid_declared_route_entries)
+    )
+    if foundation_issue_count:
+        # The foundation collector emits one story entry. Keep the selector
+        # binding explicit and deterministic even if a caller supplies more
+        # than one foundation-shaped entry.
+        failed_selectors.extend(foundation_issue_entry_ids)
+
     return {
         "missing_semantic_contract_count": len(missing_contract_entries),
         "missing_semantic_contract_entries": missing_contract_entries,
@@ -416,6 +504,14 @@ def entry_diagnostics(entries: list[dict[str, object]]) -> dict[str, object]:
         "blocking_quality_issue_codes": sorted(
             set(blocking_quality_issue_codes)
         ),
+        "internal_reference_unresolved_count": len(internal_reference_unresolved_entries),
+        "internal_reference_unresolved_entries": internal_reference_unresolved_entries,
+        "story_event_unassigned_count": len(story_event_unassigned_entries),
+        "story_event_unassigned_entries": sorted(set(story_event_unassigned_entries)),
+        "invalid_declared_daypart_count": len(invalid_declared_daypart_entries),
+        "invalid_declared_daypart_entries": invalid_declared_daypart_entries,
+        "invalid_declared_route_count": len(invalid_declared_route_entries),
+        "invalid_declared_route_entries": invalid_declared_route_entries,
         "failed_selectors": sorted(set(failed_selectors)),
     }
 

@@ -12,12 +12,12 @@
 - asset stage
   - `asset_plan.md` を作る
   - `script.md` の該当箇所を見て reusable asset を設計する
-  - human review を通してから asset を生成する
+  - `standard` では human review を通してから asset を生成する。frontend create の明示 `review_mode=preapproved` では外部 semantic / human reviewer turn だけを省略できるが、asset pack / digest と deterministic validation は残す
   - provider は参照あり/なしを問わず `tool: codex_builtin_image` に固定する
   - `reference_inputs[]` が無い asset だけは `execution_lane=bootstrap_builtin` の no-reference lane として扱う
 - cut stage
   - 既存どおり `video_manifest.md` を直接 review し、`image_generation.review` に結果を書き戻す
-  - review は単なる missing character 検出ではなく、prompt が環境寄りに流れすぎていないか、story 上の関係性/行為が抜けていないかも確認し、足りない `character_ids` は先に補完する
+  - `standard` の review は単なる missing character 検出ではなく、prompt が環境寄りに流れすぎていないか、story 上の関係性/行為が抜けていないかも確認し、足りない `character_ids` は先に補完する。preapproved ではこの external reviewer turn を呼ばず、同じ pack / digest から deterministic preapproval report を作る
   - 各 cut の review 状態は `agent_review_ok` と `human_review_ok` を持ち、さらに **false 理由 key** を明示する
   - canonical field 名は `agent_review_reason_keys` とし、現行の `agent_review_reason_codes` は互換 alias として扱う
   - criterion score は `rubric_scores`、加重合計は `overall_score` に残す
@@ -50,9 +50,9 @@ scene image prompt は、scene の説明文ではなく、**cut の映像が始�
 4. `first_frame_visual_plan` から、描画可能な断片だけを `drawable_prompt_ir_v1` へ抽出する。
 5. historical era / scene time-of-day / `character_ids` / `object_ids` / `location_ids` / references を依存関係として宣言し、該当する条件付き group だけを採用する。
 6. compiler が candidate の `api_prompt_payload.prompt` を自然文へレンダリングする。`script.md.scene_intent` と narration は補助参照に留める。
-7. contextless image-prompt reviewer が candidate と設計根拠を比較し、cut ごとに `include / omit / add / replace` を判断する。
+7. `standard` では contextless image-prompt reviewer が candidate と設計根拠を比較し、cut ごとに `include / omit / add / replace` を判断する。明示 `review_mode=preapproved` では reviewer turn を省略する代わりに、canonical pack / scope / prompt / report と source/input digest を materialize し、`deterministic_preapproval` report を残す。
 8. fail 時は producer が `first_frame_visual_plan` と cut-local dependencies/references を修正し、compiler が payload を再生成する。payload 本文、request Markdown、snapshot を手編集しない。
-9. request Markdown と draft snapshot を同じ revision から再 materialize する。media generation を無効にした materialize-only 経路でも、scene_set / scene_detail / cut_blueprint / asset_plan / image_prompt の semantic review は省略せず、参照 bytes 未束縛の `reviewed_draft` として停止する。asset 生成後は参照 bytes を hash 束縛して provider-ready revision にし、その revision を再 review する。pass 後の freeze は snapshot を書き換えず、review 済み revision の strict validation と state 遷移だけを行って p650 を完了させる。
+9. request Markdown と draft snapshot を同じ revision から再 materialize する。`standard` の materialize-only 経路では、scene_set / scene_detail / cut_blueprint / asset_plan / image_prompt の semantic review を省略せず、参照 bytes 未束縛の `reviewed_draft` として停止する。明示 `preapproved` では external semantic / human reviewer turn を省略できるが、同じ stage の collection / scope / prompt / report、source/input digest、deterministic diagnostics を省略しない。asset 生成後は参照 bytes を hash 束縛して provider-ready revision にし、その revision を検証する。pass 後の freeze は snapshot を書き換えず、review 済み revision の strict validation と state 遷移だけを行って p650 を完了させる。
 
 `motion_brief` は p800 動画生成の入力であり、p600 の画像 prompt 作成では参照しない。
 画像生成 provider に渡すのは、動画開始前に見えている状態までである。
@@ -108,18 +108,44 @@ compiler groupを増やしたのにregistryへ登録していない変更は、r
 
 加えて運用順は次の通り。
 
-0. asset stage が必要な run では、先に `asset_plan.md` を review / approve して reusable asset を作る
+0. asset stage が必要な run では、standard は先に `asset_plan.md` を review / approve して reusable asset を作る。明示 `review_mode=preapproved` では external reviewer turn を省略できるが、asset plan pack / digest と deterministic validation を先に通す
 0.1. image request は参照あり/なしを問わず `tool: codex_builtin_image` を使う。no-reference image request だけ `execution_lane=bootstrap_builtin` として互換 lane に寄せる
 1. `still_image_plan` で新規生成対象を確定する
 2. story/research の人物 key を reusable character asset へ解決し、各 cut では assigned event に実際に見える人物だけを `character_ids` / references に選ぶ
 3. cut ごとに `first_frame_visual_plan` を作り、v2 compiler で candidate の `drawable_prompt_ir` と `api_prompt_payload` を materialize する
-4. `python scripts/review-image-prompt-story-consistency.py --manifest output/<run>/video_manifest.md --fix-character-ids` の hard check と contextless semantic reviewer で story/script/時代/dependency/時間境界を確認する
-5. reviewer は上流 key を一対一転記せず、cut ごとに `include / omit / add / replace` を決める。肯定側と `not_yet` の衝突、制作メタ、見えるのに未宣言の人物・物・場所、不要な scene-wide reference、cut 間の不当な重複を blocker とする
+4. `standard` では `python scripts/review-image-prompt-story-consistency.py --manifest output/<run>/video_manifest.md --fix-character-ids` の hard check と contextless semantic reviewer で story/script/時代/dependency/時間境界を確認する。preapproved では external reviewer turn を省略し、同じ pack / scope / digest と deterministic diagnostics で確認する
+5. standard の reviewer は上流 key を一対一転記せず、cut ごとに `include / omit / add / replace` を決める。肯定側と `not_yet` の衝突、制作メタ、見えるのに未宣言の人物・物・場所、不要な scene-wide reference、cut 間の不当な重複を blocker とする。preapproved はこの external judgment を実行せず、deterministic contract の違反を blocker とする
 6. fail 時は `first_frame_visual_plan`、cut-local dependencies/references、必要なら同じ `video_manifest.md.assets` bible を修正する。`api_prompt_payload.prompt` と派生済み `asset_plan.md` は修正対象にしない
 7. orchestrator が v2 compiler を再実行し、`image_generation_requests.md` と draft snapshot を同じ revision から再 materialize する。このとき repaired `first_frame_visual_plan` から `shot_design_contract`、location frame、visual delta、blocking と `debug_prompt_source.first_frame_visual_plan` も再導出し、修正前の review metadata を残さない。asset bible も変わった場合は asset request/画像を先に更新し、その参照 hash を scene snapshot へ再束縛する
-8. `image_prompt_story_review.md` を修正後 revision から再生成し、その fresh deterministic report と semantic 再 review で finding が消えた cut だけを pass とする。report は canonical `video_manifest.md` path と manifest/story/script の sha256、reviewed selector section、raw / blocking hard finding を持ち、gate は summary と section detail の一致まで検証する。deterministic hard finding は selector、reason code、message を保ったまま semantic aggregate の blocker に合成し、該当 selector だけを次の producer repair へ戻す。selector が scope に解決できない、dotted id が衝突する、または report が stale / malformed / source不一致なら安全側で全 entry を block する。`human_review_ok: true` の明示例外は raw finding として監査に残すが blocking hard finding には数えない。semantic agent 単独の誤 pass で freeze させない。soft finding は警告として扱える。コード生成の固定 `status: passed` report や修正前 report を review の代用にしない
+8. `image_prompt_story_review.md` を修正後 revision から再生成し、その fresh deterministic report と semantic 再 review で finding が消えた cut だけを pass とする。preapproved では semantic reviewer turn の代わりに fresh `deterministic_preapproval` report を同じ revision から作る。report は canonical `video_manifest.md` path と manifest/story/script の sha256、reviewed selector section、raw / blocking hard finding を持ち、gate は summary と section detail の一致まで検証する。deterministic hard finding は selector、reason code、message を保ったまま semantic aggregate の blocker に合成し、該当 selector だけを次の producer repair へ戻す。selector が scope に解決できない、dotted id が衝突する、または report が stale / malformed / source不一致なら安全側で全 entry を block する。`human_review_ok: true` の明示例外は raw finding として監査に残すが blocking hard finding には数えない。semantic agent 単独の誤 pass で freeze させない。soft finding は警告として扱える。コード生成の固定 `status: passed` report や修正前 report を review の代用にしない
 9. 人間が issue を理解したうえで例外許容して進める cut だけ `python scripts/review-image-prompt-story-consistency.py --manifest output/<run>/video_manifest.md --set-human-review scene02_cut01 --human-review-reason "許容理由"` のように `human_review_ok: true` と判断理由を同時に残す。理由が空なら blocking hard finding は解除しない
-10. semantic reviewer が pass した request/snapshot revision を `frozen` にする。この実結果から p630 hard review と p640 judgment review の artifact/state を確定し、p650 を `done` にしてから Codex app-server runtime へ渡す
+10. `standard` は semantic reviewer が pass した request/snapshot revision、`preapproved` は deterministic preapproval report が pass した revision を `frozen` にする。この実結果から p630 hard review と p640 judgment review の artifact/state を確定し、p650 を `done` にしてから Codex app-server runtime へ渡す
+
+### Frontend create の review mode
+
+frontend create の `review_mode` は `standard|preapproved`（既定 `standard`）で、
+`logs/orchestration/create_input.json`（`toc.create_input.v1`）へ保存した値を run の正本とする。
+`runtime.review_mode` と create input の値は一致させ、`standard -> frontend`、
+`preapproved -> preapproved` を `runtime.review_policy` に投影する。暗黙の fallback や、
+作成後に mode だけを差し替える運用は許可しない。
+
+- `standard`: external semantic reviewer turn と frontend human review turn を実行する。
+  required gate を自動承認せず、通常の semantic repair / human handoff を維持する。
+- `preapproved`: frontend の作成ダイアログで明示された場合だけ、対象 create stage の
+  external semantic reviewer turn と frontend human reviewer turn を省略する。省略対象は
+  `research`, `story`, `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`,
+  `image_prompt`。canonical `collection` / `scope` / `prompt` / `report` pack、source/input
+  digest、`deterministic_preapproval` report、grounding/schema/参照整合、request snapshot、
+  provider provenance、生成 output の存在・decode・fixed-slot completeness は必須である。
+  deterministic diagnostics が blocking なら fail-close し、人間 override や reviewer 不在を
+  pass の根拠にしない。
+
+p680 では、preapproved の media generation 前は `gate.image_review=skipped` でも
+`review.image.status=pending` とする。生成画像の provenance / output validation と fresh
+verify が通った terminal 時だけ `slot.p680.status=done`、`review.image.status=approved`、
+`gate.image_review=skipped`（p670 は `skipped`）を記録する。standard は
+`slot.p680.status=awaiting_approval`、`review.image.status=pending`、
+`gate.image_review=required` で frontend に handoff する。
 
 補足:
 - 関数 review は hard gate を優先する。missing contract / missing ids / required IR fragment 欠落 / reveal 破り / self-contained 違反のような構造問題は `agent_review_ok: false` に直結させる
@@ -340,7 +366,7 @@ production v2 は `first_frame_visual_plan` から `drawable_prompt_ir` を作�
 場面名は、内部 selector ではなく API が描ける具体語にする。例: `scene10` ではなく `シンデレラの灰の台所`、`物語「シンデレラ」の scene10` ではなく `灰の残る古い台所で暖炉の灰を掃くシンデレラ`。
 <!-- image-gen-setting:scene:end -->
 
-subagent review の production v2 必須 criterion:
+`standard` の subagent review と `preapproved` の deterministic preapproval report に共通する production v2 必須 criterion:
 
 - `policy_version: image_api_prompt_v2` と `schema_version: drawable_prompt_ir_v1` がある
 - `style`, `current_moment`, `constraints` がある

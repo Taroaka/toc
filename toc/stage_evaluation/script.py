@@ -12,6 +12,7 @@ from toc.adaptation_value_contract import (
 )
 from toc.cut_context_packet import WARNING_KEY_BY_DIAGNOSTIC, cut_context_packet_issue_map
 from toc.harness import load_structured_document
+from toc.review_mode import review_mode_is_bound_preapproved
 from toc.semantic_pack_scene import scene_acceptance_currentness_issues
 
 from .common import (
@@ -1907,6 +1908,7 @@ def _append_p400_scene_cut_checks(
     scenes: list[Any],
     *,
     run_dir: Path | None = None,
+    deterministic_preapproval: bool = False,
 ) -> None:
     if not scenes:
         return
@@ -1976,7 +1978,21 @@ def _append_p400_scene_cut_checks(
         kind="rubric",
     )
     scene_count = len([scene for scene in scenes if isinstance(scene, dict)])
-    scenes_with_intent = sum(1 for scene in scenes if isinstance(scene, dict) and _scene_has_intent(scene))
+    scenes_with_intent = sum(
+        1
+        for scene in scenes
+        if isinstance(scene, dict)
+        and (
+            not {
+                key: values
+                for key, values in _scene_intent_issue_map(scene).items()
+                if not (
+                    deterministic_preapproval
+                    and key == "coverage_review"
+                )
+            }
+        )
+    )
     add_check(
         checks,
         "script.scene_intent_cards",
@@ -2011,6 +2027,9 @@ def _append_p400_scene_cut_checks(
     )
     for check_id, issue_key, message in scene_contract_checks:
         issue_values = scene_contract_issues.get(issue_key, [])
+        if deterministic_preapproval and issue_key == "coverage_review":
+            issue_values = []
+            message += " (content verdict accepted by deterministic preapproval)"
         add_check(
             checks,
             check_id,
@@ -2097,6 +2116,16 @@ def _append_p400_scene_cut_checks(
         kind="rubric",
     )
     readiness_issues = _scene_readiness_issues(scenes)
+    if deterministic_preapproval:
+        review_suffixes = {
+            "coverage_review",
+            *SCENE_COVERAGE_REVIEW_REQUIRED_KEYS,
+        }
+        readiness_issues = [
+            issue
+            for issue in readiness_issues
+            if issue.rsplit(":", 1)[-1] not in review_suffixes
+        ]
     add_check(
         checks,
         "script.scene_readiness_contract",
@@ -2184,7 +2213,13 @@ def check_script_single(run_dir: Path, profile: str) -> tuple[dict[str, Any], di
         kind="rubric",
     )
     flattened = body_text
-    _append_p400_scene_cut_checks(checks, data, scenes, run_dir=run_dir)
+    _append_p400_scene_cut_checks(
+        checks,
+        data,
+        scenes,
+        run_dir=run_dir,
+        deterministic_preapproval=review_mode_is_bound_preapproved(run_dir),
+    )
     if not contract:
         add_check(checks, "script.contract_missing", False, "evaluation_contract is missing for script stage.", kind="rubric")
     else:

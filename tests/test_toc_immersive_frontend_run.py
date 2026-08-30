@@ -188,6 +188,27 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             self.assertIsNone(payload["source_run"])
             self.assertEqual(payload["target_duration_seconds"], 600)
 
+    def test_create_input_contract_records_preapproved_review_mode(self) -> None:
+        module = load_frontend_run_module()
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_preapproved_input_",
+            dir=REPO_ROOT / "output",
+        ) as tmp:
+            run_dir = Path(tmp)
+            path = module._write_create_input_contract(
+                run_dir=run_dir,
+                topic="創作",
+                source="レビューを省略する物語",
+                experience="cinematic_story",
+                source_run=None,
+                target_duration_seconds=300,
+                review_mode="preapproved",
+            )
+
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["review_mode"], "preapproved")
+
     def test_world_walk_create_input_uses_actual_source_story_bytes(self) -> None:
         module = load_frontend_run_module()
         exact_story = "# Source Story\n\n行末と空行をそのまま使う。  \n"
@@ -1094,6 +1115,61 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             "toc.create_input.v1",
         )
 
+    def test_preapproved_materialize_keeps_image_review_pending_until_p680(self) -> None:
+        module = load_frontend_run_module()
+        output_root = REPO_ROOT / "output"
+        output_root.mkdir(exist_ok=True)
+        captured: dict[str, str] = {}
+
+        with tempfile.TemporaryDirectory(
+            prefix="frontend_preapproved_policy_",
+            dir=output_root,
+        ) as tmp:
+            run_dir = Path(tmp) / "fixed_preapproved_policy_seed"
+
+            def capture_policy(target_run_dir: Path) -> None:
+                state = parse_state(target_run_dir / "state.txt")
+                for key in (
+                    "runtime.review_policy",
+                    "runtime.review_mode",
+                    "gate.research_review",
+                    "gate.story_review",
+                    "gate.image_review",
+                    "review.image.status",
+                ):
+                    captured[key] = state.get(key, "")
+                raise RuntimeError("stop after preapproved policy capture")
+
+            with (
+                patch.object(
+                    module,
+                    "_prepare_authoring_grounding",
+                    side_effect=capture_policy,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "stop after preapproved policy capture",
+                ),
+            ):
+                module.materialize_run(
+                    "創作",
+                    "架空の主人公が境界を越える物語。",
+                    run_dir,
+                    "p680",
+                    review_mode="preapproved",
+                )
+
+        self.assertEqual(
+            captured,
+            {
+                "runtime.review_policy": "preapproved",
+                "runtime.review_mode": "preapproved",
+                "gate.research_review": "skipped",
+                "gate.story_review": "skipped",
+                "gate.image_review": "skipped",
+                "review.image.status": "pending",
+            },
+        )
     def test_prepare_grounding_keeps_real_p400_snapshot_bindings_current(self) -> None:
         module = load_frontend_run_module()
         output_root = REPO_ROOT / "output"
@@ -1453,6 +1529,61 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 module._refresh_review_loop_artifacts(run_dir, stages)
 
         self.assertEqual(preflight.call_count, 1)
+
+    def test_preapproved_p400_review_refresh_projects_pass_without_content_preflight(self) -> None:
+        module = load_frontend_run_module()
+        stage = "scene_set"
+        with tempfile.TemporaryDirectory(prefix="frontend_preapproved_p400_") as tmp:
+            run_dir = Path(tmp)
+            for critic_number in range(1, module.REVIEW_LOOP_CRITIC_COUNT + 1):
+                prompt_path = run_dir / module.critic_prompt_relpath(
+                    stage,
+                    1,
+                    critic_number,
+                )
+                prompt_path.parent.mkdir(parents=True, exist_ok=True)
+                prompt_path.write_text(
+                    "critic_focus: contract\n"
+                    f"Review input digest: `{'a' * 64}`\n",
+                    encoding="utf-8",
+                )
+
+            preflight = Mock(return_value=("content quality finding",))
+            critic = Mock(wraps=module._review_loop_critic_report)
+            with (
+                patch.object(
+                    module,
+                    "review_mode_is_bound_preapproved",
+                    return_value=True,
+                ),
+                patch.object(module, "materialize_review_loop_round"),
+                patch.object(module, "review_input_snapshot_issues", return_value=()),
+                patch.object(module, "review_input_digest", return_value="a" * 64),
+                patch.object(module, "_authoring_review_blocking_findings", preflight),
+                patch.object(module, "_review_loop_critic_report", critic),
+                patch.object(
+                    module,
+                    "render_aggregated_review",
+                    return_value="- status: passed\n",
+                ),
+                patch.object(module, "_write_run_text_nofollow"),
+                patch.object(module, "append_state_snapshot") as append_state,
+            ):
+                module._refresh_review_loop_artifacts(run_dir, (stage,))
+
+        preflight.assert_not_called()
+        self.assertEqual(critic.call_count, module.REVIEW_LOOP_CRITIC_COUNT)
+        self.assertTrue(
+            all(
+                call.kwargs["blocking_findings"] == ()
+                for call in critic.call_args_list
+            )
+        )
+        state_updates = append_state.call_args.args[1]
+        self.assertEqual(
+            state_updates["eval.scene_set.loop.review_mode"],
+            "deterministic_preapproval",
+        )
 
     def test_materialization_disk_preflight_rejects_106_mib_with_recovery_guidance(self) -> None:
         module = load_frontend_run_module()
@@ -2048,6 +2179,39 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             image_prompt_provider_ready=False,
         )
 
+    def test_cli_main_propagates_preapproved_review_mode(self) -> None:
+        module = load_frontend_run_module()
+        calls: list[dict[str, object]] = []
+
+        def fake_materialize(*args, **kwargs) -> None:
+            calls.append({"args": args, "kwargs": kwargs})
+
+        with (
+            patch.object(module, "materialize_run", fake_materialize),
+            patch.object(module, "prepare_grounding", Mock()),
+            patch.object(module, "_refresh_downstream_review_artifacts", Mock()),
+            patch.object(module, "run_pre_media_semantic_pipeline", AsyncMock()),
+            patch.object(module, "write_run_index", Mock()),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "toc-immersive-frontend-run.py",
+                    "--topic",
+                    "桃太郎",
+                    "--run-dir",
+                    "output/test_preapproved_cli",
+                    "--review-mode",
+                    "preapproved",
+                    "--materialize-only",
+                    "--skip-validation",
+                ],
+            ),
+        ):
+            module.main()
+
+        self.assertEqual(calls[0]["kwargs"]["review_mode"], "preapproved")
+
     def test_orchestration_results_match_completed_foundation_review_slots(self) -> None:
         module = load_frontend_run_module()
         with tempfile.TemporaryDirectory(prefix="frontend_orchestration_foundations_") as tmp:
@@ -2118,7 +2282,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         module = load_frontend_run_module()
         base_profile = module._duration_aware_profile(
             module._story_profile("桃太郎", "桃太郎", variant_seed="reviewed-foundation"),
-            target_duration_seconds=300,
+            target_duration_seconds=600,
         )
         reviewed_event = "審査で確定した出来事が、主人公を橋の向こうへ進ませる。"
         reviewed_research = {
@@ -6806,6 +6970,72 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 set(protagonist_timelines[0]["appearance_asset_ids"]),
                 required_appearance_ids,
                 f"scene{scene['scene_id']} protagonist appearance binding",
+            )
+
+    def test_cinderella_timeline_covers_every_character_required_by_generated_cuts(self) -> None:
+        module = load_frontend_run_module()
+        profile = module._duration_aware_profile(
+            module._story_profile(
+                "シンデレラ",
+                "シンデレラ",
+                variant_seed="シンデレラ_20260829_1330",
+            ),
+            target_duration_seconds=600,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            reviewed_research = module._build_research(
+                "シンデレラ",
+                run_dir,
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+            profile = module._profile_from_reviewed_research(
+                profile,
+                reviewed_research,
+            )
+            reviewed_story = module._build_story(
+                "シンデレラ",
+                run_dir,
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+            profile = module._profile_from_reviewed_story(
+                profile,
+                reviewed_story,
+            )
+            script, _manifest, _selectors = module._build_script_and_manifest(
+                "シンデレラ",
+                run_dir,
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+
+        for scene in script["scenes"]:
+            required_ids = {
+                str(character_id)
+                for cut in scene["cuts"]
+                for character_id in cut["cut_contract"]["asset_dependency"][
+                    "character_ids_required"
+                ]
+            }
+            timeline_ids = {
+                str(character["character_id"])
+                for character in scene["scene_character_state_timeline"][
+                    "characters"
+                ]
+            }
+            appearance_ids = {
+                str(character_id)
+                for character in scene["scene_character_state_timeline"][
+                    "characters"
+                ]
+                for character_id in character.get("appearance_asset_ids", [])
+            }
+            self.assertTrue(
+                required_ids.issubset(timeline_ids | appearance_ids),
+                f"scene{scene['scene_id']} missing "
+                f"{sorted(required_ids - timeline_ids - appearance_ids)}",
             )
 
     def test_twenty_minute_cinderella_one_beat_segments_have_distinct_cut_motion(self) -> None:

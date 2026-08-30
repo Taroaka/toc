@@ -97,6 +97,7 @@ from toc.scene_acceptance_contract import (
     validate_scene_set_preflight,
 )
 from toc.run_index import write_run_index as _write_run_index
+from toc.review_mode import review_mode_is_bound_preapproved
 from toc.run_root_binding import (
     bind_run_root,
     current_run_root_binding,
@@ -166,6 +167,7 @@ DOWNSTREAM_REVIEW_STAGES = (
 )
 CREATE_INPUT_SCHEMA_VERSION = "toc.create_input.v1"
 CREATE_INPUT_REL_PATH = Path("logs/orchestration/create_input.json")
+REVIEW_MODES = {"standard", "preapproved"}
 MIN_MATERIALIZATION_FREE_BYTES = 512 * 1024 * 1024
 SEMANTIC_PACK_STDERR_TAIL_CHARS = 4096
 _ACTIVE_MATERIALIZATION_ROOT: ContextVar[
@@ -217,6 +219,7 @@ def _write_create_input_contract(
     experience: str,
     source_run: Path | None,
     target_duration_seconds: int,
+    review_mode: str = "standard",
     expected_run_identity: PathIdentity | None = None,
 ) -> Path:
     """Persist the exact, non-derived input needed for deterministic resume."""
@@ -234,6 +237,8 @@ def _write_create_input_contract(
             "source_run is only valid for world_walk create input"
         )
     normalized_duration = normalize_target_duration(target_duration_seconds)
+    if review_mode not in REVIEW_MODES:
+        raise ValueError("review_mode must be standard or preapproved")
     source_run_rel = (
         source_run.relative_to(REPO_ROOT).as_posix()
         if source_run is not None
@@ -258,6 +263,7 @@ def _write_create_input_contract(
                 "experience": experience,
                 "source_run": source_run_rel,
                 "target_duration_seconds": normalized_duration,
+                "review_mode": review_mode,
             },
             ensure_ascii=False,
             indent=2,
@@ -12641,6 +12647,17 @@ def _build_script_and_manifest(
                     for cut_plan in cut_plans
                 ]
                 + _supporting_character_ids_for_scene(profile, idx)
+                + [
+                    _scene_acceptance_role_character_id(
+                        profile,
+                        scene_index=idx,
+                        role_id=str(role_id),
+                    )
+                    for beat in event_sequence
+                    if isinstance(beat, dict)
+                    for role_id in beat.get("required_roles", []) or []
+                    if str(role_id).strip()
+                ]
             )
         )
         scene_character_state_timeline = _scene_character_state_timeline_for_scaffold(
@@ -14411,6 +14428,7 @@ def _review_loop_critic_report(
     prompt_text: str,
     *,
     blocking_findings: tuple[str, ...] = (),
+    deterministic_preapproval: bool = False,
 ) -> str:
     focus_match = re.search(r"critic_focus:\s*([^\n]+)", prompt_text)
     focus = focus_match.group(1).strip() if focus_match else f"{stage}_critic_{critic_number}"
@@ -14432,6 +14450,11 @@ def _review_loop_critic_report(
             f"- review_input_digest: {digest}",
             f"- critic_focus: {focus}",
             f"- status: {status}",
+            *(
+                ["- review_provenance: deterministic_preapproval"]
+                if deterministic_preapproval
+                else []
+            ),
             "",
             "## Root Cause Review",
             f"この frontend-create run は {stage} の固定済み source revision を対象に deterministic preflight を実行した。",
@@ -14718,6 +14741,7 @@ def _refresh_review_loop_artifacts(
     run_dir: Path,
     stages: tuple[str, ...],
 ) -> None:
+    deterministic_preapproval = review_mode_is_bound_preapproved(run_dir)
     state_updates: dict[str, str] = {}
     blocking_findings_cache: dict[str, tuple[str, ...]] = {}
     source_fingerprint_cache: dict[tuple[object, ...], object] = {}
@@ -14786,13 +14810,20 @@ def _refresh_review_loop_artifacts(
             }
             else stage
         )
-        if preflight_cache_key not in blocking_findings_cache:
+        if (
+            not deterministic_preapproval
+            and preflight_cache_key not in blocking_findings_cache
+        ):
             blocking_findings_cache[preflight_cache_key] = (
                 _authoring_review_blocking_findings(run_dir, stage)
             )
         blocking_findings = (
             tuple(snapshot_issues)
-            + blocking_findings_cache[preflight_cache_key]
+            + (
+                ()
+                if deterministic_preapproval
+                else blocking_findings_cache[preflight_cache_key]
+            )
         )
         expected_digest = review_input_digest(run_dir=run_dir, stage=stage, round_number=1)
         critic_reports: list[str] = []
@@ -14804,6 +14835,7 @@ def _refresh_review_loop_artifacts(
                 critic_number,
                 prompt_text,
                 blocking_findings=blocking_findings,
+                deterministic_preapproval=deterministic_preapproval,
             )
             _write_run_text_nofollow(
                 run_dir,
@@ -14860,6 +14892,11 @@ def _refresh_review_loop_artifacts(
                 f"eval.{stage}.loop.current_round": "1",
                 f"eval.{stage}.loop.round_01.status": "passed" if aggregate_passed else "changes_requested",
                 f"eval.{stage}.loop.round_01.aggregated_review": str(aggregated_review_relpath(stage, 1)),
+                f"eval.{stage}.loop.review_mode": (
+                    "deterministic_preapproval"
+                    if deterministic_preapproval
+                    else "standard"
+                ),
             }
         )
     append_state_snapshot(run_dir / "state.txt", state_updates)
@@ -15095,6 +15132,7 @@ def materialize_run(
     run_dir: Path,
     stop_target: str,
     target_duration_seconds: int = 300,
+    review_mode: str = "standard",
     foundation_review_runner: Callable[[Path, str], None] | None = None,
     experience: str = "cinematic_story",
     source_run: Path | None = None,
@@ -15105,6 +15143,8 @@ def materialize_run(
     ) = None,
     world_walk_source_story_sha256: str | None = None,
 ) -> None:
+    if review_mode not in REVIEW_MODES:
+        raise ValueError("review_mode must be standard or preapproved")
     target_duration_seconds = normalize_target_duration(
         target_duration_seconds
     )
@@ -15173,6 +15213,7 @@ def materialize_run(
         experience=experience,
         source_run=source_run,
         target_duration_seconds=target_duration_seconds,
+        review_mode=review_mode,
         expected_run_identity=materialization_root_identity,
     )
     if (
@@ -15234,6 +15275,10 @@ def materialize_run(
             expected_root_identity=materialization_root_identity,
         )
     now = _now_iso()
+    preapproved_reviews = review_mode == "preapproved"
+    review_policy = "preapproved" if preapproved_reviews else "frontend"
+    required_review_gate = "skipped" if preapproved_reviews else "required"
+    optional_review_gate = "skipped" if preapproved_reviews else "optional"
     append_state_snapshot(
         run_dir / "state.txt",
         {
@@ -15245,23 +15290,37 @@ def materialize_run(
             "runtime.duration_gate.minimum_seconds": str(int(duration_plan["minimum_effective_seconds"])),
             "runtime.duration_plan.minimum_scene_count": str(duration_plan["minimum_scene_count"]),
             "runtime.duration_plan.minimum_narration_seconds": str(duration_plan["minimum_narration_seconds"]),
-            "runtime.foundation_semantic_review": "required" if foundation_review_runner else "not_run_direct_materialization",
+            "runtime.foundation_semantic_review": (
+                "preapproved"
+                if preapproved_reviews
+                else (
+                    "required"
+                    if foundation_review_runner
+                    else "not_run_direct_materialization"
+                )
+            ),
             "immersive.experience": experience,
             **(
                 {"immersive.source_run": source_run.relative_to(REPO_ROOT).as_posix()}
                 if source_run is not None
                 else {}
             ),
-            "runtime.review_policy": "frontend",
-            "review.policy.story": "required",
-            "review.policy.image": "required",
-            "review.policy.narration": "optional",
-            "gate.research_review": "required",
-            "gate.story_review": "required",
-            "gate.image_review": "required",
-            "gate.narration_review": "optional",
-            "review.research.status": "pending",
-            "review.story.status": "pending",
+            "runtime.review_policy": review_policy,
+            "runtime.review_mode": review_mode,
+            "review.policy.story": required_review_gate,
+            "review.policy.image": required_review_gate,
+            "review.policy.narration": optional_review_gate,
+            "gate.research_review": required_review_gate,
+            "gate.story_review": required_review_gate,
+            "gate.image_review": required_review_gate,
+            "gate.narration_review": optional_review_gate,
+            "review.research.status": (
+                "approved" if preapproved_reviews else "pending"
+            ),
+            "review.story.status": (
+                "approved" if preapproved_reviews else "pending"
+            ),
+            "review.image.status": "pending",
             "slot.p130.status": "pending",
             "slot.p230.status": "pending",
             "slot.p420.status": "pending",
@@ -15809,13 +15868,14 @@ def materialize_run(
             "runtime.stage_target": "p600",
             "runtime.stop_slot": stop_target,
             "runtime.scaffold.content_status": "authored",
-            "runtime.review_policy": "frontend",
-            "review.policy.story": "required",
-            "review.policy.image": "required",
-            "review.policy.narration": "optional",
-            "gate.research_review": "required",
-            "gate.story_review": "required",
-            "gate.narration_review": "optional",
+            "runtime.review_policy": review_policy,
+            "runtime.review_mode": review_mode,
+            "review.policy.story": required_review_gate,
+            "review.policy.image": required_review_gate,
+            "review.policy.narration": optional_review_gate,
+            "gate.research_review": required_review_gate,
+            "gate.story_review": required_review_gate,
+            "gate.narration_review": optional_review_gate,
             "immersive.experience": experience,
             "review.research.status": "approved" if foundation_review_runner is not None else "pending",
             "review.story.status": "approved" if foundation_review_runner is not None else "pending",
@@ -15827,7 +15887,7 @@ def materialize_run(
             "stage.asset.status": "awaiting_approval",
             "stage.scene_implementation.status": "awaiting_approval",
             "review.image.status": "pending",
-            "gate.image_review": "required",
+            "gate.image_review": required_review_gate,
         }
     )
     append_state_snapshot(run_dir / "state.txt", state_updates)
@@ -16054,6 +16114,15 @@ def main() -> None:
         default=300,
         help="Target video duration in seconds (300-1200).",
     )
+    parser.add_argument(
+        "--review-mode",
+        choices=sorted(REVIEW_MODES),
+        default="standard",
+        help=(
+            "standard runs external review agents; preapproved emits "
+            "digest-bound approved review artifacts without reviewer turns"
+        ),
+    )
     parser.add_argument("--materialize-only", action="store_true", help="Write text artifacts only; do not generate images or validate media.")
     parser.add_argument("--skip-validation", action="store_true")
     args = parser.parse_args()
@@ -16166,6 +16235,7 @@ def main() -> None:
             run_dir,
             materialize_stop_target,
             target_duration_seconds=target_duration_seconds,
+            review_mode=args.review_mode,
             foundation_review_runner=_run_foundation_semantic_review,
             experience=args.experience,
             source_run=source_run,

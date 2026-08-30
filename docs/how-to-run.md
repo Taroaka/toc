@@ -52,6 +52,32 @@ YouTube サムネイル用の prompt だけ作る場合:
 
 既存 run dir を参照して、作品内容に寄せたサムネ prompt を作る場合:
 
+### Frontend Create UI のレビューモード
+
+画像生成 app の「新しいToCを作成」ダイアログには `レビューモード` の選択欄がある。
+
+- `通常レビュー`（`standard`、既定）: external semantic reviewer と frontend human review を
+  実行する。画像生成後は p680 で `review.image.status=pending` /
+  `gate.image_review=required` のままユーザーへ handoff する。
+- `全レビュー済み（審査を省略）`（`preapproved`）: ユーザーが明示的に選んだ場合だけ使用する。external
+  semantic reviewer turn と frontend human reviewer turn を省略し、各 review pack / digest
+  から `deterministic_preapproval` report を作る。pack、digest、deterministic validation、
+  request-bound provenance、生成 output の存在・decode・completeness は省略しない。
+
+作成モード（通常 / scene storyboard / 世界観散歩）を選んだあと、同じダイアログで
+`レビューモード`を選択して作成する。選択値は request の `review_mode` として送られ、run 内の
+`logs/orchestration/create_input.json`（`toc.create_input.v1`）へ保存される。preapproved は
+作成後に mode を差し替えられず、入力契約との不一致は停止する。
+
+UI の preapproved 警告は「外部レビューエージェントを呼ばず、各審査を承認済みとして進めます。
+構造・参照・生成ファイルの検証は実行されます。」であり、審査 artifact や deterministic check
+を削除する意味ではない。
+
+preapproved の p680 は、生成前に approved へ飛ばない。media generation と terminal
+validation が成功した時だけ `slot.p680.status=done`、`review.image.status=approved`、
+`gate.image_review=skipped`（p670 も `skipped`）になる。standard は
+`slot.p680.status=awaiting_approval` のまま停止する。
+
 ### Frontend Create Routeをヘッドレスで検証する
 
 フロントUIを介さず、フロントの作成ボタンと同じ backend endpoint `/api/image-gen/runs/create` から新規runを作る場合:
@@ -64,6 +90,17 @@ python scripts/toc-create-run-headless.py \
 ```
 
 画像生成はデフォルトで有効。設計・manifest・requestだけを高速に確認したい場合だけ `--no-images` を付ける。
+
+明示的な preapproved create をヘッドレスで再現する場合は、`--review-mode preapproved` を
+付ける。外部 reviewer turn は起動しないが、p680 の deterministic / provenance / output
+validation は実行される。
+
+```bash
+python scripts/toc-create-run-headless.py \
+  --title "シンデレラ" \
+  --source "シンデレラ" \
+  --review-mode preapproved
+```
 
 既にbackend serverを起動している場合は、in-processではなく実サーバーへ投げられる。
 
@@ -173,12 +210,12 @@ output/<topic>_<timestamp>/
 - 当面は `video_manifest.md` を入力に素材生成→結合でフローを検証する
 - 具体は `docs/implementation/video-integration.md` を参照
 - 画像生成の review 正本は `video_manifest.md` 自体
-- `review-image-prompt-story-consistency.py` は manifest を直接監査し、結果を `image_generation.review` へ書き戻してから画像生成へ進む
+- `standard` では `review-image-prompt-story-consistency.py` が manifest を直接監査し、結果を `image_generation.review` へ書き戻してから画像生成へ進む。明示 `review_mode=preapproved` では external semantic / human reviewer turn を省略するが、canonical review pack / digest と `deterministic_preapproval` report、同じ deterministic checks を materialize / 検証してから進む
   - hard gate は missing contract / missing ids / required prompt block 欠落 / reveal 破り / self-contained 違反のような構造的問題に寄せる
   - `must_avoid` の素朴な文字列一致、`target_focus` の語一致、`production_readiness` の弱さは warning として残してよい
-- reusable asset が多い run では、cut 画像生成の前に `asset_inventory.md` と `asset_plan.md` を作って review / approve してから asset を生成する
+- reusable asset が多い run では、standard は cut 画像生成の前に `asset_inventory.md` と `asset_plan.md` を作って review / approve してから asset を生成する。preapproved create では external reviewer turn を省略できるが、asset pack / digest、参照整合、生成 output の deterministic validation は必須とする
   - p520 では、この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still を `asset_inventory.md` に網羅する
-  - p540 では、review agent が漏れ・矛盾・参照誤用・lane 誤りを確認する cycle を最大 1 round 回す
+  - p540 では、standard は review agent が漏れ・矛盾・参照誤用・lane 誤りを確認する cycle を最大 1 round 回す。preapproved では外部 reviewer turn を省略し、同じ pack / digest に対する deterministic checks を実行する
   - character reference は、全身が見える front / side / back の 3 面図を基本にする
   - p550 の `asset_generation_requests.md` では、`物語「シンデレラ」の scene10` / `scene30_cut01` / `この画像は物語「シンデレラ」の一場面` のような制作管理メタを prompt 本文に書かず、`灰の台所。石床、大きな暖炉、薄い灰、朝の青灰色の光...` のように具体的に見える対象を書く
 - image の rerun で比較案が欲しい場合だけ、`generate-assets-from-manifest.py --force --test-image-variants N` を使って `assets/test/` に exploratory variant を出す
@@ -241,7 +278,7 @@ output/<topic>_<timestamp>/
   - `p400|400`: `p450` script handoff / skeleton manifest materialization まで
   - `p450|450|script`: skeleton `video_manifest.md` まで
   - `p500|500|asset`: `p570` asset continuity / human review handoff まで
-  - `p600|600|scene_implementation|image`: `p680` image review handoff まで
+  - `p600|600|scene_implementation|image`: standard は `p680` image review handoff、明示 preapproved は deterministic validation 後の `p680` terminal まで
   - `p700|700|narration`: `p750` audio QA / human review handoff まで
   - `p800|800|video_generation`: `p850` video review / exclusions handoff まで
   - `p900|900|render|video`: `p930` final QA / runtime handoff まで
@@ -433,7 +470,8 @@ python scripts/generate-assets-from-manifest.py \
 # 既定値:
 # - video generation は 1080p
 # - provider 音声は sound off（別途 narration/BGM を render で合成）
-# - 画像生成前に story/script review を自動実行し、missing character_ids は補完してから進む
+# - standard の画像生成前は story/script review を自動実行し、missing character_ids は補完してから進む
+# - 明示 preapproved create は external semantic / human reviewer turn を省略するが、review pack / digest、deterministic / provenance / output validation を実行する
 # - 音声生成前に narration review を自動実行し、未正規化 text や v2 非対応 tag を止める
 # - 追加した無音 cut は `audio.narration.tool: "silent"` だけでなく `audio.narration.silence_contract` がないと止まる
 # - story still は `still_image_plan.mode: generate_still` だけを既定で生成する
@@ -477,12 +515,15 @@ python scripts/review-video-stage.py \
   - この script は prompt を stdout に出すだけでなく、`logs/review/image_prompt.subagent_prompt.md` に保存し、`state.txt` に `review.image_prompt.subagent.prompt=...` を追記する
   - judgment subagent は content 生成や schema 判定をせず、story/script/manifest の意味整合と revision 優先度だけを見る
 - run 開始時に review policy を固定する
-  - `review.policy.story=required|optional`
-  - `review.policy.image=required|optional`
-  - `review.policy.narration=required|optional`
+  - `runtime.review_mode=standard|preapproved`（`logs/orchestration/create_input.json` の `review_mode` と一致）
+  - `runtime.review_policy=frontend|preapproved`
+  - `review.policy.story=required|optional|skipped`
+  - `review.policy.image=required|optional|skipped`
+  - `review.policy.narration=required|optional|skipped`
   - 既定は `required`
   - `--review-policy drafts` は 3 つすべてを `optional` に倒す
   - 必要なら `--story-review optional` のように個別 override する
+  - `skipped` は明示 frontend create の `review_mode=preapproved` だけで使い、external reviewer turn の省略を記録する。pack / digest / deterministic / provenance / output validation は省略しない
 - 物語の矛盾ソースを同一シーン/設定として混成（ハイブリッド）する場合は、確定前に人間承認を取る（運用）
   - 承認: `python scripts/toc-state.py approve-hybridization --run-dir output/<topic>_<timestamp> --note "OK"`
 - 画像 prompt review の finding を人間判断で許容する場合は、対象 cut の `human_review_ok` を true にする
@@ -555,6 +596,23 @@ legacy compatibility keys:
   - `review.narration.status=pending`
 
 この状態では、**次工程へ進んではならない**。
+
+ただし、frontend create の request で `review_mode=preapproved` を明示した場合は、外部
+semantic reviewer turn と frontend human review turn を作らずに進める。これは review を無条件に
+無効化する設定ではない。canonical pack / digest と `deterministic_preapproval` report を作り、
+grounding、schema、参照整合、request-bound provenance、生成 output の存在・decode・
+fixed-slot completeness を検証する。media generation 前は `gate.image_review=skipped` でも
+`review.image.status=pending` のままとし、p680 terminal validation 後だけ次を記録する。
+
+```text
+slot.p670.status=skipped
+slot.p680.status=done
+review.image.status=approved
+gate.image_review=skipped
+```
+
+`standard` は従来どおり `gate.image_review=required` /
+`review.image.status=pending` / `slot.p680.status=awaiting_approval` で frontend handoff する。
 
 例:
 

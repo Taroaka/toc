@@ -67,6 +67,14 @@ def _agent_message_transcript(report_text: str) -> list[dict[str, object]]:
 
 
 class ImagePromptSemanticPackShardTests(unittest.TestCase):
+    def test_asset_entry_id_uses_stable_asset_id(self) -> None:
+        builder = _load_pack_builder()
+
+        self.assertEqual(
+            builder._entry_id({"asset_id": "asset:hero"}, 1),
+            "asset:hero",
+        )
+
     def test_plan_groups_cut_and_scene_composite_entries_with_exact_deterministic_coverage(self) -> None:
         builder = _load_pack_builder()
         entries = [
@@ -110,6 +118,42 @@ class ImagePromptSemanticPackShardTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "cannot assign entry"):
             builder.image_prompt_scene_shard_plan([{"selector": "orphan_cut"}])
+
+    def test_plan_keeps_dotted_scene_ids_in_separate_exact_shards(self) -> None:
+        builder = _load_pack_builder()
+        entries = [
+            {"selector": "scene3.2_cut01", "scene_id": "scene3.2"},
+            {"selector": "scene3.1_cut02", "scene_id": "scene3.1"},
+            {"selector": "scene3.2", "scene_id": "scene3.2"},
+            {"selector": "scene3.1", "scene_id": "scene3.1"},
+        ]
+
+        plan = builder.image_prompt_scene_shard_plan(entries)
+
+        self.assertEqual(
+            [shard["shard_id"] for shard in plan["shards"]],
+            ["scene_3.1", "scene_3.2"],
+        )
+        self.assertEqual(
+            [shard["scene_id"] for shard in plan["shards"]],
+            ["3.1", "3.2"],
+        )
+        self.assertEqual(
+            [shard["entry_ids"] for shard in plan["shards"]],
+            [
+                ["scene3.1_cut02", "scene3.1"],
+                ["scene3.2_cut01", "scene3.2"],
+            ],
+        )
+        self.assertEqual(
+            plan["coverage"]["assigned_entry_ids"],
+            [
+                "scene3.1_cut02",
+                "scene3.1",
+                "scene3.2_cut01",
+                "scene3.2",
+            ],
+        )
 
     def test_materialization_writes_scene_local_artifacts_and_scope_manifest(self) -> None:
         builder = _load_pack_builder()

@@ -369,6 +369,7 @@ type RunProgress = {
   status: string;
   runtimeStage: string;
   reviewPolicy: string;
+  reviewMode: CreateReviewMode;
   pendingGates: string[];
   currentStage: RunStage | null;
   stages: RunStage[];
@@ -379,6 +380,7 @@ type RunProgress = {
 };
 
 type CreateRunMode = 'normal' | 'scene_storyboard' | 'world_walk';
+type CreateReviewMode = 'standard' | 'preapproved';
 
 type CreateRunJob = {
   jobId: string;
@@ -387,6 +389,7 @@ type CreateRunJob = {
   status: 'running' | 'completed' | 'failed' | 'paused';
   title: string;
   createMode?: CreateRunMode;
+  reviewMode?: CreateReviewMode;
   sourceRunId?: string;
   sourceRunPath?: string;
   targetDurationSeconds?: number;
@@ -1137,6 +1140,7 @@ function RunProgressPanel({ progress }: { progress: RunProgress | null }) {
       </Box>
       <Typography variant="caption" color="text.secondary">
         {progress.runtimeStage ? `runtime.stage: ${runtimeStageLabel(progress.runtimeStage)}` : 'state.txt / p000_index.md の進捗を表示しています'}
+        {progress.reviewMode === 'preapproved' ? ' / 全レビュー済みモード' : ''}
       </Typography>
       <Divider flexItem />
       <Box className="stageCatalog" aria-label="Pステージと小番号一覧">
@@ -2337,6 +2341,7 @@ function App() {
   const [createRunTitle, setCreateRunTitle] = useState('');
   const [createRunSource, setCreateRunSource] = useState('');
   const [createRunMode, setCreateRunMode] = useState<CreateRunMode>('normal');
+  const [createRunReviewMode, setCreateRunReviewMode] = useState<CreateReviewMode>('standard');
   const [createRunSourceRunId, setCreateRunSourceRunId] = useState('');
   const [worldWalkSources, setWorldWalkSources] = useState<WorldWalkSourceRun[]>([]);
   const [worldWalkSourcesBusy, setWorldWalkSourcesBusy] = useState(false);
@@ -2612,7 +2617,11 @@ function App() {
     }
   }, []);
 
-  const loadRunRequests = useCallback(async (targetRunId: string, targetKind: ViewKind) => {
+  const loadRunRequests = useCallback(async (
+    targetRunId: string,
+    targetKind: ViewKind,
+    includeNarration = true,
+  ) => {
     const targetScopeKey = imageRequestScopeKey(targetRunId, targetKind);
     const requestEpoch = loadRunRequestsEpochRef.current + 1;
     loadRunRequestsEpochRef.current = requestEpoch;
@@ -2631,7 +2640,7 @@ function App() {
       let narrationById: Map<string, NarrationManifestItem> | undefined;
       let audioSetHash = '';
       let progress = data.progress;
-      if (targetKind === 'scene') {
+      if (targetKind === 'scene' && includeNarration) {
         try {
           const narrationData = await jsonFetch<{ items: NarrationManifestItem[]; audioSetHash: string; progress: RunProgress }>(
             `/api/image-gen/narration-items?run_id=${encodeURIComponent(targetRunId)}`,
@@ -2710,8 +2719,12 @@ function App() {
 
   useEffect(() => {
     if (!runId) return;
-    void loadRunRequests(runId, requestKind);
-  }, [loadRunRequests, requestKind, runId]);
+    void loadRunRequests(
+      runId,
+      requestKind,
+      workspaceMode !== 'image',
+    );
+  }, [loadRunRequests, requestKind, runId, workspaceMode]);
 
   useEffect(() => {
     if (!runId || workspaceMode !== 'video' || videoPromptBusy) return;
@@ -4309,11 +4322,13 @@ function App() {
           source_run_id: createRunSourceRunId,
           title: title || null,
           target_duration_seconds: targetDurationSeconds,
+          review_mode: createRunReviewMode,
         }
       : {
           title,
           source: createRunSource.trim() || null,
           target_duration_seconds: targetDurationSeconds,
+          review_mode: createRunReviewMode,
         };
     setCreateRunOpen(false);
     setCreateRunBusy(true);
@@ -4341,6 +4356,7 @@ function App() {
       setCreateRunSource('');
       setCreateRunSourceRunId('');
       setCreateRunMode('normal');
+      setCreateRunReviewMode('standard');
       setCreateRunTargetDurationSeconds('300');
       setCreateRunStatus(
         mode === 'world_walk'
@@ -5085,6 +5101,27 @@ function App() {
                   <MenuItem value="scene_storyboard">scene単位ストーリーボード式（尺に応じて分割）</MenuItem>
                   <MenuItem value="world_walk">世界観散歩</MenuItem>
                 </Select>
+              </FormControl>
+              <FormControl fullWidth size="small">
+                <InputLabel>レビューモード</InputLabel>
+                <Select
+                  label="レビューモード"
+                  value={createRunReviewMode}
+                  disabled={createRunBusy}
+                  onChange={(event) => {
+                    setCreateRunReviewMode(event.target.value as CreateReviewMode);
+                    setCreateRunError(null);
+                    setCreateRunStatus(null);
+                  }}
+                >
+                  <MenuItem value="standard">通常レビュー</MenuItem>
+                  <MenuItem value="preapproved">全レビュー済み（審査を省略）</MenuItem>
+                </Select>
+                {createRunReviewMode === 'preapproved' && (
+                  <Typography variant="caption" color="warning.main" sx={{ mt: 0.75 }}>
+                    外部レビューエージェントを呼ばず、各審査を承認済みとして進めます。構造・参照・生成ファイルの検証は実行されます。
+                  </Typography>
+                )}
               </FormControl>
               {createRunMode === 'world_walk' && (
                 <FormControl

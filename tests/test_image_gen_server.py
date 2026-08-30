@@ -206,6 +206,72 @@ def write_semantic_review_artifacts(run_dir: Path, stage: str, *, entry_count: i
     )
 
 
+def write_preapproved_review_mode_contract(run_dir: Path) -> None:
+    image_gen_app.append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "runtime.review_policy": "preapproved",
+            "runtime.review_mode": "preapproved",
+        },
+    )
+    path = run_dir / "logs/orchestration/create_input.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "toc.create_input.v1",
+                "review_mode": "preapproved",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def mark_preapproved_semantic_provenance(run_dir: Path) -> None:
+    updates: dict[str, str] = {}
+    for stage in image_gen_app.PREAPPROVED_CREATE_REVIEW_STAGES:
+        updates.update(
+            {
+                f"review.semantic.{stage}.mode": "preapproved",
+                f"review.semantic.{stage}.report.source": (
+                    "deterministic_preapproval"
+                ),
+                f"review.semantic.{stage}.transport.status": (
+                    "skipped_preapproved"
+                ),
+                f"review.semantic.{stage}.repair.status": (
+                    "skipped_preapproved"
+                ),
+            }
+        )
+        if stage in {"scene_set", "scene_detail", "image_prompt"}:
+            updates[f"review.semantic.{stage}.shards.status"] = (
+                "skipped_preapproved"
+            )
+        report_path = (
+            run_dir / image_gen_app.semantic_review_relpaths(stage)["report"]
+        )
+        report_text = report_path.read_text(encoding="utf-8")
+        if "deterministic_preapproval" not in report_text:
+            if "notes: []" in report_text:
+                report_text = report_text.replace(
+                    "notes: []",
+                    "notes: [deterministic_preapproval]",
+                    1,
+                )
+            else:
+                report_text = (
+                    report_text.rstrip()
+                    + "\nnotes: [deterministic_preapproval]\n"
+                )
+            report_path.write_text(
+                report_text,
+                encoding="utf-8",
+            )
+    image_gen_app.append_state_snapshot(run_dir / "state.txt", updates)
+
+
 def write_failed_semantic_review_artifacts(
     run_dir: Path,
     stage: str,
@@ -1200,6 +1266,19 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(payload["stop_target"], "p650")
         self.assertIn("Run the canonical p100-p650 frontend-review workflow in one skill invocation.", command)
 
+    def test_toc_immersive_command_supports_preapproved_review_mode(self) -> None:
+        command = _toc_immersive_command(
+            topic="桃太郎",
+            source="鬼ヶ島の資料",
+            run_id="桃太郎_20260829_1200",
+            review_mode="preapproved",
+        )
+
+        payload = json.loads(command.split("Request JSON:\n", 1)[1])
+        self.assertEqual(payload["review_policy"], "preapproved")
+        self.assertEqual(payload["review_mode"], "preapproved")
+        self.assertIn("Treat every review gate as preapproved", command)
+
     def test_toc_world_walk_command_includes_source_run_payload(self) -> None:
         command = _toc_world_walk_command(
             topic="桃太郎の世界観を散歩してみた",
@@ -1368,6 +1447,7 @@ class ImageGenParserTests(unittest.TestCase):
             )
             with (run_dir / "state.txt").open("a", encoding="utf-8") as state_file:
                 state_file.write(
+                    "slot.p550.status=pending\n"
                     "slot.p650.status=pending\n"
                     "review.image_prompt.request_freeze.status=reviewed_draft\n"
                     f"review.image_prompt.request_freeze.reviewed_request_revision={deferred_scene_snapshot.request_revision}\n"
@@ -4663,7 +4743,12 @@ class ImageGenParserTests(unittest.TestCase):
                     with TestClient(app) as client:
                         response = client.post(
                             "/api/image-gen/runs/create/storyboard",
-                            json={"title": "桃太郎", "source": "桃太郎", "target_duration_seconds": 1200},
+                            json={
+                                "title": "桃太郎",
+                                "source": "桃太郎",
+                                "target_duration_seconds": 1200,
+                                "review_mode": "preapproved",
+                            },
                         )
 
             payload = response.json()
@@ -4671,14 +4756,467 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["createMode"], "scene_storyboard")
         self.assertEqual(payload["targetDurationSeconds"], 1200)
+        self.assertEqual(payload["reviewMode"], "preapproved")
         self.assertTrue(payload["runId"].startswith("桃太郎_storyboard_"))
         self.assertEqual(payload["path"], f"output/{payload['runId']}")
         self.assertEqual(scheduled[0]["run_id"], payload["runId"])
         self.assertEqual(scheduled[0]["create_mode"], "scene_storyboard")
         self.assertEqual(scheduled[0]["target_duration_seconds"], 1200)
+        self.assertEqual(scheduled[0]["review_mode"], "preapproved")
         self.assertTrue(scheduled[0]["generate_images"])
         create_start = next(call for call in debug_log.call_args_list if call.kwargs.get("operation") == "create_job_start")
         self.assertEqual(create_start.kwargs["request"]["targetDurationSeconds"], 1200)
+
+    def test_create_run_endpoint_propagates_preapproved_review_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scheduled: list[dict[str, Any]] = []
+
+            def fake_run_create_job(*_args: Any, **kwargs: Any):
+                scheduled.append(kwargs)
+
+                async def noop() -> None:
+                    return None
+
+                return noop()
+
+            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+                with (
+                    patch("server.image_gen_app.ROOT", root),
+                    patch("server.image_gen_app._create_jobs", {}),
+                    patch("server.image_gen_app._run_create_job", fake_run_create_job),
+                ):
+                    with TestClient(app) as client:
+                        response = client.post(
+                            "/api/image-gen/runs/create",
+                            json={
+                                "title": "桃太郎",
+                                "review_mode": "preapproved",
+                            },
+                        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["reviewMode"], "preapproved")
+        self.assertEqual(scheduled[0]["review_mode"], "preapproved")
+
+    def test_create_run_endpoint_rejects_unknown_review_mode(self) -> None:
+        with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/image-gen/runs/create",
+                    json={"title": "桃太郎", "review_mode": "skip_checks"},
+                )
+
+        self.assertEqual(response.status_code, 422)
+
+    def test_all_create_request_models_default_to_standard_review_mode(self) -> None:
+        self.assertEqual(
+            image_gen_app.CreateRunRequest(title="桃太郎").review_mode,
+            "standard",
+        )
+        self.assertEqual(
+            image_gen_app.CreateStoryboardRunRequest(
+                title="桃太郎"
+            ).review_mode,
+            "standard",
+        )
+        self.assertEqual(
+            image_gen_app.CreateWorldWalkRunRequest(
+                source_run_id="桃太郎_20260829_1200"
+            ).review_mode,
+            "standard",
+        )
+
+    def test_preapproved_semantic_review_writes_current_pass_without_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            write_preapproved_review_mode_contract(run_dir)
+            write_semantic_review_artifacts(run_dir, "story")
+            paths = image_gen_app.semantic_review_relpaths("story")
+            (run_dir / paths["report"]).unlink()
+            identity = (run_dir.stat().st_dev, run_dir.stat().st_ino)
+            client_factory = Mock(side_effect=AssertionError("review agent must not run"))
+
+            with bind_run_root(run_dir, expected_identity=identity):
+                with (
+                    patch(
+                        "server.image_gen_app._run_bound_subprocess",
+                        return_value=Mock(returncode=0, stdout="", stderr=""),
+                    ),
+                    patch(
+                        "server.image_gen_app.create_codex_app_server_client",
+                        client_factory,
+                    ),
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review(
+                            "preapproved-test",
+                            run_dir=run_dir,
+                            stage="story",
+                        )
+                    )
+
+            result = image_gen_app.check_semantic_review(run_dir, "story")
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+            report = (run_dir / paths["report"]).read_text(encoding="utf-8")
+
+        self.assertTrue(result.passed, result.errors)
+        self.assertIn("deterministic_preapproval", report)
+        self.assertEqual(
+            state["review.semantic.story.report.source"],
+            "deterministic_preapproval",
+        )
+        client_factory.assert_not_called()
+
+    def test_preapproved_image_prompt_draft_uses_integrity_not_content_verdict(self) -> None:
+        run_dir = Path("/tmp/preapproved-image-prompt-draft")
+        with (
+            patch(
+                "server.image_gen_app._assert_image_prompt_request_revision_unchanged",
+                return_value="revision-1",
+            ),
+            patch(
+                "server.image_gen_app._review_mode_is_preapproved",
+                return_value=True,
+            ),
+            patch(
+                "server.image_gen_app._deterministic_image_prompt_review_integrity_errors",
+                return_value=[],
+            ) as integrity_gate,
+            patch(
+                "server.image_gen_app._deterministic_image_prompt_hard_gate_errors",
+                return_value=["content finding"],
+            ) as content_gate,
+            patch(
+                "server.image_gen_app.check_semantic_review",
+                return_value=Mock(passed=True, errors=()),
+            ),
+            patch(
+                "server.image_gen_app._semantic_review_report_sources_are_current",
+                return_value=True,
+            ),
+            patch(
+                "server.image_gen_app._project_image_prompt_reviews_to_p630_p640"
+            ),
+            patch("server.image_gen_app.append_state_snapshot"),
+        ):
+            image_gen_app._mark_image_prompt_draft_reviewed(
+                run_dir,
+                request_revision="revision-1",
+            )
+
+        integrity_gate.assert_called_once_with(run_dir)
+        content_gate.assert_not_called()
+
+    def test_preapproved_image_prompt_draft_keeps_integrity_fail_closed(self) -> None:
+        run_dir = Path("/tmp/preapproved-image-prompt-draft")
+        with (
+            patch(
+                "server.image_gen_app._assert_image_prompt_request_revision_unchanged",
+                return_value="revision-1",
+            ),
+            patch(
+                "server.image_gen_app._review_mode_is_preapproved",
+                return_value=True,
+            ),
+            patch(
+                "server.image_gen_app._deterministic_image_prompt_review_integrity_errors",
+                return_value=["stale digest"],
+            ),
+            self.assertRaisesRegex(RuntimeError, "stale digest"),
+        ):
+            image_gen_app._mark_image_prompt_draft_reviewed(
+                run_dir,
+                request_revision="revision-1",
+            )
+
+    def test_preapproved_p680_handoff_is_recorded_as_approved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260829_1200"
+            run_dir = root / "output" / run_id
+            run_dir.mkdir(parents=True)
+            write_preapproved_review_mode_contract(run_dir)
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch("server.image_gen_app.load_request_items", return_value=[]),
+                patch(
+                    "server.image_gen_app._finalize_p600_supervisor_result",
+                    Mock(),
+                ) as finalize,
+            ):
+                image_gen_app._mark_image_generation_review_ready(run_id)
+
+            state = image_gen_app.parse_state_file(run_dir / "state.txt")
+
+        self.assertEqual(state["slot.p680.status"], "done")
+        self.assertEqual(state["review.image.status"], "approved")
+        self.assertEqual(state["gate.image_review"], "skipped")
+        self.assertEqual(
+            finalize.call_args.kwargs["terminal_status"],
+            "done",
+        )
+
+    def test_preapproved_semantic_review_rejects_blocking_deterministic_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            write_preapproved_review_mode_contract(run_dir)
+            write_semantic_review_artifacts(run_dir, "story")
+            paths = image_gen_app.semantic_review_relpaths("story")
+            scope_path = run_dir / paths["scope"]
+            scope = json.loads(scope_path.read_text(encoding="utf-8"))
+            scope["diagnostics"] = {
+                "blocking_quality_issue_count": 1,
+                "blocking_quality_issue_entries": ["story:foundation"],
+            }
+            scope_path.write_text(
+                json.dumps(scope, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / paths["report"]).unlink()
+            identity = (run_dir.stat().st_dev, run_dir.stat().st_ino)
+            client_factory = Mock(side_effect=AssertionError("review agent must not run"))
+
+            with bind_run_root(run_dir, expected_identity=identity):
+                with (
+                    patch(
+                        "server.image_gen_app._run_bound_subprocess",
+                        return_value=Mock(returncode=0, stdout="", stderr=""),
+                    ),
+                    patch(
+                        "server.image_gen_app.create_codex_app_server_client",
+                        client_factory,
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeError,
+                        "blocking deterministic diagnostics",
+                    ),
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review(
+                            "preapproved-test",
+                            run_dir=run_dir,
+                            stage="story",
+                        )
+                    )
+
+        client_factory.assert_not_called()
+
+    def test_preapproved_p680_still_requires_generated_scene_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260829_1300"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            write_preapproved_review_mode_contract(run_dir)
+            mark_preapproved_semantic_provenance(run_dir)
+            image_gen_app.append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "slot.p680.status": "done",
+                    "review.image.status": "approved",
+                    "gate.image_review": "skipped",
+                },
+            )
+            (run_dir / "assets/scenes/scene10_cut2.png").unlink()
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._validate_p680_visual_quality",
+                    Mock(),
+                ),
+                self.assertRaisesRegex(RuntimeError, "generation incomplete"),
+            ):
+                image_gen_app._validate_frontend_create_run(
+                    run_id,
+                    strict_visual_quality=True,
+                )
+
+    def test_preapproved_p680_complete_run_passes_terminal_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260829_1400"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            write_preapproved_review_mode_contract(run_dir)
+            mark_preapproved_semantic_provenance(run_dir)
+            image_gen_app.append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "slot.p680.status": "done",
+                    "review.image.status": "approved",
+                    "gate.image_review": "skipped",
+                },
+            )
+            terminal_validator = Mock()
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._validate_p680_visual_quality",
+                    terminal_validator,
+                ),
+            ):
+                image_gen_app._validate_frontend_create_run(
+                    run_id,
+                    strict_visual_quality=True,
+                )
+
+        terminal_validator.assert_called_once_with(
+            run_dir.resolve(),
+            mode="terminal",
+        )
+
+    def test_preapproved_p680_rejects_missing_preapproval_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "桃太郎_20260829_1500"
+            run_dir = write_valid_p680_artifacts(root, run_id)
+            write_preapproved_review_mode_contract(run_dir)
+            image_gen_app.append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "slot.p680.status": "done",
+                    "review.image.status": "approved",
+                    "gate.image_review": "skipped",
+                },
+            )
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app._validate_p680_visual_quality",
+                    Mock(),
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "preapproved review provenance is incomplete",
+                ),
+            ):
+                image_gen_app._validate_frontend_create_run(
+                    run_id,
+                    strict_visual_quality=True,
+                )
+
+    def test_preapproved_mode_cannot_be_enabled_by_state_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            write_preapproved_review_mode_contract(run_dir)
+            create_input_path = (
+                run_dir / "logs/orchestration/create_input.json"
+            )
+            create_input = json.loads(
+                create_input_path.read_text(encoding="utf-8")
+            )
+            create_input["review_mode"] = "standard"
+            create_input_path.write_text(
+                json.dumps(create_input) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "not bound to create_input",
+            ):
+                image_gen_app._review_mode_is_preapproved(run_dir)
+
+    def test_preapproved_semantic_review_rejects_malformed_deterministic_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            write_preapproved_review_mode_contract(run_dir)
+            write_semantic_review_artifacts(run_dir, "story")
+            paths = image_gen_app.semantic_review_relpaths("story")
+            scope_path = run_dir / paths["scope"]
+            scope = json.loads(scope_path.read_text(encoding="utf-8"))
+            scope["diagnostics"] = {
+                "blocking_quality_issue_count": "0",
+                "blocking_quality_issue_entries": [],
+            }
+            scope_path.write_text(
+                json.dumps(scope) + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / paths["report"]).unlink()
+            identity = (run_dir.stat().st_dev, run_dir.stat().st_ino)
+
+            with bind_run_root(run_dir, expected_identity=identity):
+                with (
+                    patch(
+                        "server.image_gen_app._run_bound_subprocess",
+                        return_value=Mock(returncode=0, stdout="", stderr=""),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeError,
+                        "malformed deterministic diagnostics",
+                    ),
+                ):
+                    asyncio.run(
+                        image_gen_app._run_semantic_review(
+                            "preapproved-test",
+                            run_dir=run_dir,
+                            stage="story",
+                        )
+                    )
+
+    def test_preapproved_mode_skips_agents_for_every_create_semantic_stage(self) -> None:
+        stages = (
+            "research",
+            "story",
+            "scene_set",
+            "scene_detail",
+            "cut_blueprint",
+            "asset_plan",
+            "image_prompt",
+        )
+        for stage in stages:
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as tmp:
+                run_dir = Path(tmp) / "run"
+                run_dir.mkdir()
+                write_preapproved_review_mode_contract(run_dir)
+                write_semantic_review_artifacts(run_dir, stage)
+                paths = image_gen_app.semantic_review_relpaths(stage)
+                (run_dir / paths["report"]).unlink()
+                identity = (run_dir.stat().st_dev, run_dir.stat().st_ino)
+                client_factory = Mock(
+                    side_effect=AssertionError("review agent must not run")
+                )
+                with bind_run_root(run_dir, expected_identity=identity):
+                    with (
+                        patch(
+                            "server.image_gen_app._run_bound_subprocess",
+                            return_value=Mock(
+                                returncode=0,
+                                stdout="",
+                                stderr="",
+                            ),
+                        ),
+                        patch(
+                            "server.image_gen_app.create_codex_app_server_client",
+                            client_factory,
+                        ),
+                        patch(
+                            "server.image_gen_app._prepare_image_prompt_request_revision_for_review",
+                            return_value="request-revision",
+                        ),
+                        patch(
+                            "server.image_gen_app._mark_image_prompt_request_freeze_done",
+                            Mock(),
+                        ),
+                    ):
+                        asyncio.run(
+                            image_gen_app._run_semantic_review(
+                                "preapproved-all-stages",
+                                run_dir=run_dir,
+                                stage=stage,
+                            )
+                        )
+
+                result = image_gen_app.check_semantic_review(run_dir, stage)
+                self.assertTrue(result.passed, (stage, result.errors))
+                client_factory.assert_not_called()
 
     def test_create_storyboard_run_endpoint_rejects_p650(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5145,9 +5683,57 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(progress["totalCount"], 6)
         self.assertEqual(progress["percent"], 69)
         self.assertEqual(progress["pendingGates"], ["video_review"])
+        self.assertEqual(progress["reviewMode"], "standard")
         self.assertEqual(progress["slots"][1]["code"], "p550")
         self.assertEqual(progress["slots"][1]["state"], "pending")
         self.assertIn("asset_generation_requests.md", progress["slots"][1]["plannedArtifacts"])
+
+    def test_display_progress_does_not_reload_or_validate_request_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "state.txt").write_text(
+                "topic=高速表示検証\nstatus=P650\nslot.p650.status=done\nslot.p660.status=failed\n",
+                encoding="utf-8",
+            )
+            (run_dir / "asset_generation_requests.md").write_text(
+                "# Asset Requests\n",
+                encoding="utf-8",
+            )
+            (run_dir / "image_generation_requests.md").write_text(
+                "# Scene Requests\n",
+                encoding="utf-8",
+            )
+            (run_dir / "p000_index.md").write_text(
+                """# Run Index
+
+## Stage Table
+
+| P# | Stage | Current State |
+| --- | --- | --- |
+| `p000` | Run Entrance | `always_available` |
+| `p600` | Scene Implementation | `failed` |
+
+## Fixed Slot Contract
+
+| Slot | Stage | Default Requirement | Purpose | Planned Artifacts |
+| --- | --- | --- | --- | --- |
+| `p650` | Scene | `required` | Request freeze | `image_generation_requests.md` |
+| `p660` | Scene | `required` | Images | `assets/scenes/*` |
+""",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "server.image_gen.load_request_items",
+                side_effect=AssertionError("display progress must not validate requests"),
+            ):
+                progress = image_gen.read_run_progress(
+                    run_dir,
+                    validate_request_outputs=False,
+                )
+
+        self.assertEqual(progress["currentStage"]["code"], "p660")
+        self.assertEqual(progress["currentStage"]["state"], "failed")
 
     def test_read_run_progress_moves_to_scene_requests_after_asset_requests_exist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6144,6 +6730,216 @@ cinematic character portrait
         self.assertEqual(job["status"], "completed")
         self.assertEqual(posted_payloads[0]["target_duration_seconds"], 1200)
 
+    def test_headless_create_route_propagates_preapproved_review_mode(self) -> None:
+        module = load_headless_create_module()
+        posted_payloads: list[dict[str, Any]] = []
+
+        class FakeResponse:
+            def __init__(self, payload: dict[str, Any]):
+                self.payload = payload
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, Any]:
+                return self.payload
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, _path: str, *, json: dict[str, Any]):
+                posted_payloads.append(json)
+                return FakeResponse(
+                    {
+                        "jobId": "job-review-mode",
+                        "runId": "headless-review-mode-test",
+                        "path": "output/headless-review-mode-test",
+                        "status": "running",
+                    }
+                )
+
+            async def get(self, _path: str):
+                return FakeResponse(
+                    {
+                        "jobId": "job-review-mode",
+                        "runId": "headless-review-mode-test",
+                        "path": "output/headless-review-mode-test",
+                        "status": "completed",
+                    }
+                )
+
+        with patch.object(module.httpx, "AsyncClient", return_value=FakeClient()):
+            job = asyncio.run(
+                module.create_run_via_frontend_route(
+                    title="桃太郎",
+                    source="鬼退治",
+                    generate_images=False,
+                    review_mode="preapproved",
+                    timeout_seconds=1,
+                    poll_interval=0,
+                    base_url="http://toc.test",
+                )
+            )
+
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(posted_payloads[0]["review_mode"], "preapproved")
+
+    def test_headless_create_route_defaults_to_standard_review_mode(self) -> None:
+        module = load_headless_create_module()
+        posted_payloads: list[dict[str, Any]] = []
+
+        class FakeResponse:
+            def __init__(self, payload: dict[str, Any]):
+                self.payload = payload
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, Any]:
+                return self.payload
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, _path: str, *, json: dict[str, Any]):
+                posted_payloads.append(json)
+                return FakeResponse(
+                    {
+                        "jobId": "job-review-default",
+                        "runId": "headless-review-default-test",
+                        "path": "output/headless-review-default-test",
+                        "status": "running",
+                    }
+                )
+
+            async def get(self, _path: str):
+                return FakeResponse(
+                    {
+                        "jobId": "job-review-default",
+                        "runId": "headless-review-default-test",
+                        "path": "output/headless-review-default-test",
+                        "status": "completed",
+                    }
+                )
+
+        with patch.object(module.httpx, "AsyncClient", return_value=FakeClient()):
+            asyncio.run(
+                module.create_run_via_frontend_route(
+                    title="桃太郎",
+                    source="鬼退治",
+                    generate_images=False,
+                    timeout_seconds=1,
+                    poll_interval=0,
+                    base_url="http://toc.test",
+                )
+            )
+
+        self.assertEqual(posted_payloads[0]["review_mode"], "standard")
+
+    def test_headless_create_route_rejects_post_review_mode_substitution(self) -> None:
+        module = load_headless_create_module()
+
+        class FakeResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, Any]:
+                return {
+                    "jobId": "job-review-mode-post-mismatch",
+                    "runId": "headless-review-mode-post-mismatch",
+                    "path": "output/headless-review-mode-post-mismatch",
+                    "status": "running",
+                    "reviewMode": "standard",
+                }
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, _path: str, *, json: dict[str, Any]):
+                return FakeResponse()
+
+        with patch.object(module.httpx, "AsyncClient", return_value=FakeClient()):
+            with self.assertRaisesRegex(RuntimeError, "reviewMode"):
+                asyncio.run(
+                    module.create_run_via_frontend_route(
+                        title="桃太郎",
+                        source="鬼退治",
+                        generate_images=False,
+                        review_mode="preapproved",
+                        timeout_seconds=1,
+                        poll_interval=0,
+                        base_url="http://toc.test",
+                    )
+                )
+
+    def test_headless_create_route_rejects_polled_review_mode_substitution(self) -> None:
+        module = load_headless_create_module()
+
+        class FakeResponse:
+            def __init__(self, payload: dict[str, Any]):
+                self.payload = payload
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, Any]:
+                return self.payload
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, _path: str, *, json: dict[str, Any]):
+                return FakeResponse(
+                    {
+                        "jobId": "job-review-mode-poll-mismatch",
+                        "runId": "headless-review-mode-poll-mismatch",
+                        "path": "output/headless-review-mode-poll-mismatch",
+                        "status": "running",
+                        "reviewMode": "preapproved",
+                    }
+                )
+
+            async def get(self, _path: str):
+                return FakeResponse(
+                    {
+                        "jobId": "job-review-mode-poll-mismatch",
+                        "runId": "headless-review-mode-poll-mismatch",
+                        "path": "output/headless-review-mode-poll-mismatch",
+                        "status": "completed",
+                        "reviewMode": "standard",
+                    }
+                )
+
+        with patch.object(module.httpx, "AsyncClient", return_value=FakeClient()):
+            with self.assertRaisesRegex(RuntimeError, "reviewMode"):
+                asyncio.run(
+                    module.create_run_via_frontend_route(
+                        title="桃太郎",
+                        source="鬼退治",
+                        generate_images=False,
+                        review_mode="preapproved",
+                        timeout_seconds=1,
+                        poll_interval=0,
+                        base_url="http://toc.test",
+                    )
+                )
+
     def test_headless_create_route_uses_storyboard_endpoint_and_contract(self) -> None:
         module = load_headless_create_module()
         posted: list[tuple[str, dict[str, Any]]] = []
@@ -6212,6 +7008,7 @@ cinematic character portrait
                         "title": "桃太郎",
                         "source": "鬼退治",
                         "target_duration_seconds": 300,
+                        "review_mode": "standard",
                     },
                 )
             ],
@@ -6230,6 +7027,21 @@ cinematic character portrait
                     generate_images=False,
                     create_mode="scene_storyboard",
                     target_duration_seconds=300,
+                    timeout_seconds=1,
+                    poll_interval=0,
+                    base_url="http://toc.test",
+                )
+            )
+
+    def test_headless_create_route_rejects_unknown_review_mode(self) -> None:
+        module = load_headless_create_module()
+        with self.assertRaisesRegex(ValueError, "review_mode must be standard or preapproved"):
+            asyncio.run(
+                module.create_run_via_frontend_route(
+                    title="桃太郎",
+                    source="鬼退治",
+                    generate_images=False,
+                    review_mode="skip_checks",
                     timeout_seconds=1,
                     poll_interval=0,
                     base_url="http://toc.test",
@@ -6457,6 +7269,41 @@ cinematic character portrait
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(calls[0]["target_duration_seconds"], 900)
+
+    def test_headless_cli_passes_review_mode_to_frontend_route(self) -> None:
+        module = load_headless_create_module()
+        calls: list[dict[str, Any]] = []
+
+        async def fake_create_run(**kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            return {"jobId": "job-1", "runId": "run-1", "path": "output/run-1", "status": "completed"}
+
+        with (
+            patch.object(module, "create_run_via_frontend_route", fake_create_run),
+            patch.object(
+                module,
+                "_resolve_completed_run_dir",
+                return_value=Path("output/run-1"),
+            ),
+            patch.object(module, "_write_report", return_value=Path("report.md")),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "toc-create-run-headless.py",
+                    "--title",
+                    "桃太郎",
+                    "--review-mode",
+                    "preapproved",
+                    "--assert-profile",
+                    "none",
+                ],
+            ),
+        ):
+            exit_code = module.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls[0]["review_mode"], "preapproved")
 
     def test_headless_cli_passes_storyboard_mode_to_frontend_route(self) -> None:
         module = load_headless_create_module()
@@ -7044,6 +7891,52 @@ legacy prompt must not be used for v1
         self.assertEqual(payload["debugPromptSource"]["send_to_api"], False)
         self.assertNotIn("first_frame_visual_plan", payload["prompt"])
 
+    def test_image_debug_provenance_binds_verified_canonical_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            destination = run_dir / "assets/scenes/scene10_cut01.png"
+            destination.parent.mkdir(parents=True)
+            destination.write_bytes(PNG_BYTES)
+            result = Mock(
+                provenance_policy="request_bound_v2",
+                generation_job_id="job-1",
+                item_id="scene10_cut1",
+                turn_id="turn-1",
+                prompt_sha256="a" * 64,
+                reference_sha256s=[],
+                image_generation_item_id="image-1",
+                image_generation_item_count=1,
+                saved_path=Path("/provider/generated/image.png"),
+                destination="/private/tmp/provider/candidate.png",
+                source="app_server",
+                provenance_authoritative=True,
+                status="completed",
+                transcript=[],
+                revised_prompt=None,
+            )
+
+            log_path = image_gen.write_app_server_image_debug_log(
+                run_dir=run_dir,
+                item_id="scene10_cut1",
+                index=1,
+                destination=destination,
+                references=[],
+                prompt="cinematic scene",
+                kind="scene",
+                prompt_policy_version="image_api_prompt_v1",
+                request_revision="revision-1",
+                request_digest="b" * 64,
+                compiler_version="compiler-v1",
+                source_digest="c" * 64,
+                result=result,
+            )
+            payload = json.loads(log_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            payload["provenance"]["destination"],
+            "assets/scenes/scene10_cut01.png",
+        )
+
     def test_bound_image_debug_log_inspects_pinned_root_during_swap_restore(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             parent = Path(tmp)
@@ -7570,6 +8463,42 @@ keep scene two
         self.assertEqual(items[0].request_revision, snapshot.request_revision)
         self.assertEqual(items[0].compiler_version, "drawable_prompt_compiler_v2")
 
+    def test_display_request_loader_does_not_validate_snapshot_or_reference_hashes(self) -> None:
+        request_text = """# Image Generation Requests
+
+## scene1_cut1
+
+- tool: `codex_builtin_image`
+- prompt_policy_version: `image_api_prompt_v2`
+- output: `assets/scenes/scene01.png`
+- references:
+  - `主人公`: `assets/characters/hero.png`
+
+```api_prompt
+灰色の階段にガラスの靴がある。
+```
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "image_generation_requests.md").write_text(
+                request_text,
+                encoding="utf-8",
+            )
+            (run_dir / "image_generation_request_snapshot.json").write_text(
+                "{not valid json",
+                encoding="utf-8",
+            )
+
+            items = image_gen.load_request_items_for_display(run_dir, "scene")
+
+            with self.assertRaises(ImageRequestSnapshotError):
+                image_gen.load_request_items(run_dir, "scene")
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].id, "scene1_cut1")
+        self.assertEqual(items[0].prompt, "灰色の階段にガラスの靴がある。")
+        self.assertEqual(items[0].references, ["assets/characters/hero.png"])
+
     def test_v2_prompt_update_rejects_direct_edit_and_preserves_snapshot_revision(self) -> None:
         request_text = """# Image Generation Requests
 
@@ -7855,10 +8784,25 @@ old provider prompt
             shutil.rmtree(run_dir)
 
             runs = image_gen.list_runs(root)
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app.list_first_image_retentions",
+                    side_effect=AssertionError(
+                        "restored gallery must use its local restore marker"
+                    ),
+                ),
+            ):
+                requests_payload = asyncio.run(
+                    image_gen_app.api_requests(run_id=run_id, kind="scene")
+                )
             with patch("server.image_gen_app.ROOT", root):
-                requests_payload = asyncio.run(image_gen_app.api_requests(run_id=run_id, kind="scene"))
                 candidates_payload = asyncio.run(
-                    image_gen_app.api_candidates(run_id=run_id, item_id="scene1_cut1", kind="scene")
+                    image_gen_app.api_candidates(
+                        run_id=run_id,
+                        item_id="scene1_cut1",
+                        kind="scene",
+                    )
                 )
 
             restored = destination.read_bytes() if destination.is_file() else None
@@ -7870,6 +8814,65 @@ old provider prompt
         self.assertEqual(requests_payload["items"][0]["candidates"][0]["path"], destination.relative_to(run_dir).as_posix())
         self.assertEqual(candidates_payload["candidates"][0]["path"], destination.relative_to(run_dir).as_posix())
         self.assertEqual(restored, source_bytes)
+
+    def test_normal_requests_api_uses_display_only_loader_without_rehydration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_id = "gallery_fast_path"
+            run_dir = root / "output" / run_id
+            run_dir.mkdir(parents=True)
+            (run_dir / "state.txt").write_text("status=P650\n", encoding="utf-8")
+            display_loader = Mock(return_value=[])
+            strict_loader = Mock(
+                side_effect=AssertionError("gallery GET must not validate snapshots")
+            )
+            rehydrate = Mock(
+                side_effect=AssertionError("normal gallery GET must not mutate retained images")
+            )
+            progress = Mock(return_value={"status": "P650"})
+
+            with (
+                patch("server.image_gen_app.ROOT", root),
+                patch(
+                    "server.image_gen_app.load_request_items_for_display",
+                    display_loader,
+                ),
+                patch(
+                    "server.image_gen_app.load_request_items",
+                    strict_loader,
+                ),
+                patch(
+                    "server.image_gen_app.rehydrate_retained_first_image",
+                    rehydrate,
+                ),
+                patch(
+                    "server.image_gen_app.list_reference_options",
+                    return_value=[],
+                ),
+                patch(
+                    "server.image_gen_app.read_run_progress",
+                    progress,
+                ),
+            ):
+                payload = asyncio.run(
+                    image_gen_app.api_requests(run_id=run_id, kind="scene")
+                )
+
+        self.assertEqual(payload["items"], [])
+        display_loader.assert_called_once()
+        self.assertEqual(
+            display_loader.call_args.args[0].resolve(),
+            run_dir.resolve(),
+        )
+        self.assertEqual(display_loader.call_args.args[1], "scene")
+        strict_loader.assert_not_called()
+        rehydrate.assert_not_called()
+        progress.assert_called_once()
+        self.assertEqual(
+            progress.call_args.args[0].resolve(),
+            run_dir.resolve(),
+        )
+        self.assertFalse(progress.call_args.kwargs["validate_request_outputs"])
 
     def test_retention_enumeration_rejects_tampered_traversal_destination(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -8731,6 +9734,7 @@ class ImageGenApiTests(unittest.TestCase):
                         json={
                             "source_run_id": "桃太郎_20260509_1100",
                             "target_duration_seconds": 600,
+                            "review_mode": "preapproved",
                         },
                     )
 
@@ -8739,9 +9743,11 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(payload["createMode"], "world_walk")
         self.assertEqual(payload["sourceRunId"], "桃太郎_20260509_1100")
         self.assertEqual(payload["targetDurationSeconds"], 600)
+        self.assertEqual(payload["reviewMode"], "preapproved")
         self.assertTrue(payload["runId"].startswith("桃太郎の世界観を散歩してみた_"))
         self.assertEqual(scheduled[0]["source_run_id"], "桃太郎_20260509_1100")
         self.assertEqual(scheduled[0]["target_duration_seconds"], 600)
+        self.assertEqual(scheduled[0]["review_mode"], "preapproved")
 
     def test_create_world_walk_endpoint_rejects_invalid_or_incomplete_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

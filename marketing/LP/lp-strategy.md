@@ -1,6 +1,6 @@
 # ToC LP strategy
 
-更新日: 2026-08-09
+更新日: 2026-08-29
 
 用途: ToC の LP 部門における、調査、情報設計、copy、proof、conversion、法務、accessibility、performance、検証の正本。
 
@@ -25,14 +25,16 @@ LP は機能カタログではない。訪問者が次の順序で判断でき�
 - delivery: 顧客の利用環境へシステム一式を納品
 - ToC monthly fee: 納品後 0 円
 - external cost: AI model、image / video / voice generation、cloud 等の外部 API 料金は別途、使用量に応じて発生
-- initial price: 未確定。公開までは `導入費用は個別見積り`
+- first offer: 顧客の世界観に合う画像を作り、その画像で動画まで仕上げる
+- initial price: 最初の商品は先着30名限定の `導入協力価格29,800円（税込）`。31名目以降は59,800円（税込）。その他の商品は `導入費用は個別見積り`
 - support / updates: 必要な場合だけ範囲と料金を別途定義
 
 表示単位:
 
 ```text
 システム納品
-導入費用：個別見積り
+先着30名限定：導入協力価格29,800円（税込）
+31名目以降：59,800円（税込）
 
 納品後の ToC 月額料金：0円
 外部API料金：別途・使用量に応じて発生
@@ -40,7 +42,26 @@ LP は機能カタログではない。訪問者が次の順序で判断でき�
 
 `月額0円` を `無料` と言い換えない。外部 API 料金と初期導入費を同じ視界に置く。
 
-## 3. 画像・動画が伝えられる情報的価値
+29,800円は適合条件の確認後に契約と支払いが完了した先着30名へ適用し、31名目以降は59,800円とする。59,800円を販売実績のある `通常価格` とは呼ばない。残り人数を表示する場合は、アクセス制限された販売記録と一致する数字だけを使う。
+
+## 3. ブランドや世界観に合うという価値
+
+ToCの違いは、画像や動画を生成できることだけではない。顧客が大切にしたい印象を、次の確認可能な見た目の基準へ変え、その基準に合う画像群と動画を一つの制作意図から作れることである。
+
+- 色
+- 空気感
+- 光
+- 質感
+- 構図
+- 人物や物の見せ方
+- 参考にしたい画像
+- 避けたい表現
+
+顧客向けの中心表現は `あなたの世界観に合う画像と動画を。` に集約する。知識や経験は対象者を判断する文脈で扱い、別の見出しを増やさない。
+
+`世界観に合う` は自動的な保証ではない。顧客が見た目の基準、代表画像、各場面の画像、完成動画を確認し、採用した事実で示す。
+
+## 4. 画像・動画が伝えられる情報的価値
 
 画像・動画の価値は「目立つ」だけではない。言葉、図像、動き、音声、時間軸を目的に合わせ、情報を理解・判断・再利用できる形に変えることで生まれる。
 
@@ -82,23 +103,24 @@ Cambridge の multimedia learning research は、内容に対応する words と
 - AI が作れば人間の確認は不要
 - 本数を増やせばブランドになる
 
-## 4. ページ設計
+## 5. ページ設計
 
 共通 LP prototype の基本順序:
 
 1. Hero: `あなたの想いを、映像に。` を入口に、visitor outcome と mechanism を順に見せる
 2. Problem: 分断された tool と制作工程で、企画が完成しない
-3. Informational value: 説明だけでは伝わりにくいものを、見れば分かる形へ
-4. Mechanism: 一行の案から画像セットまたは完成動画までの制作の流れ
-5. 顧客層の分岐: 副業 / 小規模ビジネス
-6. Delivery and cost: システム納品、ToC 月額 0 円、外部 API 別途
-7. Proof and boundary: 完成例、時間、human work、API cost、revision、human approval
-8. 行動: 作りたい画像・動画を一行で入力して相談
-9. Footer: 事業者情報、取引条件、privacy、外部 API 費用注記
+3. Difference: 世界観の基準 -> 採用画像群 -> 完成動画
+4. Informational value: 説明だけでは伝わりにくいものを、見れば分かる形へ
+5. Mechanism: 一行の案から画像セットまたは完成動画までの制作の流れ
+6. 顧客層の分岐: 副業 / 小規模ビジネス
+7. Delivery and cost: システム納品、ToC 月額 0 円、外部 API 別途
+8. Proof and boundary: 完成例、時間、human work、API cost、revision、human approval
+9. 行動: 作りたい画像・動画を一行で入力して相談
+10. Footer: 事業者情報、取引条件、privacy、外部 API 費用注記
 
 mobile では各 section を `結論 -> 1 visual -> 根拠 -> 1 CTA` の順にし、横並びを前提にしない。primary CTA は一種類に揃え、ページ内の再掲は同じ action と label を使う。
 
-## 5. Copy hierarchy
+## 6. Copy hierarchy
 
 ### Hero
 
@@ -109,6 +131,8 @@ mobile では各 section を `結論 -> 1 visual -> 根拠 -> 1 CTA` の順に�
 
 企画、構成、画像、動画、音声、編集を、ひとつの制作の流れへ。
 ToC は、あなたが画像・動画を作り続けるためのシステム一式を納品します。
+
+あなたの世界観に合う画像と動画を。
 
 [作りたい画像・動画を一行で入力する]
 ```
@@ -153,11 +177,13 @@ Hero の offer note:
 作り続けるためのシステムを手元へ。
 ```
 
-## 6. Proof contract
+## 7. Proof contract
 
 LP へ出す example は完成映像だけでなく、次を同じ card または detail page で示す。
 
 - initial brief
+- 顧客が採用した世界観の基準
+- 代表画像、採用画像、不採用理由
 - target audience / intended understanding
 - output format / duration
 - ToC が進めた工程
@@ -176,14 +202,15 @@ LP へ出す example は完成映像だけでなく、次を同じ card また�
 |-------|----------------|
 | `あなたの想い` | actual initial brief / original text or theme |
 | `映像に` | 同じ brief から作られた再生可能な accepted output |
+| `世界観に合う` | 顧客が採用した見た目の基準、代表画像、画像群、完成動画、採用判断 |
 | `人の心へ届く` | target audience / intended change。実際に届いたと断定する場合は audience response |
 | `ひとつの制作フロー` | stage ownership、human decisions、revision history |
 | `速く、簡単に` | elapsed time、active human time、comparison boundary |
 | `続けられる` | second / third video で再利用した brief、asset、series rule |
 
-Hero では少なくとも `actual brief -> accepted output -> creator acceptance` を満たす。actual output が mythology / folklore だけの場合は examples library へ置き、common Hero の primary proof にしない。
+Hero では少なくとも `実在する依頼内容 -> 顧客が採用した世界観の基準 -> 同じ基準の画像群 -> 完成動画 -> 顧客の採用判断` を満たす。神話・民話だけの完成物は実例集へ置き、共通サイトの主実例にしない。
 
-## 7. Conversion and measurement
+## 8. Conversion and measurement
 
 主な問い合わせ行動:
 
@@ -197,10 +224,12 @@ minimum events:
 
 - `view_lp`
 - `view_information_value`
+- `view_worldview_proof`
 - `view_delivery_model`
 - `select_customer_segment`
 - `select_production_mode`
 - `start_idea_input`
+- `start_worldview_input`
 - `start_lead_form`
 - `generate_lead`
 
@@ -215,7 +244,7 @@ minimum events:
 7. qualified lead / consultation quality
 8. 実際の導入と継続制作
 
-## 8. Accessibility / performance / legal
+## 9. Accessibility / performance / legal
 
 - video example は captions と transcript を用意する
 - autoplay に音を付けない。pause control と reduced motion を用意する
@@ -225,7 +254,7 @@ minimum events:
 - 問い合わせフォームの個人情報利用目的を本人へ通知または公表する
 - LP から有償契約を受け付ける場合は、特定商取引法上の表示、価格、追加費用、支払時期、提供時期、解約・返品条件、事業者情報を公開前に確認する
 
-## 9. Research references
+## 10. Research references
 
 - [Google Ads: Optimize your ads and landing pages](https://support.google.com/google-ads/answer/6238826/optimize-your-ads-and-landing-pages?hl=en-GB)
 - [Google Ads: Landing page experience](https://support.google.com/google-ads/answer/14086?hl=en)

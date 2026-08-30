@@ -755,11 +755,50 @@ def _resolve_resume_mode_contract(
         )
     if create_mode:
         state_updates["runtime.create_mode"] = create_mode
+    create_input = _read_canonical_create_input(run_dir)
+    canonical_review_mode = str(
+        create_input.get("review_mode")
+        if isinstance(create_input, dict)
+        else ""
+    ).strip()
+    if canonical_review_mode and canonical_review_mode not in {
+        "standard",
+        "preapproved",
+    }:
+        raise P500ResumeError(
+            "canonical create input review_mode is unsupported"
+        )
+    state_review_mode = str(
+        contract_state.get("runtime.review_mode") or ""
+    ).strip()
+    if not state_review_mode and (
+        contract_state.get("runtime.review_policy") == "preapproved"
+    ):
+        state_review_mode = "preapproved"
+    if (
+        state_review_mode
+        and canonical_review_mode
+        and state_review_mode != canonical_review_mode
+    ):
+        raise P500ResumeError(
+            "p500 resume review mode conflicts between authenticated state "
+            "and create_input.json"
+        )
+    review_mode = state_review_mode or canonical_review_mode or "standard"
+    if review_mode not in {"standard", "preapproved"}:
+        raise P500ResumeError(
+            f"p500 resume review mode is unsupported: {review_mode}"
+        )
+    state_updates["runtime.review_mode"] = review_mode
+    state_updates["runtime.review_policy"] = (
+        "preapproved" if review_mode == "preapproved" else "frontend"
+    )
 
     return {
         "experience": experience,
         "source_run": source_run,
         "create_mode": create_mode,
+        "review_mode": review_mode,
         "state_updates": state_updates,
     }
 
@@ -813,6 +852,11 @@ def _resolve_exact_resume_source(
     if payload.get("schema_version") != CREATE_INPUT_SCHEMA_VERSION:
         raise P500ResumeError(
             "canonical create input has an unsupported schema_version"
+        )
+    review_mode = str(payload.get("review_mode") or "standard").strip()
+    if review_mode not in {"standard", "preapproved"}:
+        raise P500ResumeError(
+            "canonical create input review_mode is unsupported"
         )
     canonical_topic = payload.get("topic")
     if not isinstance(canonical_topic, str) or canonical_topic != topic:
@@ -1443,6 +1487,10 @@ def _resume_state_updates(
             }
         )
     duration_plan = dict(profile["duration_plan"])
+    preapproved_reviews = resolved_mode["review_mode"] == "preapproved"
+    review_policy = "preapproved" if preapproved_reviews else "frontend"
+    required_review_gate = "skipped" if preapproved_reviews else "required"
+    optional_review_gate = "skipped" if preapproved_reviews else "optional"
     state_updates.update(
         {
             "timestamp": now,
@@ -1464,13 +1512,14 @@ def _resume_state_updates(
                 duration_plan["minimum_narration_seconds"]
             ),
             "runtime.scaffold.content_status": "authored",
-            "runtime.review_policy": "frontend",
-            "review.policy.story": "required",
-            "review.policy.image": "required",
-            "review.policy.narration": "optional",
-            "gate.research_review": "required",
-            "gate.story_review": "required",
-            "gate.narration_review": "optional",
+            "runtime.review_policy": review_policy,
+            "runtime.review_mode": resolved_mode["review_mode"],
+            "review.policy.story": required_review_gate,
+            "review.policy.image": required_review_gate,
+            "review.policy.narration": optional_review_gate,
+            "gate.research_review": required_review_gate,
+            "gate.story_review": required_review_gate,
+            "gate.narration_review": optional_review_gate,
             "review.research.status": "approved",
             "review.story.status": "approved",
             "review.script.status": "approved",
@@ -1479,7 +1528,7 @@ def _resume_state_updates(
             "stage.asset.status": "in_progress",
             "stage.scene_implementation.status": "in_progress",
             "review.image.status": "pending",
-            "gate.image_review": "required",
+            "gate.image_review": required_review_gate,
         }
     )
     state_updates.update(resolved_mode["state_updates"])

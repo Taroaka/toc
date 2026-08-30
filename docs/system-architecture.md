@@ -21,7 +21,7 @@ future cloud deployment. It corresponds to todo item 1 in `todo.txt`.
 | State management | Append-only delta-event `state.txt` + derived `state.current.json` (no DB dependency) | Auditable history and bounded current-state reads |
 | Providers | LLM via LangChain; image=Codex built-in image generation (`codex_builtin_image` / gpt-image-2); video=Kling 3.0 (default) / Seedance (alt); TTS=ElevenLabs（Veo is disabled for safety） | Avoid vendor lock-in |
 | API boundary | Codex-primary assistant command (Claude Code slash command compatible) | Keep surface area small |
-| Review policy | Decide at run start and persist in `state.txt` | Stage grounding and orchestrators must share one approval contract |
+| Review policy | Decide at run start and persist `review_mode` in `state.txt` and `create_input.json` | Stage grounding and orchestrators must share one explicit approval contract |
 | Authoring review slots | Maximum-5-round evaluator-improvement loop with 5 critics + 1 aggregator per round | Keep authoring quality gates reproducible inside the owning p-bucket supervisor |
 | p720 narration review | Deterministic arc/cut validation followed by five independent hash-bound app-server semantic critics | Separate reproducible contract failures from whole-story listening judgments |
 | Codex app-server runtime | All server/CLI app-server callers use the shared runtime contract and transport preflight | Prevent DNS/WebSocket/HTTP fallback failures from being mistaken for artifact or semantic QA failures |
@@ -67,7 +67,7 @@ graph TD
   - Authoring-after review slots use bounded review parallelism:
     - each round launches 5 independent critic agents against the same artifact/readset
     - 1 aggregator agent merges critic findings into the round gate result
-    - maximum 5 rounds; unresolved findings after round 5 require human review or explicit override
+    - maximum 5 rounds in `standard`; unresolved findings after round 5 require human review or explicit override. An explicitly preapproved frontend create emits a deterministic preapproval report instead of launching these external reviewer turns, while deterministic failures remain blocking.
     - p720は実行契約を二層化する。`run-p720-narration-l3.py`の互換`critic_*.md`はdeterministic findingの分類であり、
       独立agent判定ではない。その後の`run-p720-narration-semantic.py`だけが、凍結済み全編snapshotを別threadの5 criticへ渡す
 
@@ -112,6 +112,35 @@ graph TD
   `execution_failed`は作品内容へのsemantic判定ではなく運用上のblocking verdictであり、再実行前提の
   `semantic_critic_review.status=changes_requested`としてgateだけを閉じる。
 
+## Frontend create review mode
+
+Frontend の新規 ToC 作成は、UI/API で選んだ `review_mode` を
+`logs/orchestration/create_input.json`（`toc.create_input.v1`）へ保存し、run 中の
+review policy と resume の入力 identity に束縛する。許可値は `standard|preapproved`、既定値は
+`standard` である。`runtime.review_mode` はこの JSON と一致し、`runtime.review_policy` は
+`standard -> frontend`、`preapproved -> preapproved` と投影する。欠落・不一致・作成後の
+暗黙変更は fail-close とする。
+
+- `standard`: external semantic reviewer turn と frontend human review turn を実行する。required
+  gate は `required`、未承認の p680 は `slot.p680.status=awaiting_approval` /
+  `review.image.status=pending` のまま止める。
+- `preapproved`: ユーザーが frontend create で明示した場合だけ有効。`research`, `story`,
+  `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt` の external
+  semantic reviewer turn と frontend human reviewer turn を省略する。各 stage の
+  canonical review pack（`collection` / `scope` / `prompt` / `report`）は作成し、source/input
+  digest に束縛した `deterministic_preapproval` report と provenance state を残す。
+  deterministic schema、grounding、参照整合、request snapshot、provider provenance、生成
+  output の存在・decode・fixed-slot completeness は必ず検証し、blocking diagnostics で
+  fail-close する。
+
+preapproved の media generation は、検証前に approved とみなしてはならない。p680 terminal
+validation 後に限り、`slot.p680.status=done`、`review.image.status=approved`、
+`gate.image_review=skipped` を記録する（p670 の semantic image QA slot も `skipped`）。
+foundation review は同じ mode で `review.research.status=approved` /
+`review.story.status=approved`、対応 gate は `skipped` とする。これらの `skipped` は reviewer
+turn の省略を表すだけで、pack/digest、deterministic validator、request-bound provenance、
+generated-output validation の省略を意味しない。
+
 ## Task granularity (MVP)
 
 - Base unit is a stage task aligned to LangGraph nodes:
@@ -148,13 +177,16 @@ graph TD
   - slot の意味は全 story で共通で、story ごとの差分は `slot.pXXX.status` / `slot.pXXX.requirement` / `slot.pXXX.skip_reason` / `slot.pXXX.note` で表す。
   - `p000_index.md` はこの固定 contract を run progress の source of truth として要約する。
 - review 要否も run 開始時に固定する。
-  - `review.policy.story=required|optional`
-  - `review.policy.image=required|optional`
-  - `review.policy.narration=required|optional`
-- stage grounding は上記 policy を読んで、承認を必須にするかどうかを決める。
+  - `runtime.review_mode=standard|preapproved` は `logs/orchestration/create_input.json` の `review_mode` と一致させる。
+  - `runtime.review_policy=frontend|preapproved` は mode から導出する。
+  - `review.policy.story=required|optional|skipped`
+  - `review.policy.image=required|optional|skipped`
+  - `review.policy.narration=required|optional|skipped`
+- `standard`（既定）は external semantic reviewer と frontend human review を通常どおり実行し、required gate を自動承認しない。`preapproved` は frontend create で明示された場合だけ review gate を `skipped` にできるが、deterministic validation を省略する policy ではない。
+- stage grounding は上記 policy を読んで、承認を必須にするかどうかを決める。`skipped` は暗黙 fallback ではなく、create input に束縛された preapproved mode のみで使う。
 - create API の `target_duration_seconds` は省略時 `300`、許容範囲は整数 `300..1200` とする。run 内では `T` と表し、frontend、backend、runner、state、research、story、script、manifest で同じ値を引き継ぐ。
   - duration planning lower bounds は scene=`ceil(T/40)`、narration=`ceil(T*0.70)` 秒、effective runtime=`T*0.80` とする。cut floor は duration から導かず、各 scene の distinct authored semantic obligation / required event beat から別に導く。
-  - research と story は、それぞれ実 Codex app-server semantic review/repair を通し、全 criterion の artifact-local evidence を持つ passed report がある場合だけ次工程へ進む。story review 後は scene 数、scene target 合計、narration target 合計を再検証してから cut を作る。
+  - `standard` の research と story は、それぞれ実 Codex app-server semantic review/repair を通し、全 criterion の artifact-local evidence を持つ passed report がある場合だけ次工程へ進む。明示 preapproved create は external turn の代わりに digest-bound `deterministic_preapproval` report を作り、同じ deterministic checks を通す。story review 後は scene 数、scene target 合計、narration target 合計を再検証してから cut を作る。
 - `p740` の audio runtime は、TTS 実行後に ffprobe 等で測った spoken audio と、完全な `silence_contract` を持つ intentional silence の明示尺を同一 audio timeline 上で合計する。
   - video timeline は scene に `render_units[]` があれば render unit 合計を正本とし、その source cut の video duration は足さない。render unit がなければ cut video duration を使う。
   - audio timeline と video timeline は並列 layer であり加算しない。pre-render effective duration は完全な両 timeline の短い方とし、`0.8*T` 以上なら合格する。上限は設けない。
@@ -192,7 +224,7 @@ ToC run 全体は、OpenAI Agents SDK の orchestration / handoff の考え方�
   - L2 supervisor が返った後に、同じ helper で `returned|blocked|failed` と result path を追記する
     - terminal event では `--result logs/orchestration/pXXX.supervisor_result.json` を必ず渡す
   - bucket 完了時は `logs/orchestration/pXXX.supervisor_result.json`、required artifact existence、terminal slot state だけを検証する
-  - human review、frontend handoff、hybridization approval を自動承認しない
+  - `standard` では human review、frontend handoff、hybridization approval を自動承認しない。`preapproved` の `skipped` gate / `approved` handoff は、frontend create の明示 `create_input.json.review_mode` と後段 deterministic validation がそろった場合だけ記録でき、L1 が推測して付与しない
   - 本文 artifact（例: `research.md`, `story.md`, `script.md`, `video_manifest.md`）を次 bucket 判定のために読まない
 - 禁止:
   - L2 の代わりに canonical artifact を統合する
@@ -213,7 +245,7 @@ ToC run 全体は、OpenAI Agents SDK の orchestration / handoff の考え方�
 - 禁止:
   - 他 bucket の canonical artifact を編集する
   - L1 に本文 artifact の精読を要求する
-  - approval gate を自動承認する
+  - `standard` の approval gate を自動承認する。preapproved の gate state も、明示された create input と検証済み provenance がなければ設定しない
 
 ### L3 Task / Review Agents
 
@@ -279,12 +311,12 @@ L1 validator はこの result と slot state を検証して次 bucket に進む
   - `p110`: grounding
   - `p120`: authoring
   - `p130`: evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-  - `research.md` の構造、物語材料、矛盾、下流 readiness を semantic review し、pass しなければ story/cut 作成へ進まない。外部典拠・権利・版の検証はこの契約の対象外。
+  - `research.md` の構造、物語材料、矛盾、下流 readiness を standard では semantic reviewer、preapproved では deterministic preapproval report で検証し、pass しなければ story/cut 作成へ進まない。外部典拠・権利・版の検証はこの契約の対象外。
 - `p200`: story
   - `p210`: grounding
   - `p220`: authoring
   - `p230`: evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-  - `story.md` の因果、人物、対立、scene 化 readiness を semantic review し、pass しなければ cut を materialize しない。
+  - `story.md` の因果、人物、対立、scene 化 readiness を standard では semantic reviewer、preapproved では deterministic preapproval report で検証し、pass しなければ cut を materialize しない。
 - `p300`: visual planning
   - `p310`: visual value authoring (`visual_value.md`)
   - `p320`: visual planning evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
@@ -314,6 +346,8 @@ L1 validator はこの result と slot state を検証して次 bucket に進む
   - `p660`: image generation
   - `p670`: image QA / fix loop
   - `p680`: image human review handoff
+    - standard はここで frontend human review に handoff し、`slot.p680.status=awaiting_approval` / `review.image.status=pending` / `gate.image_review=required` とする。
+    - 明示 `review_mode=preapproved` は external semantic/human reviewer turn を省略し、deterministic output/provenance validation 後に `slot.p680.status=done` / `review.image.status=approved` / `gate.image_review=skipped` とする。
     - `p680` から `p900` までを一操作で自動継続する UI / endpoint はこの変更の対象外。後続 p700/p800/p900 は既存の個別 gate を維持する。
 - `p700`: narration / audio runtime
   - `p710`: narration grounding
@@ -369,7 +403,7 @@ Authoring-after review loop の標準分担:
 - critic agents: 5 agents per round。rubric finding と修正候補を isolated report に出す
 - aggregator: 1 agent per round。5 critic reports を統合し、`passed|changes_requested` と unresolved findings を返す
 - L2 supervisor: aggregator report を根拠に担当 bucket の canonical artifact を更新し、次 round 実行または gate close を決める
-- max rounds: 5。round 5 後の unresolved finding は human review / explicit override に回す
+- max rounds: 5。standard の round 5 後の unresolved finding は human review / explicit override に回す。frontend create の明示 preapproved mode はこの external reviewer loop を起動せず、同じ pack / digest を使う deterministic preapproval report を残す。ただし deterministic failure や output/provenance failure は override なしに block する
 - p720ではdeterministic report projectionと5つの独立semantic criticを区別する。p750はcurrent arc passだけでなく、
   current semantic passも要求し、app-server無効・malformed verdict・hash raceをoverrideなしのblocking状態として扱う
 

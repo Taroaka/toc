@@ -14,6 +14,7 @@ from server import image_gen_app
 from server.codex_app_server import CodexAppServerTransportError
 from toc.run_root_binding import RunRootBindingError, bind_run_root
 from toc.semantic_review import (
+    LEGACY_SEMANTIC_REVIEW_INPUT_SCHEMA,
     SEMANTIC_REVIEW_INPUT_SCHEMA,
     semantic_review_input_digest,
     semantic_review_scope_binding_sha256,
@@ -261,7 +262,7 @@ class SemanticReviewWorkspaceSecurityTests(unittest.TestCase):
             "entry_ids": ["scene_1"],
             "review_scope": "all_entries",
             "source_artifacts": ["script.md"],
-            "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
+            "semantic_review_input_schema": LEGACY_SEMANTIC_REVIEW_INPUT_SCHEMA,
             "source_artifact_digests": source_digests,
             "collection_sha256": hashlib.sha256(
                 collection_path.read_bytes()

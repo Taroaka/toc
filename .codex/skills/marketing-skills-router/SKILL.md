@@ -46,9 +46,11 @@ Do not use this skill for normal:
    - ToC has exactly two production modes: `image_batch` for generating the necessary images together, and `video` for completing structure, images, motion, voice, and editing
    - reuse across the same idea or assets is a shared strength, not a third production mode
    - primary personas are side-business individuals and small-business operators; personal brand is a small-business use case
-   - the first focused persona is a side-business individual who wants to turn their knowledge or experience into a faceless video; this persona does not redefine the entire side-business segment
+   - the first focused persona is a side-business individual who wants to turn their knowledge or experience into a video using images that match their worldview; this persona does not redefine the entire side-business segment
    - the first production mode for this persona is `video`; small-business operators remain the next market
-   - the first offer delivers an accepted first video together with the customer-owned production setup and reusable materials; it is not a video-only agency delivery
+   - the first offer's core value is generating images that match the customer's brand or worldview and using them to complete a video; do not lead with faceless production, a generic production system, or a next-production promise
+   - the first 30 completed contracts receive the JPY 29,800 tax-included introductory price; the 31st and later receive JPY 59,800 tax included; count only after eligibility, contract, and payment steps are complete
+   - the three-video comparison assumes JPY 10,000 editing cost per video and must disclose excluded external-service costs, customer labor, and the absence of any income guarantee
    - mythology / folklore are proof examples, not the product category
 4. Apply changes only to marketing-scoped files and required repo pointers.
 

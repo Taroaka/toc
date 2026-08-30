@@ -717,6 +717,44 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(details, [])
 
+    def test_deterministic_report_reason_messages_are_metadata_not_findings(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
+            run_dir = Path(td)
+            _write_review_source_placeholders(run_dir)
+            _write_deterministic_review(
+                run_dir,
+                hard_finding_details=[
+                    (
+                        "scene01_cut01",
+                        "missing_object_id",
+                        "blocking detail remains visible.",
+                    )
+                ],
+            )
+            report_path = run_dir / "image_prompt_story_review.md"
+            report_path.write_text(
+                report_path.read_text(encoding="utf-8").replace(
+                    "- hard_finding_codes: `missing_object_id`",
+                    "- agent_review_reason_messages:\n"
+                    "  - `human-readable explanation`\n"
+                    "- hard_finding_codes: `missing_object_id`",
+                ),
+                encoding="utf-8",
+            )
+
+            errors = image_gen_app._deterministic_image_prompt_review_structure_errors(
+                report_path.read_text(encoding="utf-8")
+            )
+
+        self.assertFalse(
+            any("finding code/detail mismatch" in error for error in errors),
+            errors,
+        )
+        self.assertFalse(
+            any("finding detail count mismatch" in error for error in errors),
+            errors,
+        )
+
     def test_deterministic_human_override_without_reason_remains_blocking(self) -> None:
         with tempfile.TemporaryDirectory(prefix="image_prompt_repair_") as td:
             run_dir = Path(td)

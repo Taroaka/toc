@@ -246,6 +246,81 @@ class TestSemanticPackFoundation(unittest.TestCase):
 
         self.assertEqual(foundation["scene_location_route_statuses"][1]["status"], "valid")
 
+    def test_story_scope_projects_foundation_diagnostics_as_blocking_issues(self) -> None:
+        story = STORY.replace(
+            '      research_refs: ["research.story_materials.chronological_events[E02]"]',
+            '      research_refs: ["research.story_materials.chronological_events[E99]"]',
+            1,
+        ).replace(
+            "      time_of_day: 昼\n",
+            "      time_of_day:\n",
+            1,
+        ).replace(
+            "      time_of_day: 夕方\n",
+            """      time_of_day: 夕方
+      location:
+        mode: sequence
+        sequence: ["鬼ヶ島の門", "鬼ヶ島の広場"]
+        segments:
+          - location: "鬼ヶ島の門"
+            responsibility: "門前の対峙を見せる"
+            primary_subject: "桃太郎"
+            visible_action: "桃太郎が門を見上げる"
+            required_visual_evidence: ["門"]
+            required_roles: ["桃太郎"]
+            motion_brief: "桃太郎が門へ歩み寄る"
+            motion_end_state: "桃太郎が門前に立つ"
+""",
+            1,
+        )
+
+        with tempfile.TemporaryDirectory(prefix="toc_foundation_pack_") as td:
+            run_dir = Path(td)
+            (run_dir / "research.md").write_text(RESEARCH, encoding="utf-8")
+            (run_dir / "story.md").write_text(story, encoding="utf-8")
+
+            _collection, scope_path, _prompt, _report, _entry_count = BUILD_PACK.build_pack(
+                run_dir,
+                "story",
+            )
+            scope = json.loads(scope_path.read_text(encoding="utf-8"))
+
+        diagnostics = scope["diagnostics"]
+        self.assertEqual(diagnostics["internal_reference_unresolved_count"], 1)
+        self.assertEqual(
+            diagnostics["internal_reference_unresolved_entries"],
+            [
+                {
+                    "scene_id": "2",
+                    "ref": "research.story_materials.chronological_events[E99]",
+                    "reason": "missing_internal_target",
+                }
+            ],
+        )
+        self.assertEqual(diagnostics["story_event_unassigned_count"], 1)
+        self.assertEqual(diagnostics["story_event_unassigned_entries"], ["E02"])
+        self.assertEqual(diagnostics["invalid_declared_daypart_count"], 1)
+        self.assertEqual(
+            diagnostics["invalid_declared_daypart_entries"],
+            [{"scene_id": 2, "status": "invalid_type", "raw_value": None}],
+        )
+        self.assertEqual(diagnostics["invalid_declared_route_count"], 1)
+        self.assertEqual(len(diagnostics["invalid_declared_route_entries"]), 1)
+        self.assertEqual(
+            diagnostics["invalid_declared_route_entries"][0]["scene_id"],
+            3,
+        )
+        self.assertEqual(
+            diagnostics["invalid_declared_route_entries"][0]["status"],
+            "invalid",
+        )
+        self.assertEqual(diagnostics["failed_selectors"], ["story:foundation"])
+
+        self.assertEqual(
+            scope["scope_binding_sha256"],
+            BUILD_PACK.semantic_review_scope_binding_sha256(scope),
+        )
+
     def test_foundation_pack_scope_and_prompt_are_auditable_and_internal_only(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_foundation_pack_") as td:
             run_dir = Path(td)

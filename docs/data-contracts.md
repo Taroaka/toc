@@ -119,6 +119,8 @@ timestamp=ISO8601
 job_id=JOB_YYYY-MM-DD_0001
 topic=string
 status=INIT|RESEARCH|STORY|SCRIPT|VIDEO|QA|DONE
+runtime.review_mode=standard|preapproved
+runtime.review_policy=frontend|preapproved
 stage.research.status=pending|in_progress|awaiting_approval|done|failed|skipped
 stage.research.grounding.status=ready|missing_docs|missing_inputs
 stage.research.grounding.report=logs/grounding/research.json
@@ -138,6 +140,10 @@ stage.story.subagent.prompt=logs/grounding/story.subagent_prompt.md
 stage.story.playbooks.report=logs/grounding/story.playbooks.json
 stage.story.playbooks.selected_count=0
 review.story.status=pending|reviewing|approved|changes_requested
+review.research.status=pending|reviewing|approved|changes_requested
+review.script.status=pending|reviewing|approved|changes_requested
+review.image.status=pending|reviewing|approved|changes_requested
+review.narration.status=pending|reviewing|approved|changes_requested
 review.research.duration_contract.status=passed|failed
 review.story.duration_contract.status=passed|failed
 review.story.subagent.prompt=logs/review/story.subagent_prompt.md
@@ -229,9 +235,9 @@ gate.script_review=required|optional|skipped
 gate.image_review=required|optional|skipped
 gate.narration_review=required|optional|skipped
 gate.video_review=required|optional|skipped
-review.policy.story=required|optional
-review.policy.image=required|optional
-review.policy.narration=required|optional
+review.policy.story=required|optional|skipped
+review.policy.image=required|optional|skipped
+review.policy.narration=required|optional|skipped
 artifact.research=output/<topic>_<timestamp>/research.md
 artifact.research_review=output/<topic>_<timestamp>/research_review.md
 artifact.story=output/<topic>_<timestamp>/story.md
@@ -273,6 +279,82 @@ eval.narration.findings=0
 eval.narration.unresolved_entries=0
 ---
 ```
+
+### Frontend create input contract（`toc.create_input.v1`）
+
+新規 frontend create は、生成を始める前に、受け取った入力を
+`logs/orchestration/create_input.json` として run 内へ保存する。この JSON が
+resume / review policy の正本であり、`topic` や生成済み artifact から入力を推測しては
+ならない。通常の create、scene storyboard create、world walk create のいずれも
+`review_mode` をこの契約へ保存する。
+
+```json
+{
+  "schema_version": "toc.create_input.v1",
+  "topic": "シンデレラ",
+  "source": "シンデレラ",
+  "source_sha256": "<sha256 of source UTF-8 bytes>",
+  "experience": "cinematic_story",
+  "source_run": null,
+  "target_duration_seconds": 300,
+  "review_mode": "standard"
+}
+```
+
+フィールド契約:
+
+- `schema_version`: 常に `toc.create_input.v1`。
+- `topic`: 空でないタイトル。
+- `source`: 実際に materialize へ渡した source の完全な文字列。`source_sha256` はその
+  UTF-8 bytes の SHA-256 と一致しなければならない。
+- `experience`: `cinematic_story|world_walk`。`world_walk` では `source_run` に
+  repo-relative な参照元 run path を持ち、`cinematic_story` では `null` とする。
+- `target_duration_seconds`: 整数 `300..1200`（省略時 `300`）。
+- `review_mode`: `standard|preapproved`（省略時 `standard`）。UI/API の明示入力であり、
+  暗黙の fallback や run 作成後の変更を許可しない。
+
+`review_mode` と review policy の意味は次の通り。
+
+- `standard` は既定値で、外部 semantic reviewer turn と frontend human review を通常どおり
+  実行する。required gate は `required` のまま扱い、L1/L2 が自動承認してはならない。
+- `preapproved` は frontend create でユーザーが明示した場合だけ有効になる。対象の
+  `research`, `story`, `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`,
+  `image_prompt` について外部 semantic reviewer turn と frontend human reviewer turn を
+  省略するが、review 自体を消すわけではない。各 stage の canonical
+  `collection` / `scope` / `prompt` / `report` pack を materialize し、source/input digest に
+  束縛した `deterministic_preapproval` report を `status: passed` として残す。pack、digest、
+  grounding/schema/参照整合、request snapshot、provider provenance、生成ファイルの存在・
+  decode、fixed-slot completeness の deterministic validation は常に実行し、blocking
+  diagnostics があれば fail-close する。
+
+`runtime.review_mode` は `create_input.json.review_mode` と完全一致し、
+`runtime.review_policy` は `standard -> frontend`、`preapproved -> preapproved` と投影する。
+不一致、欠落、読めない create input は preapproved として扱わず停止する。
+
+### Frontend create の p680 review handoff
+
+preapproved は materialization 直後に image review を完了扱いにしない。media generation 前は
+`gate.image_review=skipped` でも `review.image.status=pending` として保持し、asset / scene image
+の request-bound provenance と output validation を済ませる。p680 の terminal validation が
+成功した時だけ、次の状態を記録する。
+
+```text
+runtime.review_mode=preapproved
+runtime.review_policy=preapproved
+gate.research_review=skipped
+gate.story_review=skipped
+gate.image_review=skipped
+review.research.status=approved
+review.story.status=approved
+review.image.status=approved
+slot.p670.status=skipped
+slot.p680.status=done
+```
+
+標準 mode の同じ handoff は `gate.image_review=required`、`review.image.status=pending`、
+`slot.p680.status=awaiting_approval` で停止する。いずれの mode でも p680 は slot/state の
+文字列だけでは成立せず、fresh verify report、immutable request snapshot、request-bound
+provenance、生成画像の存在・decode・fixed-slot completeness を満たす必要がある。
 
 ### 1.0 Run-level supervisor handoff
 
@@ -549,11 +631,11 @@ stage target resolution:
 
 - create API の request field は `target_duration_seconds`。省略時は `300`、整数 `300..1200` のみを受け付ける。以下、この値を `T` とする。
 - `story.md.story_metadata.time` は物語世界の歴史的時代を表す string とする。古典・既存物語は `〇〇時代` の形式で非空にし、ユーザー創作は `""` を許容する。`story.md.story_metadata.time -> script.md.script_metadata.time -> video_manifest.md.video_metadata.time` の一方向だけで projection し、非空値は asset / scene image provider prompt の時代整合制約と video provider prompt の continuity に含める。空文字では時代用 fragment を生成しない。
-- p600 の candidate request を materialize した時点では `slot.p650.status=pending`、`review.image_prompt.request_freeze.status=draft` とする。image-prompt semantic repair は `video_manifest.md.scenes[].cuts[].image_generation.first_frame_visual_plan` と cut-local dependency/reference を修正し、orchestrator が payload / request Markdown / snapshot を同期再生成する。asset 生成後かつ semantic pack 構築前に全 scene reference を実在 bytes の sha256 へ束縛し、provider-ready request revision を確定する。deterministic hard gate と semantic report が同一 revision で pass した後の freeze は snapshot を変更せず、strict validation と state 遷移だけを行う。その場合だけ `request_freeze.status=frozen`、`slot.p650.status=done`、p600 supervisor result `status=done` にできる。
-- terminal p680 は slot/state の文字列だけでは成立しない。asset/image の immutable request snapshot と request-bound provenance が current であり、`verify-pipeline.py --stage-target p680` が exit 0、fresh `eval_report.json.stage_target=p680`、`overall.passed=true`、かつ report に出力された全 stage が pass のときだけ `p680=awaiting_approval` とする。provider 実行前の pre-handoff 検証ではこの terminal 条件を要求しない。
+- p600 の candidate request を materialize した時点では `slot.p650.status=pending`、`review.image_prompt.request_freeze.status=draft` とする。image-prompt semantic repair は `video_manifest.md.scenes[].cuts[].image_generation.first_frame_visual_plan` と cut-local dependency/reference を修正し、orchestrator が payload / request Markdown / snapshot を同期再生成する。asset 生成後かつ semantic pack 構築前に全 scene reference を実在 bytes の sha256 へ束縛し、provider-ready request revision を確定する。standard では deterministic hard gate と external semantic report、preapproved では同じ pack / digest から作った `deterministic_preapproval` report が同一 revision で pass した後に freeze する。freeze は snapshot を変更せず、strict validation と state 遷移だけを行う。その場合だけ `request_freeze.status=frozen`、`slot.p650.status=done`、p600 supervisor result `status=done` にできる。
+- terminal p680 は slot/state の文字列だけでは成立しない。asset/image の immutable request snapshot と request-bound provenance が current であり、`verify-pipeline.py --stage-target p680` が exit 0、fresh `eval_report.json.stage_target=p680`、`overall.passed=true`、かつ report に出力された全 stage が pass のときだけ handoff を terminal とする。standard では `p680=awaiting_approval`、`review.image.status=pending`、`gate.image_review=required`、明示 preapproved では `p680=done`、`review.image.status=approved`、`gate.image_review=skipped` とする。provider 実行前の pre-handoff 検証ではこの terminal 条件を要求しない。
 - repair が `video_manifest.md.assets` を変えた場合は `asset_plan.md` と asset request/snapshot を共通 compiler から再 projection し、変更 asset の生成後に scene snapshot の参照 hash を再束縛する。修正後の deterministic story-consistency report も再生成し、修正前 report や旧 asset prompt/source digest を current revision として扱わない。
 - request、`runtime.target_video_seconds`、`research.md.metadata.target_duration_seconds`、`story.md.story_metadata.target_duration_seconds`、`script.md.script_metadata.target_duration_seconds`、`video_manifest.md.video_metadata.target_duration_seconds` は同じ `T` を保持し、後段が独自の固定 300 秒へ戻してはならない。
-- research/story の semantic review は cut materialization 前の必須 gate である。各 passed report は scope の全 entry を正確に列挙し、stage 固定の全 criterion について `criterion_id`、`status=passed`、空でない artifact-local `evidence` を `criteria_results_json` に残す。review transport failure、criterion 欠落、根拠欠落、failed criterion は pass とみなさない。
+- standard の research/story semantic review は cut materialization 前の必須 gate である。各 passed report は scope の全 entry を正確に列挙し、stage 固定の全 criterion について `criterion_id`、`status=passed`、空でない artifact-local `evidence` を `criteria_results_json` に残す。preapproved では external reviewer turn を実行しないが、同じ collection / scope / prompt pack と source/input digest に束縛した `deterministic_preapproval` report を materialize し、同じ criterion と evidence 契約を検証する。review transport failure、criterion 欠落、根拠欠落、failed deterministic check はどちらの mode でも pass とみなさない。
 - semantic repair 後は artifact を再読し、research の `metadata.target_duration_seconds` / `duration_plan` と story の `story_metadata.target_duration_seconds` / scene / narration floors を request target に再照合する。不一致は `review.*.duration_contract.status=failed` として story または cut materialization 前に停止する。
 - planning budget の lower bounds は次で固定する。
   - scene count: `ceil(T / 40)`
@@ -730,7 +812,7 @@ grounding ルール:
 - 直後に `scripts/audit-stage-grounding.py` を実行して readset / audit を確定する
 - `stage.<name>.grounding.status=ready` と `stage.<name>.audit.status=passed` を確認できない限り、当該 stage は開始しない
 - artifact が存在しても grounding report が欠けていれば verifier / evaluator は fail にできる
-- `requires_approved_input` は `workflow/stage-grounding.yaml` を正本とし、`review.policy.*=optional` の run では対象 review gate を skip できる
+- `requires_approved_input` は `workflow/stage-grounding.yaml` を正本とする。`review.policy.*=optional` は明示的な draft policy、`review.policy.*=skipped` は `create_input.json.review_mode=preapproved` に束縛された frontend create のみを表す。後者でも deterministic grounding / schema / digest / provenance checks は skip できない。
 
 ### 1.2 読み方
 
@@ -933,7 +1015,7 @@ cut-local override は exact `scene.location_sequence[]` 内で departure `locat
 - first frame は開始境界、last frame は到達境界である。last frame を別 shot として挿入せず、一つの連続運動で到達する
 - authoring identity（canonical design + fallback source）、compiler identity（version + `source_digest`）、persisted provider-request identity（prompt / negative prompt / `provider_request_binding`）を分離する。`motion_prompt` から authoring identity へ逆投影しない
 - frontend/server、CLI、scene storyboard は同じ compiler output を target に保存してから生成する。未 materialize または current design / settings と不一致の payload は stale として拒否する
-- materialize-only は target を `pending` にする。frontend/server approval workflow の明示的な `approve_for_generation` 以外、CLI の materialize / 通常実行を含む経路は未承認 target を自動承認しない
+- materialize-only は target を `pending` にする。standard では frontend/server approval workflow の明示的な `approve_for_generation` 以外、CLI の materialize / 通常実行を含む経路は未承認 target を自動承認しない。preapproved は `create_input.json.review_mode=preapproved` という明示 create policy に限る例外だが、media generation 前の `review.image.status=pending` と p680 の deterministic output/provenance validation は維持する。
 
 ### 4.3 `scenes[].cuts[]`（optional, recommended）
 
@@ -1130,11 +1212,11 @@ p500 slot contract:
 - `p520`: reusable asset inventory。この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still の候補を `asset_inventory.md` に漏れなく洗い出す。
 - `p530`: asset plan authoring。inventory を `asset_plan.md` に構造化し、各 asset の目的、固定 detail、参照入力、output、review focus を明示する。
 - `p530` semantic QA: asset id / asset_type / story_purpose / visual_spec / prompt は同じ意味を指す。人物 asset が場所画像になったり、location asset が人物ポートレートになったり、scene に不要な小道具を常時参照したりする設計は fail とする。
-- `p540`: asset review / fix loop。review agent が漏れ・矛盾・参照誤用・lane 誤りを確認する cycle を最大 1 round 回す。
+- `p540`: asset review / fix loop。standard は review agent が漏れ・矛盾・参照誤用・lane 誤りを確認する cycle を最大 1 round 回す。preapproved create は external reviewer turn を省略し、同じ pack / digest に対する deterministic checks を実行する。
 - `p550`: asset requests。`asset_plan.md` から `asset_generation_requests.md` / `asset_generation_manifest.md` を materialize し、prompt / references / output / status を凍結する。
 - `p560`: asset generation。request に従って reusable asset image を生成し、manifest と実ファイルを対応させる。
 - `p570`: asset continuity check。生成 asset が p600 の continuity anchor として使えるか、approval / `existing_outputs[]` / status を確認する。
-- `p570`: 生成済み asset の主対象が asset category と story purpose に一致するかは、deterministic output validator と frontend human review で確認する。`asset_output` semantic review stage は持たない。
+- `p570`: 生成済み asset の主対象が asset category と story purpose に一致するかは、standard では deterministic output validator と frontend human review、preapproved create では deterministic output validator と terminal validation で確認する。`asset_output` semantic review stage は持たない。
 
 p500 resume contract:
 
@@ -1142,7 +1224,7 @@ p500 resume contract:
 - resume は `state.txt` の履歴を書き換える rollback ではない。p500 以降の旧成果物を `logs/resume/p500/<checkpoint>/artifacts/` へ退避し、後続 state を新しい append-only snapshot で `pending` / `stale` にする pseudo rollback である。
 - `research.md`、`story.md`、`visual_value.md`、`script.md`、`video_manifest.md` と p400 以前の review/grounding artifact は保持する。
 - frontend create の `video_manifest.md` は p450 時点で production execution 枠を含むため、`manifest_phase: production` だけを理由に p600 artifact として退避しない。旧 request snapshot、semantic report、実在 media、生成/review state を無効化して再 materialize する。
-- 新規 frontend create は、受け取った exact source bytes とその sha256、topic、experience、source run、target duration を `logs/orchestration/create_input.json`（`toc.create_input.v1`）へ保存する。この artifact がある run の resume はそれを正本とし、CLI/API から競合する source を与えた場合は停止する。artifact 自体の存在、filesystem type、bytes は dry-run/apply token に含める。artifact がない legacy run は、topic や research から source を推測せず、非空の明示 `--source` を必須とする。
+- 新規 frontend create は、受け取った exact source bytes とその sha256、topic、experience、source run、target duration、明示した `review_mode` を `logs/orchestration/create_input.json`（`toc.create_input.v1`）へ保存する。`review_mode` は `standard|preapproved` のみで、既定は `standard`。この artifact がある run の resume はそれを正本とし、CLI/API から競合する source または review mode を与えた場合は停止する。artifact 自体の存在、filesystem type、bytes は dry-run/apply token に含める。artifact がない legacy run は、topic や research から source / review mode を推測せず、非空の明示 `--source` を必須とする。
 - reset 前に current `script.md` / `video_manifest.md` から review artifact を除く deterministic `eval.p400_readiness.status=approved` を再計算する。Codex fix で旧 review digest が stale になることは許容するが、reset 後に p400 review artifact を再 materialize し、request/provider 実行前に review integrity を含む完全な p400 readiness を通す。
 - reset は `.locks/create_resume.lock` を frontend create/resume および single/bulk image generation と共有し、同一 run の並行 mutation を禁止する。disk 上の bulk job が `queued|running` の場合も reset しない。
 - apply 前の dry-run、退避 checkpoint、upstream digest、移動対象一覧を必須とする。apply は dry-run の `checkpoint_id` と plan digest token に一致しなければ fail closed とする。unknown artifact は自動退避しない。
@@ -1206,8 +1288,8 @@ bootstrap lane ルール:
 - `derived_from_asset_id` がある asset は常に `execution_lane=standard`
 - `bootstrap_builtin` という lane 名は互換のため維持するが、repo 全体では「no-reference built-in image lane」を意味する
 - したがって asset stage だけでなく、cut image stage の materialized request でも `reference_count == 0` なら `execution_lane=bootstrap_builtin` を使う
-- bootstrap 生成物は human review の `review.status=approved` になるまで canonical 扱いにしない
-- 承認後は、そのまま canonical asset として `existing_outputs[]` に記録してよい
+- bootstrap 生成物は、standard では human review の `review.status=approved` になるまで canonical 扱いにしない。明示 preapproved create では external human reviewer turn を省略できるが、deterministic output / provenance validation が p680 terminal 条件を満たすまで canonical 扱いにしない
+- review または preapproved の terminal validation 後は、そのまま canonical asset として `existing_outputs[]` に記録してよい
 
 asset stage の location / still variant ルール:
 
@@ -1239,7 +1321,7 @@ location の例外ルール:
 
 運用:
 
-- asset stage document は human review を通してから asset 生成へ進む
+- asset stage document は standard では human review を通してから asset 生成へ進む。明示 `review_mode=preapproved` では external reviewer turn を省略できるが、asset plan pack / digest と deterministic validation を先に通す
 - character asset は全身が見える front / side / back の 3 面図 multi-view 運用を維持する
 - object / location / setpiece / reusable still は単体 still を基本にする
 - asset を作る主目的は、複数 cut で使う visual identity を固定し、同一 cut 内の関連 asset 派生も含めて continuity を守ること
@@ -1371,16 +1453,16 @@ semantic QA は生成前の設計 artifact に対する横断契約であり、s
 運用分担:
 
 - 構造、存在、schema、参照 path、count、必須 field は関数 verifier が判定する
-- subject / location / object / timeline / reveal order / cut function などの意味判定は contextless semantic review agent が判定する
-- verifier は semantic review agent の report artifact を読み、未実行、pending、placeholder、zero-entry、failed を hard gate として fail にする
-- frontend create flow では、生成前設計 stage の semantic review agent report が `status: passed` になることを必須にする。`research` と `story` は pre-cut gate であり、どちらかが未実行、transport failure、または非 passed なら scene/cut materialization を開始しない。p680 までの create ではさらに `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt` を省略しない
+- subject / location / object / timeline / reveal order / cut function などの意味判定は、standard では contextless semantic review agent が判定する。preapproved では同じ意味契約を deterministic preapproval report と deterministic diagnostics で検証する
+- verifier は canonical semantic report artifact を読み、未実行、pending、placeholder、zero-entry、failed を hard gate として fail にする。preapproved の `status: passed` report は、canonical pack / scope / prompt と source/input digest が current で、`report.source=deterministic_preapproval` の場合だけこの条件を満たす
+- frontend create flow の standard mode では、生成前設計 stage の external semantic review report が `status: passed` になることを必須にする。`research` と `story` は pre-cut gate であり、どちらかが未実行、transport failure、または非 passed なら scene/cut materialization を開始しない。p680 までの create ではさらに `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt` を省略しない。明示的な `create_input.json.review_mode=preapproved` ではこれらの external reviewer turn と frontend human reviewer turn だけを省略し、各 stage の pack / digest / deterministic report は必ず作る
 - `research` / `story` semantic review は artifact 内の構造、時系列、人物、対立、矛盾、scene 化 readiness を判定する。この変更では外部典拠、原典版、翻訳、権利状態、URL の真正性を検証対象にしない
-- 生成済み output stage の `asset_output`, `scene_image`, `video_clip`, `render` は canonical semantic review stage ではない。実画像・動画・最終 render の良否は deterministic output validator と frontend human review / final QA が判定する
-- semantic review が `passed` でない場合、改善点をその stage の production-side agent に渡して canonical artifact を修正し、同じ contextless semantic review agent が再レビューする。これは画像生成だけの例外処理ではなく、下記の canonical semantic review stages すべてに適用する。修正中は process slot を次工程へ進めず、`review.semantic.<stage>.loop.status=repairing` と `review.semantic.<stage>.repair.status=in_progress` で semantic QA 修正中であることを state に残す。再レビューが `passed` になった時だけ次工程へ進み、最大試行回数でも通らない場合は当該 semantic QA slot を `failed` にする
+- 生成済み output stage の `asset_output`, `scene_image`, `video_clip`, `render` は canonical semantic review stage ではない。standard では実画像・動画・最終 render の良否を deterministic output validator と frontend human review / final QA が判定する。preapproved create では external human reviewer turn を省略するが、deterministic output validator / final QA を必須とする
+- standard の semantic review が `passed` でない場合、改善点をその stage の production-side agent に渡して canonical artifact を修正し、同じ contextless semantic review agent が再レビューする。これは画像生成だけの例外処理ではなく、下記の canonical semantic review stages すべてに適用する。修正中は process slot を次工程へ進めず、`review.semantic.<stage>.loop.status=repairing` と `review.semantic.<stage>.repair.status=in_progress` で semantic QA 修正中であることを state に残す。再レビューが `passed` になった時だけ次工程へ進み、最大試行回数でも通らない場合は当該 semantic QA slot を `failed` にする。preapproved は reviewer/producer repair turn の代わりに deterministic diagnostics を実行し、blocking diagnostics があれば fail-close する。deterministic check を人間 override や暗黙 fallback で通過扱いにしてはならない
 - semantic QA / producer repair の timeout は固定の総作業時間制限ではなく no-progress watchdog とする。Codex app-server の turn notification、semantic report、producer report、修正対象 artifact のいずれかが更新されている間は改善中として待つ。観測可能な進捗が止まった場合だけ `review.semantic.<stage>.watchdog.status=no_progress_timeout` とし、これは意味判定 failure ではなく transport/runtime block として扱う
 - `scene_set` / `scene_detail` の per-scene shard review で transport timeout が起きた場合、semantic failure / producer repair には入れず、該当 shard だけを再実行する。`scene_set` は `TOC_SCENE_SET_TRANSPORT_RETRY_ATTEMPTS`、`scene_detail` は `TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS` を使い、既定はいずれも 3 回。pass 済み shard は同一 review attempt 内で再実行しない。terminal verdict 欠落や digest / reviewed_entries 不一致などの output-contract failure も、`scene_set` では該当 shard だけを1回再実行し、stage 全件の外側 retry は重ねない。`scene_set` の各 shard は対象 scene の compact projection と全 scene の ordered compact context を読み、因果順、reveal ownership、location route、participants / role coverage、daypart continuity、handoff を局所 entry と全体順序の両方から判定する。canonical collection の heading は scope entry と exactly once かつ同順で一致し、各 section は exactly one JSON fence、fence 外は空白のみ、duplicate key のない JSON object、`payload.id` は heading と同じ string を満たさなければ provider 起動前に `semantic_review_selector_coverage_invalid` で fail-close する。collection 欠落・読込不能も failed aggregate と `coverage.status=invalid` を残す。canonical scope は `review_generation_id`, `review_generation_collection_sha256`, `entry_projection_sha256s` を持ち、shard scope は同じ generation id、canonical collection/input/scope hash、対象 entry projection hash を束縛する。provider 前後と canonical aggregate 公開前後で一致を再検証し、同一 run/stage の publication は cross-process lock で直列化する。並列上限 `TOC_SCENE_SET_REVIEW_CONCURRENCY` の既定は 6。retry で復帰した shard は `review.semantic.<stage>.shards.<scene>.transport.status=recovered` にする。使い切った `scene_detail` shard が scene に局所化できる場合は、その scene に属する `image_generation_requests.md` item だけを `blocked` / synthetic failed candidate として frontend に表示し、他 scene の画像生成は続行する。`scene_detail`, `cut_blueprint`, `image_prompt` の semantic `failed_selectors` / `blocked_entries` が scene/cut image item に局所化できる場合も同じく該当 image item だけを blocked にし、他 scene の画像生成は続行する。局所化できない transport failure は `runtime.stage=semantic_review_blocked_transport` で画像生成前に停止し、局所化できない semantic failure は `review.semantic.<stage>.localization.status=not_localized` と理由を state / app_server log に残す
 - 局所継続の正本は state の allow flag 単体ではなく、`logs/review/semantic/partial_media_projection.json`（`toc.partial_media_projection.v1`）と `partial_media_generation_receipt.json`（`toc.partial_media_generation_receipt.v2`）の組である。projection は current scene request revision / snapshot hash、current semantic scope / report hash、stage ごとの selector 対応、blocked / survivor item、synthetic failed candidate を digest に束縛する。receipt は同じ projection digest / request revision に加えて、実際に provider へ送った `provider_submitted_item_ids`、current provenance を再利用して provider へ送らなかった `reused_item_ids`、検証済み output を持つ `generated_item_ids`、current request を満たした全 survivor の `satisfied_item_ids`、送らなかった blocked item を別々の真値集合として束縛する。submitted と reused は互いに素で、その和集合、generated、satisfied はいずれも current survivor と完全一致しなければならない。verifier は両 artifact を current source から再導出して state の4集合も含め完全一致を確認し、blocked destination に regular file、symlink、broken symlink、FIFO、socket、directory のいずれかが残る場合、survivor output / provenance が欠ける場合、全 item が blocked の場合は fail-close にする。p680 terminal gate 自体には semantic / output failure の例外リストを設けず、valid projection / receipt を評価した全 emitted check / stage と overall が pass の場合だけ合格とする
-- `image_prompt` semantic review は scene ごとの shard（その scene の cut entries + scene composite）で実行する。canonical scope の全 selector は exactly once で shard に割り当てる。zero / missing / duplicate / unexpected selector、collection section の欠落、reviewer の `reviewed_entries` 不一致は `semantic_review_selector_coverage_invalid` として fail-closed にする。並列上限は `TOC_IMAGE_PROMPT_REVIEW_CONCURRENCY`、transport retry は失敗 shard のみを対象にし、`review.semantic.image_prompt.shards.<scene>.*` に局所状態を保存する。
+- `image_prompt` semantic review は scene ごとの shard（その scene の cut entries + scene composite）で実行する。standard は reviewer turn を実行し、preapproved は同じ pack / scope / digest を deterministic に検証する。canonical scope の全 selector は exactly once で shard に割り当てる。zero / missing / duplicate / unexpected selector、collection section の欠落、reviewer の `reviewed_entries` 不一致は `semantic_review_selector_coverage_invalid` として fail-closed にする。並列上限は `TOC_IMAGE_PROMPT_REVIEW_CONCURRENCY`、transport retry は失敗 shard のみを対象にし、`review.semantic.image_prompt.shards.<scene>.*` に局所状態を保存する。
 
 Canonical semantic review stages:
 
@@ -1428,7 +1510,7 @@ Pack / runner commands:
 - `asset_inventory.md` / `asset_plan.md` は、物語で使われる人物、物語固有アイテム、場所、舞台装置を意味単位で網羅し、asset 種別と prompt が一致する
 - `video_manifest.md` の scene/cut は、参照する character/object/location id が cut の意味に合っている。round-robin や件数合わせで場所・小道具・人物を割り当てない
 - 画像生成 request は、参照画像の path だけでなく、その参照が何の意味を固定するかを prompt / contract で読める
-- 生成済み画像、動画、音声、最終 render は、frontend human review / final QA と deterministic validator で確認してから次 stage に渡す
+- 生成済み画像、動画、音声、最終 render は、standard では frontend human review / final QA と deterministic validator、preapproved create では frontend human reviewer turn を省略した deterministic validator / final QA で確認してから次 stage に渡す。preapproved でも output の存在・decode・provenance・completeness を省略しない
 
 レビュワーの責務:
 
@@ -1593,7 +1675,7 @@ Prompt projection registry:
 - semantic image prompt entryは `prompt_projection_review_contract` にregistry version、不変原則、active/inactive/excluded rules、expected required groups、`include|omit|add|replace` operationsを持つ
 - 新しい設計keyを追加する変更はprompt relevanceを必ず分類し、`required|conditional`ならprojection/review/test、`none`なら除外理由を同時に追加する
 
-subagent review は `drawable_prompt_ir.dependencies.required_groups` をその entry の必須 criterion とする。required group の欠落、不要 group の混入、空 fragment、`included_fragments[].text` と `api_prompt_payload.prompt` の不一致を `agent_review_ok: false` にする。`missing_required_prompt_block` は `image_api_prompt_v1` の legacy criterion とし、v2 に固定6ブロックを要求しない。
+standard の subagent review と preapproved の deterministic preapproval report は、`drawable_prompt_ir.dependencies.required_groups` をその entry の必須 criterion とする。required group の欠落、不要 group の混入、空 fragment、`included_fragments[].text` と `api_prompt_payload.prompt` の不一致を failure とする。`missing_required_prompt_block` は `image_api_prompt_v1` の legacy criterion とし、v2 に固定6ブロックを要求しない。
 
 registryでactiveとなったgroupは、正本source value、IR dependency、raw `required_groups`、exactly oneの非空fragment、provider promptのtraceを持つ。値bindingを持つgroupはfragmentとprovider promptにも正本値がexactに現れなければならず、dependencyだけ一致する状態をpassにしない。
 

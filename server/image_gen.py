@@ -397,7 +397,11 @@ def _current_slot_from_state(
     return {"code": code, "label": label, "state": slot_statuses[code]}
 
 
-def read_run_progress(run_dir: Path) -> dict[str, Any]:
+def read_run_progress(
+    run_dir: Path,
+    *,
+    validate_request_outputs: bool = True,
+) -> dict[str, Any]:
     state = _parse_run_state_flat(run_dir)
     index_path = run_dir / "p000_index.md"
     index_text = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
@@ -409,11 +413,11 @@ def read_run_progress(run_dir: Path) -> dict[str, Any]:
     request_stage = None
     if not (run_dir / REQUEST_FILE_BY_KIND["asset"]).exists():
         request_stage = {"code": "p550", "label": "Asset Requests", "state": "pending"}
-    elif _has_missing_request_outputs(run_dir, "asset"):
+    elif validate_request_outputs and _has_missing_request_outputs(run_dir, "asset"):
         request_stage = {"code": "p560", "label": "Asset Generation", "state": "pending"}
     elif not (run_dir / REQUEST_FILE_BY_KIND["scene"]).exists():
         request_stage = {"code": "p650", "label": "Generation Ready", "state": "pending"}
-    elif _has_missing_request_outputs(run_dir, "scene"):
+    elif validate_request_outputs and _has_missing_request_outputs(run_dir, "scene"):
         request_stage = {"code": "p660", "label": "Image Generation", "state": "pending"}
     if request_stage and (
         current_stage is None
@@ -435,6 +439,7 @@ def read_run_progress(run_dir: Path) -> dict[str, Any]:
         "status": state.get("status") or "",
         "runtimeStage": state.get("runtime.stage") or "",
         "reviewPolicy": state.get("runtime.review_policy") or "",
+        "reviewMode": state.get("runtime.review_mode") or "standard",
         "pendingGates": [key.removeprefix("gate.") for key, value in sorted(state.items()) if key.startswith("gate.") and value == "required"],
         "currentStage": current_stage,
         "stages": stages,
@@ -718,6 +723,30 @@ def load_request_items(
             )
         )
     return loaded
+
+
+def load_request_items_for_display(
+    run_dir: Path,
+    kind: str,
+) -> list[ImageRequestItem]:
+    """Parse gallery metadata without validating immutable generation inputs.
+
+    Strict snapshot/reference verification remains mandatory in
+    ``load_request_items`` and every generation or mutation path.  A read-only
+    gallery refresh only needs the already-materialized Markdown projection.
+    """
+
+    filename = REQUEST_FILE_BY_KIND.get(kind)
+    if not filename:
+        raise ValueError("kind must be asset or scene")
+    path = run_dir / filename
+    if not path.exists():
+        return []
+    return parse_request_markdown(
+        path.read_text(encoding="utf-8"),
+        kind=kind,
+        run_dir=run_dir,
+    )
 
 
 def prompt_setting_targets() -> dict[str, dict[str, str]]:
@@ -1423,7 +1452,10 @@ def write_app_server_image_debug_log(
         "imageGenerationItemId": getattr(result, "image_generation_item_id", None) if result is not None else None,
         "imageGenerationItemCount": getattr(result, "image_generation_item_count", 0) if result is not None else 0,
         "savedPath": str(getattr(result, "saved_path", "") or "") if result is not None else "",
-        "destination": getattr(result, "destination", None) if result is not None else None,
+        # The provider result is bound to a private staging path.  This log is
+        # emitted only after the descriptor-verified copy, so strict run
+        # provenance must bind the verified canonical destination instead.
+        "destination": _run_relative_or_string(run_dir, destination),
         "outputSha256": output_sha256,
         "requestRevision": request_revision,
         "requestDigest": request_digest,
@@ -1852,6 +1884,47 @@ def is_first_image_retention_restored_run(run_dir: Path) -> bool:
         and payload.get("schemaVersion") == FIRST_IMAGE_RETENTION_RESTORE_SCHEMA
         and payload.get("runId") == run_dir.name
     )
+
+
+def list_restored_first_image_items(
+    run_dir: Path,
+    *,
+    kind: str,
+) -> list[dict[str, Any]]:
+    """Read the local restore receipt without rehashing retention archives."""
+
+    if kind not in {"asset", "scene"}:
+        raise ValueError("invalid image request kind")
+    marker = _first_image_retention_restore_marker(run_dir)
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schemaVersion")
+        != FIRST_IMAGE_RETENTION_RESTORE_SCHEMA
+        or payload.get("runId") != run_dir.name
+    ):
+        return []
+    restored_at = str(payload.get("restoredAt") or "")
+    records: list[dict[str, Any]] = []
+    for item in payload.get("restoredItems") or []:
+        if not isinstance(item, dict) or item.get("kind") != kind:
+            continue
+        item_id = str(item.get("itemId") or "").strip()
+        path = str(item.get("path") or "").strip()
+        if not item_id or not path:
+            continue
+        records.append(
+            {
+                **item,
+                "itemId": item_id,
+                "path": path,
+                "retainedAt": restored_at,
+            }
+        )
+    return records
 
 
 def restore_first_image_retention_run(

@@ -54,6 +54,7 @@ job:
 
 inputs:
   user_prompt: "string"
+  review_mode: "standard | preapproved"
   constraints:
     duration_seconds: 60
     aspect_ratio: "9:16"
@@ -79,9 +80,9 @@ audit:
 ```
 
 ### 1.4 実行ルール
-- **必須レビューゲート**: 事実性（Research）と最終納品（Video）
+- **必須レビューゲート（standard）**: 事実性（Research）と最終納品（Video）
 - **自動再試行**: 失敗原因が機械的（APIエラー、品質低下）の場合のみ
-- **人間レビュー**: 重要テーマ（時事、政治、医療、法律）は強制
+- **人間レビュー（standard）**: 重要テーマ（時事、政治、医療、法律）は強制。frontend create の明示 `preapproved` は reviewer turn を省略できるが、選択と deterministic validation の証跡を残す
 - **run-level orchestration**: L1 Run Orchestrator は `p100` 番台ごとの L2 P-Bucket Supervisor を順番に起動し、本文 artifact を読まずに handoff artifact と slot state だけで次 bucket へ進む
 - **L2 progress memo**: L1 Run Orchestrator は L2 supervisor 起動時に `logs/orchestration/l2_supervisor_progress.md` へ `invoked` を追記する。記録対象は L2 supervisor だけで、L3 task/review agents はここへ記録しない
 - **bucket single writer**: L2 P-Bucket Supervisor は担当 bucket 内の canonical artifact、`state.txt`、`p000_index.md` の single writer として動く。L3 task/review agents は isolated output のみを書く
@@ -92,9 +93,37 @@ audit:
 - **chat/manual stage helper**: chat で stage 作業を始めるときは、担当 L2 supervisor が `scripts/prepare-stage-context.py` を標準入口として使い、内部で `resolve -> audit -> readset確認` を直列で終えてから編集へ進む。返ってきた `readset_path` を起点に `global_docs -> stage_docs -> templates -> inputs` の順で読む
 - **user-triggered subagent audit**: stage 完了後に `scripts/build-subagent-audit-prompt.py` を使って貼り付け用 prompt を生成し、ユーザーが contextless audit subagent を起動して独立検証してもよい。script は `logs/grounding/<stage>.subagent_prompt.md` も保存し、subagent は content artifact を編集しない
 - **user-triggered image judgment subagent**: image prompt の意味評価は `scripts/build-subagent-image-review-prompt.py` で貼り付け用 prompt を生成し、ユーザーが contextless subagent に渡してよい。script は `logs/review/image_prompt.subagent_prompt.md` を保存し、subagent は hard schema 判定ではなく story/script/manifest の意味整合と revision 優先度を見る
-- **review policy**: run 開始時に `review.policy.story|image|narration=required|optional` を固定し、grounding はこの policy に従って承認 gate を有効/無効化する
+- **review policy**: run 開始時に `runtime.review_mode=standard|preapproved` と `review.policy.story|image|narration=required|optional|skipped` を固定し、grounding はこの policy に従って承認 gate を有効/無効化する。既定の `standard` は external semantic reviewer と frontend human review を省略しない。`skipped` は frontend create の明示 `create_input.json.review_mode=preapproved` に限り、reviewer turn の省略を表す。pack / digest / deterministic / provenance / output validation は preapproved でも必須とする
 - **Codex app-server transport gate**: semantic QA / prompt repair / image generation / chat で app-server を使う前に shared runtime contract の preflight を通す。DNS、WebSocket、HTTP fallback、`backend-api/codex/responses` の stream failure、writable `CODEX_HOME` を満たせない runtime setup failure は `runtime.app_server.transport.status=failed` または `review.semantic.<stage>.transport.status=failed` として扱い、semantic QA の意味判定 failure とは分離する。semantic QA / producer repair の app-server turn timeout は固定の total deadline ではなく no-progress watchdog とする。Codex app-server の turn notification、semantic report、producer report、修正対象 artifact のいずれかが更新されている間は改善中として待ち、観測可能な進捗が止まった時だけ `review.semantic.<stage>.watchdog.status=no_progress_timeout` で blocked にする。semantic report が存在しない transport failure では production-side repair loop を起動しない。semantic report が changes_requested を返した後の修正 agent 実行中に transport が落ちた場合も、producer report が未完了なら semantic failure ではなく `review.semantic.<stage>.repair.status=blocked_transport` で止める。producer report がすでに `status: done` なら、その成果物を採用して再レビューへ進む。
 - **Frontend create runtime path**: `/api/image-gen/runs/create` は backend process から `scripts/toc-immersive-frontend-run.py` を直接実行する。app-server skill turn の内側で同 helper を起動する nested app-server 経路は禁止する。restart helper が確認する runtime と実生成 runtime を一致させ、asset/scene 画像生成の失敗を health check と state diagnostics で同じ層から検出できるようにするため。
+
+### 1.4.0 Frontend create の review mode
+
+frontend の作成ダイアログは `レビューモード` を持ち、`通常レビュー`（`standard`、既定）と
+`全レビュー済み`（`preapproved`）を選択できる。選択値は各 create endpoint の request に
+`review_mode` として渡し、run 作成時に `logs/orchestration/create_input.json` の
+`toc.create_input.v1` へ保存する。`review_mode` は `standard|preapproved` のみを許可し、
+run 後に推測・変更しない。
+
+- `standard`: external semantic reviewer turn と frontend human review turn を通常どおり
+  実行する。`gate.*=required` と未承認の review status を保ち、L1/L2 が自動承認してはならない。
+- `preapproved`: frontend create で明示された場合だけ使う。`research`, `story`, `scene_set`,
+  `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt` の external semantic / human
+  reviewer turn を省略するが、各 stage の semantic `collection` / `scope` / `prompt` / `report`
+  を作成し、source/input digest に束縛された `deterministic_preapproval` report を残す。
+  `review.semantic.<stage>.mode=preapproved`、`report.source=deterministic_preapproval`、
+  `transport.status=skipped_preapproved`、`repair.status=skipped_preapproved`（shard stage は
+  `shards.status=skipped_preapproved`）を provenance として記録する。pack / digest、grounding・
+  schema・参照整合、request snapshot、provider provenance、生成 output の存在・decode・
+  fixed-slot completeness は必ず検証し、blocking diagnostics は fail-close する。
+
+preapproved の p680 handoff は、media generation と deterministic validation が終わるまで
+完了扱いにしない。materialization 直後は `gate.image_review=skipped` でも
+`review.image.status=pending` とし、terminal validation に成功した時だけ
+`slot.p680.status=done`、`review.image.status=approved`、`gate.image_review=skipped` を記録する。
+standard の同じ境界は `slot.p680.status=awaiting_approval`、`review.image.status=pending`、
+`gate.image_review=required` で frontend に handoff する。preapproved の `skipped` は reviewer
+turn だけの省略であり、deterministic/output/provenance checks の省略ではない。
 
 ### 1.4.1 canonical state の書き分け
 
@@ -105,6 +134,10 @@ audit:
 - `stage.*.status=`
   - 作業単位の完了状況
   - `awaiting_approval` は、作業は終わったが承認待ちで停止している状態
+- `runtime.review_mode=standard|preapproved`
+  - `logs/orchestration/create_input.json` の `review_mode` と一致する run-level contract
+- `runtime.review_policy=frontend|preapproved`
+  - `review_mode` から導出する実行 policy
 
 標準 stage:
 
@@ -187,7 +220,11 @@ run 開始時に固定する review policy:
 - `review.policy.narration`
   - `video_generation` 前に `review.narration.status=approved` を要求するか
 
-default は `required` だが、script draft まで一気に進めたい run では開始時に `optional` を選べる。
+各 policy の値は `required|optional|skipped`。default は `required` だが、script draft まで
+一気に進めたい run では開始時に `optional` を選べる。`skipped` は
+`create_input.json.review_mode=preapproved` による明示 frontend create だけで使用し、
+外部 reviewer turn の省略を表す。preapproved でも canonical review pack / digest、
+deterministic checks、request-bound provenance、generated-output validation は必須である。
 
 これにより、`state.txt` だけで
 

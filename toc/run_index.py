@@ -958,6 +958,7 @@ def build_run_index_markdown(run_dir: Path, *, state: dict[str, str] | None = No
         f"- job_id: `{flat_state.get('job_id', '') or '(unset)'}`",
         f"- status: `{flat_state.get('status', '') or '(unset)'}`",
         f"- runtime.stage: `{flat_state.get('runtime.stage', '') or '(unset)'}`",
+        f"- review_mode: `{flat_state.get('runtime.review_mode', '') or 'standard'}`",
         f"- current_position: `{current_position}`",
         f"- next_required_human_review: `{next_review_target if next_review_target != '-' else 'none'}`",
         f"- pending_gates: `{', '.join(pending) if pending else 'none'}`",

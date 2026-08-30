@@ -27,6 +27,7 @@ IMAGE_PROMPT_JUDGMENT_SCOPE = Path("logs/review/image_prompt.review_scope.json")
 IMAGE_PROMPT_JUDGMENT_PROMPT = Path("logs/review/image_prompt.judgment_prompt.md")
 IMAGE_PROMPT_JUDGMENT_REPORT = Path("logs/review/image_prompt.judgment.md")
 PASSING_JUDGMENT_STATUSES = {"passed"}
+TERMINAL_SHARD_JUDGMENT_STATUSES = {"passed", "failed"}
 SEMANTIC_REVIEW_INPUT_SCHEMA = "semantic_review_input_v1"
 LEGACY_SEMANTIC_REVIEW_INPUT_SCHEMA = "semantic_review_input_legacy_mtime_v1"
 _SEMANTIC_REVIEW_DIGEST_FIELDS = {
@@ -50,6 +51,11 @@ SEMANTIC_REVIEW_STAGES = {
     "image_prompt",
     "narration",
     "video_motion",
+}
+_SEMANTIC_SHARD_REVIEW_SCOPES = {
+    "image_prompt": "single_scene_image_prompt_shard",
+    "scene_set": "single_scene_entry",
+    "scene_detail": "single_scene_entry",
 }
 FOUNDATION_SEMANTIC_REVIEW_STAGES = {"research", "story"}
 FOUNDATION_SEMANTIC_CRITERIA = {
@@ -1867,6 +1873,86 @@ def _semantic_review_artifact_currentness_issues(
     return tuple(errors)
 
 
+def _semantic_shard_report_currentness_issues(
+    run_dir: Path,
+    *,
+    report_path: Path,
+    shard_id: str,
+    expected_entry_ids: Sequence[str],
+    aggregate_status: str,
+) -> tuple[str, ...]:
+    """Validate the semantic verdict that backs one aggregate shard entry."""
+
+    resolved_report, report_path_error = _contained_artifact_file(
+        run_dir,
+        report_path,
+        field=f"shard {shard_id} report",
+    )
+    if report_path_error or resolved_report is None:
+        # The artifact-level currentness check already reports this path issue.
+        return ()
+    try:
+        report_text = resolved_report.read_text(encoding="utf-8")
+    except OSError:
+        # The artifact-level currentness check handles an unreadable report.
+        return ()
+
+    errors: list[str] = []
+    required_fields = (
+        "status",
+        "reviewed_entries",
+        "blocked_entries",
+        "failed_selectors",
+        "reason_keys",
+    )
+    for field in required_fields:
+        count = semantic_report_field_occurrences(report_text, field)
+        if count != 1:
+            errors.append(
+                f"semantic review shard {shard_id} report must contain exactly one "
+                f"{field} field (found={count})"
+            )
+
+    status = parse_judgment_report_status(report_text)
+    if status not in TERMINAL_SHARD_JUDGMENT_STATUSES:
+        errors.append(
+            f"semantic review shard {shard_id} report status must be terminal "
+            f"passed or failed, got {status or '(missing)'}"
+        )
+    elif aggregate_status in PASSING_JUDGMENT_STATUSES and status != "passed":
+        errors.append(
+            f"semantic review shard {shard_id} report status must be passed "
+            f"when aggregate status is passed, got {status}"
+        )
+
+    normalized_entry_ids = [str(entry_id).strip() for entry_id in expected_entry_ids]
+    reviewed_entries = _report_list_values(report_text, "reviewed_entries")
+    if reviewed_entries != normalized_entry_ids:
+        errors.append(
+            f"semantic review shard {shard_id} reviewed_entries coverage must exactly "
+            "match scope entry_ids "
+            f"(expected={normalized_entry_ids}, got={reviewed_entries})"
+        )
+
+    if status == "passed":
+        for field in ("blocked_entries", "failed_selectors", "reason_keys"):
+            values = _report_list_values(report_text, field)
+            if values:
+                errors.append(
+                    f"semantic review shard {shard_id} passed shard report must have "
+                    f"empty {field}"
+                )
+        # Keep compatibility with reports that expose a scalar reason alias while
+        # still rejecting a non-empty reason on a passing shard.
+        reason_values = _report_list_values(report_text, "reason")
+        if reason_values:
+            errors.append(
+                f"semantic review shard {shard_id} passed shard report must have "
+                "empty reason"
+            )
+    return tuple(errors)
+
+
 def semantic_review_currentness_issues(run_dir: Path, stage: str) -> tuple[str, ...]:
     """Return fail-closed currentness issues for a canonical stage and its emitted shards."""
 
@@ -1899,6 +1985,11 @@ def semantic_review_currentness_issues(run_dir: Path, stage: str) -> tuple[str, 
     if not isinstance(shards, list):
         errors.append("semantic review shards must be an array")
         return tuple(errors)
+    if review_scope != "per_scene_shards":
+        errors.append(
+            "semantic review scope with shards must use review_scope "
+            "per_scene_shards"
+        )
 
     canonical_entry_ids = scope.get("entry_ids")
     expected_entry_ids = (
@@ -1908,6 +1999,20 @@ def semantic_review_currentness_issues(run_dir: Path, stage: str) -> tuple[str, 
     )
     canonical_scope_rel = semantic_review_relpaths(stage)["scope"].as_posix()
     canonical_report_rel = semantic_review_relpaths(stage)["report"].as_posix()
+    expected_shard_review_scope = _SEMANTIC_SHARD_REVIEW_SCOPES.get(stage)
+    aggregate_status = ""
+    canonical_report_path, _canonical_report_error = _contained_artifact_file(
+        run_dir,
+        paths["report"],
+        field="report",
+    )
+    if canonical_report_path is not None:
+        try:
+            aggregate_status = parse_judgment_report_status(
+                canonical_report_path.read_text(encoding="utf-8")
+            )
+        except OSError:
+            pass
     generation_keys = (
         "review_generation_id",
         "review_generation_collection_sha256",
@@ -2044,6 +2149,22 @@ def semantic_review_currentness_issues(run_dir: Path, stage: str) -> tuple[str, 
                 f"{shard_scope_load_error or 'invalid shard scope'}"
             )
             continue
+        if expected_shard_review_scope is not None and shard_scope_data.get(
+            "review_scope"
+        ) != expected_shard_review_scope:
+            errors.append(
+                f"semantic review shard {shard_id or index + 1} review_scope "
+                f"must be {expected_shard_review_scope}"
+            )
+        errors.extend(
+            _semantic_shard_report_currentness_issues(
+                run_dir,
+                report_path=Path(shard_report),
+                shard_id=shard_id or str(index + 1),
+                expected_entry_ids=shard_entry_ids,
+                aggregate_status=aggregate_status,
+            )
+        )
         expected_links = {
             "shard_id": shard_id,
             "scene_id": scene_id,

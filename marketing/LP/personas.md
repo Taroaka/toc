@@ -1,6 +1,6 @@
 # ToC marketing personas and message contract
 
-更新日: 2026-08-09
+更新日: 2026-08-29
 
 用途: ToC public site、persona-specific LP、広告、フォーム、proof 制作で使う audience / message の正本。
 
@@ -12,6 +12,8 @@ ToC の顧客層は年齢、性別、居住地ではなく、`画像・動画を
 
 - 主な顧客層は `side_business` と `small_business`
 - 最初の販売対象は `side_business × video`
+- 最初に深く届ける顧客像は `自分の知識や経験を、自分の世界観に合う画像で動画にしたい副業個人`
+- 最初の商品価値は `顧客の世界観に合う画像と動画を作ること`
 - `personal_brand` は独立した顧客層ではなく、`small_business` の利用例
 - 同じ広告、Hero、LP、CTAへ混ぜない
 - ToC の機能より visitor の未来を先に見せる
@@ -28,7 +30,7 @@ Shared brand layer:
 
 - persona ごとの実際の利用可能時間
 - 現在支払っている外注費 / tool cost
-- first-video experience へ支払える価格
+- 導入協力価格29,800円を、納品内容に見合うと判断する条件
 - long-form と short-form の優先順位
 - self-service、guided、done-for-you の希望比率
 - first video から second video へ進む条件
@@ -37,13 +39,18 @@ Shared brand layer:
 
 ### Internal name
 
-`本業後の限られた時間で、動画副業を試したい人`
+`人へ伝えられる知識や経験はあるが、自分の世界観に合う画像を作れず、動画発信を始められていない人`
+
+これは副業に取り組む個人全体を狭める定義ではなく、最初の商品ページ、実例、相談を一人分の切実な状況へ合わせるための顧客像である。
 
 ### Situation
 
 - 本業や家事の後に使える時間が限られている
 - YouTube、Shorts、Reels、TikTok などに収益機会を感じている
 - niche や企画の候補はある、または探している
+- 自分の仕事、生活、学習から得た知識や経験がある
+- 生成した画像がありきたりで、自分のブランドや世界観に合わない
+- 自分らしさが伝わる画像と動画を作りたい
 - 動画制作の全工程を学んでから始める余裕はない
 - 外注へ大きく投資する前に、小さく反応を確かめたい
 - tutorial や tool 紹介を見るほど、選択肢が増えて止まりやすい
@@ -53,7 +60,8 @@ Shared brand layer:
 ### Jobs to be done
 
 ```text
-本業以外の収益につながる動画企画を思いついたとき、
+人へ伝えられる知識や経験を副業の動画にしたいとき、
+ありきたりなAI画像で自分らしさを失わず、
 動画制作一式を習得したり、高額な外注をしたりせず、
 公開できる最初の1本へ変えたい。
 そうすれば、思いつきのまま抱えず、実際の反応で続ける価値を判断できる。
@@ -64,10 +72,10 @@ Shared brand layer:
 The user is not initially buying `AI agents`. The user is buying:
 
 1. 開始できること
-2. 最初の1本が完成すること
-3. 小さく市場反応を試せること
-4. 次の1本へ改善を引き継げること
-5. 続けるか止めるかを実データで判断できること
+2. 自分の世界観に合う画像と最初の1本が完成すること
+3. 自分らしさを画像と動画で伝えられること
+4. 小さく市場反応を試せること
+5. 採用画像と世界観の基準を手元に残せること
 
 ### Current alternatives
 
@@ -87,6 +95,7 @@ The strongest competitor is often `何も公開しないまま先送りするこ
 - 仕事後に編集へ集中する時間が残らない
 - 1本作って疲れ、継続できない
 - 外注前に企画の当たり外れを確認できない
+- 生成画像がありきたりで、自分の発信に見えない
 
 ### Emotional pains
 
@@ -94,6 +103,7 @@ The strongest competitor is often `何も公開しないまま先送りするこ
 - AI時代に取り残される感覚
 - 失敗して時間と費用を無駄にする不安
 - `自分には動画制作は無理` という自己評価
+- AIで作ると自分らしさが失われる不安
 - 周囲に話した副業を始められていない気まずさ
 
 Do not amplify fear. Show a credible first step and realistic boundary.
@@ -102,7 +112,7 @@ Do not amplify fear. Show a credible first step and realistic boundary.
 
 ```text
 動画制作を勉強している人
-  -> 自分の企画を公開して検証できる人
+  -> 自分らしい世界観で知識や経験を届けられる人
   -> 改善しながら小さな事業を育てられる人
 ```
 
@@ -110,8 +120,8 @@ Do not amplify fear. Show a credible first step and realistic boundary.
 
 | Moment | Before | Site must create | Evidence |
 |--------|--------|------------------|----------|
-| ad / first view | 面倒、難しそう | `これなら始められるかもしれない` | one-line idea -> completed output |
-| consideration | 本当に簡単か疑う | `必要な判断だけすればよい` | ToC-owned / human-owned stage split |
+| ad / first view | AI画像が自分らしくない | `自分の世界観に合う画像と動画を作れる` | 世界観の基準 -> 画像群 -> 完成動画 |
+| consideration | AIでは自分らしさが消えそう | `見た目を自分で採用できる` | 代表画像と採用・不採用理由 |
 | risk review | お金と時間が無駄にならないか | `まず1本で検証できる` | real elapsed time, human time, provider cost |
 | action | 何を入力すればよいか不安 | `自分の案を書くだけでよい` | concrete idea examples |
 | after first video | 続けられるか不安 | `次は改善して作れる` | retained brief, reusable series structure |
@@ -120,37 +130,37 @@ Do not amplify fear. Show a credible first step and realistic boundary.
 
 #### Identity outcome
 
-`動画を作れる人になり、副業のアイデアを実際に試せる。`
+`自分らしい世界観の画像と動画で、知識や経験を届けられる。`
 
 #### Emotional benefit
 
-`作れないまま時間だけが過ぎる状態から抜け出せる。`
+`ありきたりな見た目で止まる状態から抜け出せる。`
 
 #### Functional benefit
 
-`企画、台本、映像、音声、編集を一つの制作フローで進められる。`
+`世界観の基準、画像、構成、映像、音声、編集を一つの制作の流れで進められる。`
 
 #### Mechanism
 
-`一行のテーマを起点に、ToC が必要な制作工程を組み立てる。`
+`知識や経験と、色、空気感、光、質感、構図、避けたい表現を起点に、ToC が世界観に合う画像と動画を組み立てる。`
 
 ### Copy contract
 
 Hero:
 
 ```text
-動画副業を、
-「作れない」で終わらせない。
+あなたの世界観に合う
+画像と動画を。
 ```
 
 Subcopy:
 
 ```text
-本業のあとに、複数の生成AIや編集ソフトと格闘しなくていい。
-テーマを伝えたら、ToC が最初の1本までの制作工程をつなぎます。
+色、空気感、光、質感、構図まで。
+あなたらしい画像を作り、一本の動画まで仕上げます。
 ```
 
-Primary CTA: `副業の最初のコンテンツを作る`
+Primary CTA: `自分の世界観で動画を作る`
 
 CTA destination expectation: すぐに決済させるのではなく、動画テーマを一行で入力する。
 
@@ -161,22 +171,25 @@ CTA destination expectation: すぐに決済させるのではなく、動画テ
 - 外注見積もりが想定より高かった
 - 投稿頻度を維持できなかった
 - AI動画の情報収集を続けているが、まだ公開していない
+- 生成画像を試したが、自分の世界観に合わなかった
 
 ### Required proof
 
-1. novice-equivalent brief から完成した動画
-2. input から output までの全 boundary
-3. elapsed time と active human time
-4. 使用した外部 provider cost
-5. human review / revision count
-6. 同じ brief から short / long へ展開した例
-7. 2本目で再利用できた設計と素材
+1. 実在する知識・経験と、届けたい相手
+2. 顧客が採用した世界観の基準
+3. 同じ基準に合う代表画像と各場面の採用画像
+4. その画像で作った完成動画
+5. 採用画像と不採用画像、その判断理由
+6. input から output までの全 boundary
+7. elapsed time、active human time、外部 provider cost、revision count
+8. 2本目で再利用できた世界観の基準、設定、素材
 
 ### Objections and answers
 
 | Objection | Hidden concern | Answer direction | Required evidence |
 |-----------|----------------|------------------|-------------------|
 | 編集経験がない | 自分だけ使いこなせない | tool 操作より目的、視聴者、テーマから始める | first-time flow |
+| AI画像が自分らしくない | 他と同じ見た目になりたくない | 世界観を見た目の基準へ変え、代表画像を先に採用する | 基準、候補、採用理由 |
 | 何を作ればよいか分からない | niche 選びで失敗したくない | audience / problem / outcome を brief にする | idea examples |
 | AI動画は低品質 | 公開して恥をかきたくない | human approval と品質 gate を見せる | before / after review |
 | 本当に稼げるか | 投資回収が不安 | 収益を保証せず、低い制作負担で検証回数を増やす | cost / test case |
@@ -196,14 +209,15 @@ Do not optimize the LP to acquire these leads.
 
 Ask no more than two before contact details.
 
-- `side_business_stage`: アイデアだけ / 制作途中 / 公開経験あり / 継続中
-- `side_business_goal`: 最初の1本 / niche 検証 / 投稿継続 / 収益化検証
+- `desired_impression`: どんな印象・世界観で伝えたいですか？
+- `reference_image_status`: 参考にしたい画像がある / ない / 相談したい
 
 Optional after lead submission:
 
-- weekly available time
-- preferred platform
-- current tools / outsourcing
+- 避けたい表現
+- 週に使える時間
+- 公開先
+- 現在使っている制作サービスや外注
 
 ## 2. Persona B: small_business
 
@@ -297,11 +311,11 @@ The user is buying:
 
 #### Functional benefit
 
-`事業の目的、見た目の基準、採用判断を保ちながら、画像・動画制作を継続できる。`
+`ブランドの世界観を見た目の基準へ変え、同じ基準に合う画像・動画制作を継続できる。`
 
 #### Mechanism
 
-`ToC が既存素材や依頼内容を一つの制作の流れへ入れ、人間の承認を通して画像・動画へ展開する。`
+`ToC が色、空気感、光、質感、構図、避けたい表現を整理し、既存素材や依頼内容を同じ世界観の画像・動画へ展開する。`
 
 ### Copy contract
 
@@ -316,7 +330,7 @@ Subcopy:
 
 ```text
 商品、サービス、知識を、自社の表現基準を保ったまま、
-繰り返し改善・再利用できる画像・動画制作へ変えます。
+ブランドの世界観に合う、改善・再利用できる画像・動画へ変えます。
 ```
 
 Primary CTA: `ビジネスの画像・動画制作を設計する`
@@ -334,7 +348,7 @@ Primary CTA: `ビジネスの画像・動画制作を設計する`
 
 ### Required proof
 
-1. 実在する事業上の依頼内容から作った画像セットまたは動画
+1. 実在する事業上の依頼内容と、ブランドの世界観を表す見た目の基準
 2. 依頼内容から完成物までを追える記録
 3. 目的、届けたい相手、見た目、禁止表現の基準
 4. 複数の画像または長尺・短尺で保たれた一貫性
@@ -380,10 +394,10 @@ Optional after lead submission:
 |------|------------------|------------------------|
 | 最初に得たい結果 | 最初の動画で反応を試す | 事業価値を伝える制作能力を持つ |
 | 最初の不安 | 時間と費用を無駄にする | 公開品質と導入負担が事業を傷つける |
-| 重視する実例 | 完成までの時間、作業、費用、次回利用 | 一貫性、採用判断、再利用、担当範囲 |
+| 重視する実例 | 世界観の基準、採用画像群、完成動画、時間、費用 | ブランドに合う画像群、一貫性、採用判断、再利用 |
 | 言葉 | 最初の一本、試す、改善する | 事業、自社、蓄積、再利用、公開品質 |
-| 行動ボタン | 副業の最初のコンテンツを作る | ビジネスの画像・動画制作を設計する |
-| 最上部の実例 | 仕事後の企画が公開できる動画になる | 事業上の依頼が画像セットまたは動画になる |
+| 行動ボタン | 自分の世界観で動画を作る | ビジネスの画像・動画制作を設計する |
+| 最上部の実例 | 知識・経験と世界観が画像群と動画になる | 事業上の依頼とブランド基準が画像セットまたは動画になる |
 | 問い合わせ後の成功 | 最初の動画を採用する | 最初の制作物と再利用できる基準を採用する |
 
 同じ広告や顧客層別ページの見出しで `副業もビジネスも` と混ぜない。流入後に顧客層を勝手に変更せず、訪問者が明示的に選び直せるようにする。
@@ -407,10 +421,12 @@ Before paid acquisition, produce at minimum:
 
 ### Side-business proof
 
-- one realistic niche explainer or discovery video
-- one short-form derivative
-- transparent time / cost / revision record
-- a second-video reuse example
+- 実在する知識・経験と届けたい相手
+- 顧客が採用した世界観の基準
+- 同じ基準に合う採用画像群
+- その画像から作った完成動画
+- 時間、費用、修正、採用判断の記録
+- 二本目で世界観の基準と画像設定を再利用した実例
 
 ### 小規模ビジネス向けの実例
 
@@ -436,5 +452,6 @@ Questions:
 5. 何が見えれば新しい制作方法を信用できるか
 6. 最初の1本のあと、何があれば次も作るか
 7. self-service / guided / done-for-you のどれを選ぶか、なぜか
+8. どのような見た目なら自分の世界観に合うと判断できるか
 
 Update persona assumptions only from repeated patterns. Keep individual anecdotes in research notes, not in this canonical contract.

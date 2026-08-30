@@ -175,6 +175,8 @@ def semantic_repair_relpaths(stage: str, round_number: int) -> dict[str, Path]:
         "prompt": base / f"{stage}.repair_round_{round_number:02d}.prompt.md",
         "report": base / f"{stage}.repair_round_{round_number:02d}.producer_report.md",
         "commit": base / f"{stage}.repair_round_{round_number:02d}.commit.json",
+        "patch": base / f"{stage}.repair_round_{round_number:02d}.patch.json",
+        "result": base / f"{stage}.repair_round_{round_number:02d}.patch_result.json",
     }
 
 

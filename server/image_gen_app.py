@@ -181,6 +181,7 @@ from toc.partial_media import (
     write_partial_media_projection,
 )
 from toc.story_duration import audit_duration, measure_manifest_runtime, normalize_target_duration
+from toc.review_mode import review_mode_is_bound_preapproved
 from scripts.world_walk_source import (
     read_regular_file_nofollow,
     validate_world_walk_source_path,
@@ -201,7 +202,9 @@ from toc.review_projection import (
     video_manifest_review_projection_sha256,
 )
 from toc.semantic_review import (
+    FOUNDATION_SEMANTIC_CRITERIA,
     IMAGE_PROMPT_JUDGMENT_REPORT,
+    LEGACY_SEMANTIC_REVIEW_INPUT_SCHEMA,
     SEMANTIC_REVIEW_INPUT_SCHEMA,
     SemanticReviewStatus,
     check_semantic_review,
@@ -236,6 +239,13 @@ from toc.semantic_repair_reconciliation import (
     SemanticRepairReconciliationResult,
     reconcile_semantic_repair_documents,
 )
+from toc.semantic_repair_patch import (
+    PATCH_STAGES as SEMANTIC_PATCH_STAGES,
+    SCENE_ALLOWED_ROOTS as SEMANTIC_PATCH_SCENE_ROOTS,
+    CUT_ALLOWED_ROOTS as SEMANTIC_PATCH_CUT_ROOTS,
+    SemanticRepairPatchError,
+    apply_semantic_repair_patch_documents,
+)
 from toc.scene_acceptance_contract import criterion_registry_payload, resolve_criterion
 from toc.tts_text import load_pronunciation_aliases, prepare_elevenlabs_tts_text
 from .image_gen import (
@@ -251,7 +261,9 @@ from .image_gen import (
     list_reference_options,
     list_candidate_items,
     list_first_image_retentions,
+    list_restored_first_image_items,
     list_runs,
+    load_request_items_for_display,
     load_request_items as _load_request_items_unbound,
     output_root,
     prompt_setting_targets,
@@ -336,18 +348,14 @@ def safe_run_dir(run_id: str, root: Path | None = None) -> Path:
     if not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}:
         raise ValueError("invalid run_id")
     resolved = _safe_run_dir_unbound(run_id, root)
-    lexical = Path(os.path.abspath(os.fspath(resolved)))
-    if os.path.abspath(os.fspath(lexical)) != binding.lexical_root:
-        raise RunRootBindingError(
-            "requested run does not match the active bound run root"
-        )
-    _assert_bound_run_root(lexical)
-    _assert_bound_run_root(lexical)
     opened = os.stat(resolved, follow_symlinks=False)
     if (opened.st_dev, opened.st_ino) != binding.identity:
         raise RunRootBindingError(
-            f"resolved run does not match the bound run root: {run_id}"
+            "requested run does not match the active bound run root"
         )
+    lexical = Path(binding.lexical_root)
+    _assert_bound_run_root(lexical)
+    _assert_bound_run_root(lexical)
     return lexical
 
 
@@ -766,6 +774,7 @@ class CreateRunRequest(BaseModel):
     generate_images: bool = True
     stop_target: str = Field(default="p680", pattern="^(p650|p680)$")
     target_duration_seconds: int = Field(default=300, ge=300, le=1200, strict=True)
+    review_mode: Literal["standard", "preapproved"] = "standard"
 
 
 class CreateStoryboardRunRequest(BaseModel):
@@ -773,12 +782,14 @@ class CreateStoryboardRunRequest(BaseModel):
     source: str | None = Field(default=None, max_length=4000)
     stop_target: Literal["p680"] = "p680"
     target_duration_seconds: int = Field(default=300, ge=300, le=1200, strict=True)
+    review_mode: Literal["standard", "preapproved"] = "standard"
 
 
 class CreateWorldWalkRunRequest(BaseModel):
     source_run_id: str = Field(min_length=1, max_length=200)
     title: str | None = Field(default=None, max_length=120)
     target_duration_seconds: int = Field(default=300, ge=300, le=1200, strict=True)
+    review_mode: Literal["standard", "preapproved"] = "standard"
 
 
 class ResumeRunRequest(BaseModel):
@@ -1310,12 +1321,15 @@ def _toc_immersive_command(
     experience: str = "cinematic_story",
     source_run_id: str | None = None,
     target_duration_seconds: int = 300,
+    review_mode: Literal["standard", "preapproved"] = "standard",
 ) -> str:
     source_text = (source or "").strip() or topic
     if stop_target not in {"p650", "p680"}:
         raise ValueError("stop_target must be p650 or p680")
     if not 300 <= target_duration_seconds <= 1200:
         raise ValueError("target_duration_seconds must be between 300 and 1200")
+    if review_mode not in {"standard", "preapproved"}:
+        raise ValueError("review_mode must be standard or preapproved")
     if experience == CREATE_MODE_WORLD_WALK and not source_run_id:
         raise ValueError("source_run_id is required for world_walk")
     payload = {
@@ -1325,8 +1339,15 @@ def _toc_immersive_command(
         "stop_target": stop_target,
         "experience": experience,
         "target_duration_seconds": target_duration_seconds,
-        "review_policy": "frontend",
-        "handoff": "frontend_image_review",
+        "review_policy": (
+            "preapproved" if review_mode == "preapproved" else "frontend"
+        ),
+        "review_mode": review_mode,
+        "handoff": (
+            "preapproved_p680"
+            if review_mode == "preapproved"
+            else "frontend_image_review"
+        ),
         "required_skill": "toc-immersive-runner",
         "expected_skill_path": str(_toc_immersive_skill_path().relative_to(ROOT)),
     }
@@ -1342,7 +1363,12 @@ def _toc_immersive_command(
             "Do not create a second run directory.",
             "Do not return success for placeholder scaffold output.",
             "Do not replace the canonical stage route with a shortcut or postprocess patch.",
-            "Human review must be handed off to the frontend, not skipped.",
+            (
+                "Treat every review gate as preapproved; keep deterministic "
+                "validation and generated-output checks."
+                if review_mode == "preapproved"
+                else "Human review must be handed off to the frontend, not skipped."
+            ),
             "",
             "Request JSON:",
             json.dumps(payload, ensure_ascii=False, indent=2),
@@ -1356,6 +1382,7 @@ def _toc_world_walk_command(
     run_id: str,
     source_run_id: str,
     target_duration_seconds: int = 300,
+    review_mode: Literal["standard", "preapproved"] = "standard",
 ) -> str:
     return _toc_immersive_command(
         topic=topic,
@@ -1363,6 +1390,7 @@ def _toc_world_walk_command(
         experience=CREATE_MODE_WORLD_WALK,
         source_run_id=source_run_id,
         target_duration_seconds=target_duration_seconds,
+        review_mode=review_mode,
     )
 
 
@@ -3772,15 +3800,14 @@ def _deterministic_image_prompt_hard_gate_errors(
     *,
     require_current: bool = True,
 ) -> list[str]:
+    errors = _deterministic_image_prompt_review_integrity_errors(
+        run_dir,
+        require_current=require_current,
+    )
     report_path = run_dir / "image_prompt_story_review.md"
     if not report_path.is_file():
-        return ["deterministic image prompt story review is missing"]
-    errors: list[str] = []
-    if require_current and not _deterministic_image_prompt_review_sources_are_current(run_dir):
-        errors.append("deterministic image prompt story review is stale")
+        return errors
     report_text = report_path.read_text(encoding="utf-8", errors="replace")
-    errors.extend(_deterministic_image_prompt_review_structure_errors(report_text))
-    errors.extend(_deterministic_image_prompt_review_binding_errors(run_dir, report_text))
     status = _image_prompt_story_review_scalar(report_text, "status").upper()
     blocking_hard_text = _image_prompt_story_review_scalar(
         report_text,
@@ -3813,6 +3840,25 @@ def _deterministic_image_prompt_hard_gate_errors(
     return _dedupe_preserve_order(errors)
 
 
+def _deterministic_image_prompt_review_integrity_errors(
+    run_dir: Path,
+    *,
+    require_current: bool = True,
+) -> list[str]:
+    """Validate report inventory, counts, selectors, and source binding only."""
+
+    report_path = run_dir / "image_prompt_story_review.md"
+    if not report_path.is_file():
+        return ["deterministic image prompt story review is missing"]
+    errors: list[str] = []
+    if require_current and not _deterministic_image_prompt_review_sources_are_current(run_dir):
+        errors.append("deterministic image prompt story review is stale")
+    report_text = report_path.read_text(encoding="utf-8", errors="replace")
+    errors.extend(_deterministic_image_prompt_review_structure_errors(report_text))
+    errors.extend(_deterministic_image_prompt_review_binding_errors(run_dir, report_text))
+    return _dedupe_preserve_order(errors)
+
+
 _DETERMINISTIC_REVIEW_METADATA_KEYS = {
     "output",
     "narration",
@@ -3823,6 +3869,7 @@ _DETERMINISTIC_REVIEW_METADATA_KEYS = {
     "human_review_reason",
     "review",
     "agent_review_reason_keys",
+    "agent_review_reason_messages",
     "hard_finding_codes",
     "blocking_hard_finding_codes",
     "soft_finding_codes",
@@ -4115,11 +4162,25 @@ def _validate_p650_run_core(
         require_compiled_v2=True,
     )
     _validate_semantic_reviews(run_dir, ("research", "story"))
+    preapproved_stages = ["research", "story"]
     if require_downstream_semantic_reviews:
         _validate_semantic_reviews_for_media_generation(
             run_dir,
             ("scene_set", "scene_detail", "cut_blueprint", "asset_plan", "image_prompt"),
         )
+        preapproved_stages.extend(
+            (
+                "scene_set",
+                "scene_detail",
+                "cut_blueprint",
+                "asset_plan",
+                "image_prompt",
+            )
+        )
+    _validate_preapproved_review_provenance(
+        run_dir,
+        preapproved_stages,
+    )
     if require_generated_asset_outputs:
         try:
             _validate_generated_outputs(run_dir, "asset")
@@ -4172,7 +4233,7 @@ def _validate_p650_run_core(
         )
         and not (
             not require_provider_ready_freeze
-            and slot in {"p560", "p570", "p650"}
+            and slot in {"p550", "p560", "p570", "p650"}
             and (state.get(f"slot.{slot}.status") or "").lower() == "pending"
         )
     ]
@@ -4279,6 +4340,7 @@ def _validate_frontend_create_run(run_id: str, *, strict_visual_quality: bool = 
     if strict_visual_quality:
         _validate_p680_visual_quality(run_dir, mode="terminal")
     state = parse_state_file(run_dir / "state.txt")
+    preapproved_reviews = _review_mode_is_preapproved(run_dir)
     localized_partial_slots = _localized_partial_semantic_slots(run_dir)
     missing_slots = [slot for slot in P680_FIXED_SLOTS if not state.get(f"slot.{slot}.status")]
     if missing_slots:
@@ -4306,9 +4368,15 @@ def _validate_frontend_create_run(run_id: str, *, strict_visual_quality: bool = 
         "slot.p560.status": "done",
         "slot.p650.status": "done",
         "slot.p660.status": "done",
-        "slot.p680.status": "awaiting_approval",
-        "review.image.status": "pending",
-        "gate.image_review": "required",
+        "slot.p680.status": (
+            "done" if preapproved_reviews else "awaiting_approval"
+        ),
+        "review.image.status": (
+            "approved" if preapproved_reviews else "pending"
+        ),
+        "gate.image_review": (
+            "skipped" if preapproved_reviews else "required"
+        ),
     }
     mismatches = [f"{key}={state.get(key)}" for key, value in expected.items() if state.get(key) != value]
     if mismatches:
@@ -5216,10 +5284,13 @@ async def _run_toc_immersive_frontend_cli_helper(
     experience: str = "cinematic_story",
     source_run_id: str | None = None,
     target_duration_seconds: int = 300,
+    review_mode: Literal["standard", "preapproved"] = "standard",
     materialize_only: bool = False,
     expected_run_identity: tuple[int, int] | None = None,
     run_descriptor: int | None = None,
 ) -> str:
+    if review_mode not in {"standard", "preapproved"}:
+        raise ValueError("review_mode must be standard or preapproved")
     cmd = [
         sys.executable,
         str(ROOT / "scripts" / "toc-immersive-frontend-run.py"),
@@ -5236,6 +5307,8 @@ async def _run_toc_immersive_frontend_cli_helper(
         "--experience",
         experience,
     ]
+    if review_mode == "preapproved":
+        cmd.extend(["--review-mode", review_mode])
     if source_run_id:
         cmd.extend(["--source-run", f"output/{source_run_id}"])
     if materialize_only:
@@ -5385,6 +5458,7 @@ async def _run_toc_skill_helper(
     experience: str = "cinematic_story",
     source_run_id: str | None = None,
     target_duration_seconds: int = 300,
+    review_mode: Literal["standard", "preapproved"] = "standard",
 ) -> None:
     if app_server_disabled():
         raise RuntimeError("Codex app-server is disabled")
@@ -5401,6 +5475,7 @@ async def _run_toc_skill_helper(
         experience=experience,
         source_run_id=source_run_id,
         target_duration_seconds=target_duration_seconds,
+        review_mode=review_mode,
     )
     try:
         await client.start()
@@ -5480,6 +5555,7 @@ async def _run_toc_skill_helper(
                 source=source,
                 run_id=run_id,
                 stop_target=stop_target,
+                **({"review_mode": review_mode} if review_mode != "standard" else {}),
             )
             write_app_server_debug_log(
                 run_dir=run_dir,
@@ -5514,6 +5590,7 @@ async def _run_toc_skill_helper(
             source=source,
             run_id=run_id,
             stop_target=stop_target,
+            **({"review_mode": review_mode} if review_mode != "standard" else {}),
         )
         write_app_server_debug_log(
             run_dir=run_dir,
@@ -5546,8 +5623,17 @@ async def _run_toc_skill_helper_until_stop_target(
     source: str | None = None,
     run_id: str,
     stop_target: str = "p680",
+    review_mode: Literal["standard", "preapproved"] = "standard",
 ) -> None:
-    task = asyncio.create_task(_run_toc_skill_helper(topic=topic, source=source, run_id=run_id, stop_target=stop_target))
+    task = asyncio.create_task(
+        _run_toc_skill_helper(
+            topic=topic,
+            source=source,
+            run_id=run_id,
+            stop_target=stop_target,
+            review_mode=review_mode,
+        )
+    )
     if stop_target == "p680":
         await task
         return
@@ -14603,7 +14689,11 @@ def _mark_image_prompt_draft_reviewed(run_dir: Path, *, request_revision: str) -
         expected_request_revision=request_revision,
         require_resolved_references=False,
     )
-    deterministic_errors = _deterministic_image_prompt_hard_gate_errors(run_dir)
+    deterministic_errors = (
+        _deterministic_image_prompt_review_integrity_errors(run_dir)
+        if _review_mode_is_preapproved(run_dir)
+        else _deterministic_image_prompt_hard_gate_errors(run_dir)
+    )
     if deterministic_errors:
         raise RuntimeError(
             "draft image prompt deterministic review failed: "
@@ -14650,7 +14740,11 @@ def _mark_image_prompt_request_freeze_done(
         expected_request_revision=expected_request_revision,
         require_resolved_references=True,
     )
-    deterministic_errors = _deterministic_image_prompt_hard_gate_errors(run_dir)
+    deterministic_errors = (
+        _deterministic_image_prompt_review_integrity_errors(run_dir)
+        if _review_mode_is_preapproved(run_dir)
+        else _deterministic_image_prompt_hard_gate_errors(run_dir)
+    )
     if deterministic_errors:
         raise RuntimeError(
             "ToC run did not reach p650: deterministic image prompt review failed: "
@@ -16586,12 +16680,16 @@ def _mark_image_generation_review_ready(run_id: str) -> None:
         and resolve_run_relative(run_dir, item.output).is_file()
     )
     partial_media = bool(blocked_item_ids)
+    preapproved_reviews = _review_mode_is_preapproved(run_dir)
+    terminal_status = (
+        "done" if preapproved_reviews else "awaiting_approval"
+    )
     try:
         _finalize_p600_supervisor_result(
             run_dir,
             completed_slots=("p610", "p620", "p630", "p640", "p650", "p660", "p670", "p680"),
             terminal_slot="p680",
-            terminal_status="awaiting_approval",
+            terminal_status=terminal_status,
         )
     except RuntimeError as exc:
         _invalidate_image_generation_review_handoff(
@@ -16617,9 +16715,13 @@ def _mark_image_generation_review_ready(run_id: str) -> None:
         {
             "status": "P680",
             "runtime.stage": (
-                "scene_images_partial_ready_for_review"
-                if partial_media
-                else "scene_images_ready_for_review"
+                "scene_images_review_preapproved"
+                if preapproved_reviews
+                else (
+                    "scene_images_partial_ready_for_review"
+                    if partial_media
+                    else "scene_images_ready_for_review"
+                )
             ),
             "slot.p660.status": "done",
             "slot.p660.note": (
@@ -16630,11 +16732,21 @@ def _mark_image_generation_review_ready(run_id: str) -> None:
             ),
             "slot.p670.status": "skipped",
             "slot.p670.note": "scene image semantic QA removed; frontend human review is next",
-            "slot.p680.status": "awaiting_approval",
-            "slot.p680.note": "scene image human review ready in frontend",
-            "stage.scene_implementation.status": "awaiting_approval",
-            "review.image.status": "pending",
-            "gate.image_review": "required",
+            "slot.p680.status": terminal_status,
+            "slot.p680.note": (
+                "scene image review accepted by explicit preapproved mode"
+                if preapproved_reviews
+                else "scene image human review ready in frontend"
+            ),
+            "stage.scene_implementation.status": (
+                "done" if preapproved_reviews else "awaiting_approval"
+            ),
+            "review.image.status": (
+                "approved" if preapproved_reviews else "pending"
+            ),
+            "gate.image_review": (
+                "skipped" if preapproved_reviews else "required"
+            ),
             "review.semantic.create_media_generated": "true",
             "review.semantic.create_scene_media_generated": "true",
             "image_generation.status": (
@@ -16661,11 +16773,16 @@ def _validate_image_review_ready(run_id: str) -> None:
     _validate_generated_outputs(run_dir, "scene")
     _validate_p680_visual_quality(run_dir, mode="terminal")
     state = parse_state_file(run_dir / "state.txt")
+    preapproved_reviews = _review_mode_is_preapproved(run_dir)
     expected = {
         "slot.p660.status": "done",
         "slot.p670.status": "skipped",
-        "slot.p680.status": "awaiting_approval",
-        "review.image.status": "pending",
+        "slot.p680.status": (
+            "done" if preapproved_reviews else "awaiting_approval"
+        ),
+        "review.image.status": (
+            "approved" if preapproved_reviews else "pending"
+        ),
     }
     mismatches = [f"{key}={state.get(key)}" for key, value in expected.items() if state.get(key) != value]
     if mismatches:
@@ -17572,6 +17689,10 @@ def _validate_pre_asset_provider_gate(run_dir: Path) -> None:
             "pre-asset semantic gate is not current: "
             + " | ".join(semantic_issues)
         )
+    _validate_preapproved_review_provenance(
+        run_dir,
+        PRE_ASSET_SEMANTIC_STAGES,
+    )
     state = parse_state_file(run_dir / "state.txt")
     dependency_issues = [
         f"{stage}={status}"
@@ -18110,7 +18231,7 @@ def _invalidate_published_image_generation_review_handoff(
 ) -> bool:
     state = parse_state_file(run_dir / "state.txt")
     published = (
-        state.get("slot.p680.status") == "awaiting_approval"
+        state.get("slot.p680.status") in {"awaiting_approval", "done"}
         or state.get("orchestration.p600.supervisor.status") == "done"
     )
     if not published:
@@ -18590,6 +18711,360 @@ SEMANTIC_REVIEW_SLOT_BY_STAGE = {
     "narration": "p720",
     "video_motion": "p820",
 }
+PREAPPROVED_CREATE_REVIEW_STAGES = frozenset(
+    {
+        "research",
+        "story",
+        "scene_set",
+        "scene_detail",
+        "cut_blueprint",
+        "asset_plan",
+        "image_prompt",
+    }
+)
+
+
+def _review_mode_is_preapproved(run_dir: Path) -> bool:
+    return review_mode_is_bound_preapproved(run_dir)
+
+
+def _validate_preapproved_review_provenance(
+    run_dir: Path,
+    stages: Iterable[str],
+) -> None:
+    if not _review_mode_is_preapproved(run_dir):
+        return
+    state = parse_state_file(run_dir / "state.txt")
+    errors: list[str] = []
+    for stage in stages:
+        expected = {
+            f"review.semantic.{stage}.mode": "preapproved",
+            f"review.semantic.{stage}.report.source": (
+                "deterministic_preapproval"
+            ),
+            f"review.semantic.{stage}.transport.status": (
+                "skipped_preapproved"
+            ),
+            f"review.semantic.{stage}.repair.status": (
+                "skipped_preapproved"
+            ),
+        }
+        if stage in {"scene_set", "scene_detail", "image_prompt"}:
+            expected[f"review.semantic.{stage}.shards.status"] = (
+                "skipped_preapproved"
+            )
+        errors.extend(
+            f"{key}={state.get(key)}"
+            for key, value in expected.items()
+            if state.get(key) != value
+        )
+        report_path = run_dir / semantic_review_relpaths(stage)["report"]
+        try:
+            report_text = report_path.read_text(
+                encoding="utf-8",
+                errors="strict",
+            )
+        except (OSError, UnicodeError):
+            errors.append(f"{stage}.report=missing_or_unreadable")
+        else:
+            if "deterministic_preapproval" not in report_text:
+                errors.append(
+                    f"{stage}.report=missing_deterministic_preapproval"
+                )
+    if errors:
+        raise RuntimeError(
+            "preapproved review provenance is incomplete: "
+            + ", ".join(errors[:30])
+        )
+
+
+def _preapproved_semantic_report_text(
+    *,
+    stage: str,
+    input_digest: str,
+    entry_ids: list[str],
+) -> str:
+    criteria = [
+        {
+            "criterion_id": criterion_id,
+            "status": "passed",
+            "evidence": (
+                "explicit preapproved review mode; deterministic pack and "
+                f"source digest were materialized for {stage}"
+            ),
+        }
+        for criterion_id in FOUNDATION_SEMANTIC_CRITERIA.get(stage, ())
+    ]
+    lines = [
+        "status: passed",
+        f"semantic_review_input_digest: {input_digest}",
+        "reviewed_entries: " + json.dumps(entry_ids, ensure_ascii=False),
+        "blocked_entries: []",
+        "findings: []",
+    ]
+    if criteria:
+        lines.append(
+            "criteria_results_json: "
+            + json.dumps(criteria, ensure_ascii=False)
+        )
+    lines.extend(
+        [
+            "failed_selectors: []",
+            "reason_keys: []",
+            "notes: [deterministic_preapproval]",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _materialize_preapproved_semantic_shard_reports(
+    *,
+    run_dir: Path,
+    stage: str,
+    scope: Mapping[str, Any],
+) -> int:
+    raw_shards = scope.get("shards")
+    if raw_shards is None:
+        return 0
+    if not isinstance(raw_shards, list):
+        raise RuntimeError(
+            f"{stage} preapproved semantic shard plan is malformed"
+        )
+    for index, shard in enumerate(raw_shards, start=1):
+        artifacts = shard.get("artifacts") if isinstance(shard, Mapping) else None
+        if not isinstance(artifacts, Mapping):
+            raise RuntimeError(
+                f"{stage} preapproved semantic shard {index} lacks artifacts"
+            )
+        scope_value = str(artifacts.get("scope") or "").strip()
+        report_value = str(artifacts.get("report") or "").strip()
+        if not scope_value or not report_value:
+            raise RuntimeError(
+                f"{stage} preapproved semantic shard {index} lacks scope/report"
+            )
+        shard_scope_path = resolve_run_relative(run_dir, scope_value)
+        shard_report_path = resolve_run_relative(run_dir, report_value)
+        shard_scope = _load_semantic_scope(shard_scope_path)
+        shard_entry_ids = [
+            str(entry_id)
+            for entry_id in shard_scope.get("entry_ids", [])
+            if str(entry_id).strip()
+        ]
+        shard_digest = str(
+            shard_scope.get("semantic_review_input_digest") or ""
+        )
+        if (
+            shard_scope.get("stage") != stage
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", shard_digest) is None
+            or not shard_entry_ids
+        ):
+            raise RuntimeError(
+                f"{stage} preapproved semantic shard {index} is not digest-bound"
+            )
+        _write_semantic_artifact_text(
+            run_dir,
+            shard_report_path,
+            _preapproved_semantic_report_text(
+                stage=stage,
+                input_digest=shard_digest,
+                entry_ids=shard_entry_ids,
+            ),
+        )
+    return len(raw_shards)
+
+
+def _materialize_preapproved_semantic_review(
+    *,
+    job_id: str,
+    run_dir: Path,
+    stage: str,
+    image_prompt_request_revision: str,
+    image_prompt_provider_ready: bool,
+) -> None:
+    _run_bound_subprocess(
+        run_dir,
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "build-semantic-review-pack.py"),
+            "--run-dir",
+            str(run_dir),
+            "--stage",
+            stage,
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    relpaths = semantic_review_relpaths(stage)
+    collection_path = run_dir / relpaths["collection"]
+    scope_path = run_dir / relpaths["scope"]
+    prompt_path = run_dir / relpaths["prompt"]
+    report_path = run_dir / relpaths["report"]
+    if not report_path.is_file():
+        _write_semantic_artifact_text(
+            run_dir,
+            report_path,
+            "status: pending\n",
+        )
+    _refresh_semantic_review_input_digest(
+        run_dir=run_dir,
+        scope_path=scope_path,
+        collection_path=collection_path,
+        prompt_path=prompt_path,
+        report_path=report_path,
+    )
+    scope = _load_semantic_scope(scope_path)
+    input_digest = str(scope.get("semantic_review_input_digest") or "")
+    entry_ids = [
+        str(entry_id)
+        for entry_id in scope.get("entry_ids", [])
+        if str(entry_id).strip()
+    ]
+    if (
+        re.fullmatch(r"sha256:[0-9a-f]{64}", input_digest) is None
+        or not entry_ids
+    ):
+        raise RuntimeError(
+            f"{stage} preapproved semantic pack is missing digest-bound entries"
+        )
+    diagnostics = scope.get("diagnostics")
+    if isinstance(diagnostics, Mapping):
+        blocking_diagnostics: list[str] = []
+        malformed_diagnostics: list[str] = []
+        for key, value in diagnostics.items():
+            normalized_key = str(key)
+            if normalized_key.endswith("_count"):
+                if (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < 0
+                ):
+                    malformed_diagnostics.append(normalized_key)
+                elif value:
+                    blocking_diagnostics.append(f"{normalized_key}={value}")
+            elif normalized_key.endswith(
+                ("_entries", "_codes", "failed_selectors")
+            ):
+                if not isinstance(value, list):
+                    malformed_diagnostics.append(normalized_key)
+                elif value:
+                    blocking_diagnostics.append(
+                        f"{normalized_key}={len(value)}"
+                    )
+        if malformed_diagnostics:
+            raise RuntimeError(
+                f"{stage} preapproved semantic pack has malformed deterministic diagnostics: "
+                + ", ".join(malformed_diagnostics)
+            )
+        if blocking_diagnostics:
+            raise RuntimeError(
+                f"{stage} preapproved semantic pack has blocking deterministic diagnostics: "
+                + ", ".join(blocking_diagnostics)
+            )
+    elif diagnostics is not None:
+        raise RuntimeError(
+            f"{stage} preapproved semantic pack has malformed deterministic diagnostics"
+        )
+    report_text = _preapproved_semantic_report_text(
+        stage=stage,
+        input_digest=input_digest,
+        entry_ids=entry_ids,
+    )
+    _write_semantic_artifact_text(run_dir, report_path, report_text)
+    materialized_shard_count = _materialize_preapproved_semantic_shard_reports(
+        run_dir=run_dir,
+        stage=stage,
+        scope=scope,
+    )
+    if stage == "image_prompt":
+        _write_semantic_artifact_text(
+            run_dir,
+            run_dir / IMAGE_PROMPT_JUDGMENT_REPORT,
+            report_text,
+        )
+    result = check_semantic_review(run_dir, stage)
+    if not result.passed:
+        raise RuntimeError(
+            f"{stage} deterministic preapproval report is invalid: "
+            + "; ".join(result.errors)
+        )
+    state_updates = review_status_to_state(stage, result)
+    state_updates.update(
+        semantic_loop_state_updates(
+            stage,
+            status="passed",
+            attempt=1,
+            max_attempts=1,
+            error_count=0,
+        )
+    )
+    state_updates.update(
+        {
+            f"review.semantic.{stage}.mode": "preapproved",
+            f"review.semantic.{stage}.report.source": (
+                "deterministic_preapproval"
+            ),
+            f"review.semantic.{stage}.report.materialized_at": now_iso(),
+            f"review.semantic.{stage}.output_contract.status": "passed",
+            f"review.semantic.{stage}.output_contract.attempt": "0",
+            f"review.semantic.{stage}.output_contract.max_attempts": "0",
+            f"review.semantic.{stage}.output_contract.retry_count": "0",
+            f"review.semantic.{stage}.transport.status": "skipped_preapproved",
+            f"review.semantic.{stage}.repair.active": "false",
+            f"review.semantic.{stage}.repair.status": "skipped_preapproved",
+        }
+    )
+    if stage in {"scene_set", "scene_detail", "image_prompt"}:
+        state_updates.update(
+            {
+                f"review.semantic.{stage}.shards.status": (
+                    "skipped_preapproved"
+                ),
+                f"review.semantic.{stage}.shards.count": str(
+                    materialized_shard_count or len(entry_ids)
+                ),
+                f"review.semantic.{stage}.shards.failed_count": "0",
+            }
+        )
+    slot = SEMANTIC_REVIEW_SLOT_BY_STAGE.get(stage)
+    if slot:
+        state_updates[f"slot.{slot}.status"] = "done"
+        state_updates[f"slot.{slot}.note"] = (
+            f"{stage} review accepted by explicit preapproved mode"
+        )
+    if stage == "image_prompt":
+        state_updates.update(
+            {
+                "review.image_prompt.judgment.status": "passed",
+                "review.image_prompt.judgment.error_count": "0",
+            }
+        )
+    append_state_snapshot(run_dir / "state.txt", state_updates)
+    _clear_partial_media_stage(run_dir, stage=stage)
+    if stage == "image_prompt" and image_prompt_provider_ready:
+        _mark_image_prompt_request_freeze_done(
+            run_dir,
+            expected_request_revision=image_prompt_request_revision,
+        )
+    elif stage == "image_prompt":
+        _mark_image_prompt_draft_reviewed(
+            run_dir,
+            request_revision=image_prompt_request_revision,
+        )
+    write_app_server_debug_log(
+        run_dir=run_dir,
+        operation="semantic_review",
+        status="skipped_preapproved",
+        item_id=job_id,
+        request={"stage": stage, "reviewMode": "preapproved"},
+        response={
+            "status": result.status,
+            "entryCount": result.entry_count,
+            "report": relpaths["report"].as_posix(),
+        },
+    )
 
 
 async def _run_semantic_review(
@@ -18615,6 +19090,18 @@ async def _run_semantic_review(
         )
     else:
         image_prompt_request_revision = ""
+    if (
+        stage in PREAPPROVED_CREATE_REVIEW_STAGES
+        and _review_mode_is_preapproved(run_dir)
+    ):
+        _materialize_preapproved_semantic_review(
+            job_id=job_id,
+            run_dir=run_dir,
+            stage=stage,
+            image_prompt_request_revision=image_prompt_request_revision,
+            image_prompt_provider_ready=image_prompt_provider_ready,
+        )
+        return
     reusable_result = _reusable_passed_semantic_review(run_dir, stage)
     if reusable_result is not None:
         _record_reused_semantic_review(run_dir, stage, reusable_result, max_attempts=attempts)
@@ -19156,15 +19643,48 @@ def _semantic_repair_report_status(report_path: Path) -> str:
     return parse_judgment_report_status(report_text) or "pending"
 
 
+_SEMANTIC_FIELD_SELECTOR_RE = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_-]*"
+    r"(?:"
+    r"\.[A-Za-z_][A-Za-z0-9_-]*"
+    r"|\[(?:\*|\d+|[\w.-]+|[A-Za-z_][A-Za-z0-9_-]*="
+    r"[\w.-]+(?:, *[\w.-]+)*)\]"
+    r")*"
+)
+
+
+def _semantic_field_selector_is_valid(value: str) -> bool:
+    return _SEMANTIC_FIELD_SELECTOR_RE.fullmatch(value) is not None
+
+
 def _canonical_semantic_repair_target_selector(value: str) -> str:
-    scene_match = re.fullmatch(
-        r"scene:?(\d+(?:\.\d+)*)"
-        r"(?:\.[A-Za-z_][A-Za-z0-9_-]*"
-        r"(?:\.[A-Za-z_][A-Za-z0-9_-]*|\[\d+\])*)?",
+    cut_match = re.fullmatch(
+        r"scene:?(\d+(?:\.\d+)*)_cut:?(\d+(?:\.\d+)*)"
+        r"(?:\.(.+))?",
         value,
         flags=re.IGNORECASE,
     )
-    if scene_match:
+    if cut_match and (
+        cut_match.group(3) is None
+        or _semantic_field_selector_is_valid(cut_match.group(3))
+    ):
+        return (
+            "scene"
+            + ".".join(
+                str(int(part)) for part in cut_match.group(1).split(".")
+            )
+            + "_cut"
+            f"{cut_match.group(2)}"
+        )
+    scene_match = re.fullmatch(
+        r"scene:?(\d+(?:\.\d+)*)(?:\.(.+))?",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if scene_match and (
+        scene_match.group(2) is None
+        or _semantic_field_selector_is_valid(scene_match.group(2))
+    ):
         normalized_id = ".".join(
             str(int(part)) for part in scene_match.group(1).split(".")
         )
@@ -20256,6 +20776,484 @@ class _BoundSemanticRepairWorkspace:
             relative != prefix and relative.is_relative_to(prefix)
             for prefix in self.allowed_prefixes
         )
+
+
+@dataclass
+class _BoundSemanticPatchWorkspace:
+    lease: tempfile.TemporaryDirectory[str]
+    run_dir: Path
+    binding: RunRootBinding
+    root: Path
+    stage: str
+    round_number: int
+    patch_path: Path
+    root_identity: tuple[int, int]
+    immutable_sha256s: dict[Path, str]
+    expected_review_input_digest: str
+
+    def cleanup(self) -> None:
+        self.lease.cleanup()
+
+
+def _semantic_patch_seed_bytes(
+    *,
+    stage: str,
+    expected_review_input_digest: str,
+) -> bytes:
+    return (
+        json.dumps(
+            {
+                "schema_version": "semantic_repair_patch_v1",
+                "stage": stage,
+                "semantic_review_input_digest": expected_review_input_digest,
+                "operations": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _write_private_semantic_patch_file_atomic(
+    *,
+    root: Path,
+    path: Path,
+    data: bytes,
+    exclusive: bool,
+    root_identity: tuple[int, int],
+) -> None:
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError("semantic patch output escapes its workspace") from exc
+    root_descriptor = os.open(
+        root,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    opened_root = os.fstat(root_descriptor)
+    if (
+        not stat.S_ISDIR(opened_root.st_mode)
+        or (opened_root.st_dev, opened_root.st_ino) != root_identity
+    ):
+        os.close(root_descriptor)
+        raise RuntimeError("semantic patch workspace root identity changed")
+    parent_descriptor = root_descriptor
+    try:
+        for component in relative.parts[:-1]:
+            next_descriptor = os.open(
+                component,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_descriptor,
+            )
+            if parent_descriptor != root_descriptor:
+                os.close(parent_descriptor)
+            parent_descriptor = next_descriptor
+    except BaseException:
+        if parent_descriptor != root_descriptor:
+            os.close(parent_descriptor)
+        os.close(root_descriptor)
+        raise
+    temporary_name = f".{path.name}.write-{os.getpid()}-{uuid.uuid4().hex}"
+    temporary_descriptor = -1
+    try:
+        try:
+            current = os.stat(
+                path.name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            current = None
+        if current is not None:
+            if exclusive:
+                raise FileExistsError(
+                    f"semantic patch output already exists: {relative}"
+                )
+            if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+                raise RuntimeError(
+                    f"semantic patch output is unsafe: {relative}"
+                )
+        temporary_descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        remaining = memoryview(data)
+        while remaining:
+            written = os.write(temporary_descriptor, remaining)
+            if written <= 0:
+                raise OSError("semantic patch write made no progress")
+            remaining = remaining[written:]
+        os.fsync(temporary_descriptor)
+        temporary_stat = os.fstat(temporary_descriptor)
+        if (
+            not stat.S_ISREG(temporary_stat.st_mode)
+            or temporary_stat.st_nlink != 1
+        ):
+            raise RuntimeError(
+                f"semantic patch temporary output is unsafe: {relative}"
+            )
+        os.close(temporary_descriptor)
+        temporary_descriptor = -1
+        os.replace(
+            temporary_name,
+            path.name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        os.fsync(parent_descriptor)
+        named_root = root.lstat()
+        if (
+            not stat.S_ISDIR(named_root.st_mode)
+            or stat.S_ISLNK(named_root.st_mode)
+            or (named_root.st_dev, named_root.st_ino) != root_identity
+        ):
+            raise RuntimeError("semantic patch workspace root identity changed")
+    finally:
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            pass
+        if parent_descriptor != root_descriptor:
+            os.close(parent_descriptor)
+        os.close(root_descriptor)
+
+
+def _reset_bound_semantic_patch_file(
+    workspace: _BoundSemanticPatchWorkspace,
+) -> None:
+    _verify_bound_semantic_patch_workspace(workspace)
+    _write_private_semantic_patch_file_atomic(
+        root=workspace.root,
+        path=workspace.patch_path,
+        data=_semantic_patch_seed_bytes(
+            stage=workspace.stage,
+            expected_review_input_digest=(
+                workspace.expected_review_input_digest
+            ),
+        ),
+        exclusive=False,
+        root_identity=workspace.root_identity,
+    )
+
+
+def _prepare_bound_semantic_patch_workspace(
+    *,
+    run_dir: Path,
+    binding: RunRootBinding,
+    stage: str,
+    round_number: int,
+) -> _BoundSemanticPatchWorkspace:
+    review_paths = semantic_review_relpaths(stage)
+    repair_paths = semantic_repair_relpaths(stage, round_number)
+    scope_bytes = read_regular_file_nofollow(
+        run_dir,
+        review_paths["scope"],
+        expected_root_identity=binding.identity,
+    )
+    try:
+        scope = json.loads(scope_bytes.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("semantic patch review scope is unreadable") from exc
+    if not _semantic_patch_scope_is_canonical(stage, scope):
+        raise RuntimeError(
+            "semantic patch review scope is not canonical and digest-bound"
+        )
+    expected_digest = str(
+        scope.get("semantic_review_input_digest")
+        if isinstance(scope, dict)
+        else ""
+    ).strip()
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", expected_digest) is None:
+        raise RuntimeError("semantic patch review digest is missing")
+    sources = _semantic_repair_scope_sources(scope_bytes)
+    immutable_relpaths = {
+        *review_paths.values(),
+        repair_paths["prompt"],
+        repair_paths["commit"],
+        *sources,
+    }
+    lease = tempfile.TemporaryDirectory(prefix="toc-semantic-patch-")
+    root = Path(lease.name)
+    root_identity = (root.stat().st_dev, root.stat().st_ino)
+    immutable_sha256s: dict[Path, str] = {}
+    try:
+        for relative in sorted(immutable_relpaths, key=lambda item: item.as_posix()):
+            data = read_regular_file_nofollow(
+                run_dir,
+                relative,
+                expected_root_identity=binding.identity,
+            )
+            destination = root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+            destination.chmod(0o400)
+            immutable_sha256s[relative] = hashlib.sha256(data).hexdigest()
+        patch_path = root / repair_paths["patch"]
+        patch_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_private_semantic_patch_file_atomic(
+            root=root,
+            path=patch_path,
+            data=_semantic_patch_seed_bytes(
+                stage=stage,
+                expected_review_input_digest=expected_digest,
+            ),
+            exclusive=True,
+            root_identity=root_identity,
+        )
+        patch_path.chmod(0o600)
+        return _BoundSemanticPatchWorkspace(
+            lease=lease,
+            run_dir=run_dir,
+            binding=binding,
+            root=root,
+            stage=stage,
+            round_number=round_number,
+            patch_path=patch_path,
+            root_identity=root_identity,
+            immutable_sha256s=immutable_sha256s,
+            expected_review_input_digest=expected_digest,
+        )
+    except Exception:
+        lease.cleanup()
+        raise
+
+
+def _semantic_patch_file_completed(
+    workspace: _BoundSemanticPatchWorkspace,
+) -> bool:
+    try:
+        payload = json.loads(
+            read_regular_file_nofollow(
+                workspace.root,
+                workspace.patch_path.relative_to(workspace.root),
+                expected_root_identity=workspace.root_identity,
+            ).decode("utf-8")
+        )
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("schema_version") == "semantic_repair_patch_v1"
+        and isinstance(payload.get("operations"), list)
+        and bool(payload["operations"])
+    )
+
+
+def _verify_bound_semantic_patch_workspace(
+    workspace: _BoundSemanticPatchWorkspace,
+) -> None:
+    try:
+        root_metadata = workspace.root.lstat()
+    except OSError as exc:
+        raise RuntimeError("semantic patch workspace root is unavailable") from exc
+    if (
+        not stat.S_ISDIR(root_metadata.st_mode)
+        or stat.S_ISLNK(root_metadata.st_mode)
+        or (root_metadata.st_dev, root_metadata.st_ino)
+        != workspace.root_identity
+    ):
+        raise RuntimeError("semantic patch workspace root is unsafe")
+    allowed = {*workspace.immutable_sha256s, workspace.patch_path.relative_to(workspace.root)}
+    allowed_directories: set[Path] = set()
+    for relative in allowed:
+        allowed_directories.update(relative.parents)
+    allowed_directories.discard(Path("."))
+    files: dict[Path, Path] = {}
+    for path in workspace.root.rglob("*"):
+        relative = path.relative_to(workspace.root)
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise RuntimeError(
+                f"semantic patch workspace entry is unavailable: {relative}"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise RuntimeError(
+                f"semantic patch workspace entry is unsafe: {relative}"
+            )
+        if stat.S_ISDIR(metadata.st_mode):
+            if relative not in allowed_directories:
+                raise RuntimeError(
+                    f"semantic patch workspace entry is unapproved: {relative}"
+                )
+            continue
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise RuntimeError(
+                f"semantic patch workspace entry is unsafe: {relative}"
+            )
+        files[relative] = path
+    unexpected = sorted(
+        relative.as_posix() for relative in files if relative not in allowed
+    )
+    if unexpected:
+        raise RuntimeError(
+            "semantic patch workspace contains unapproved files: "
+            + ", ".join(unexpected)
+        )
+    for relative, expected in workspace.immutable_sha256s.items():
+        path = files.get(relative)
+        if path is None or hashlib.sha256(
+            read_regular_file_nofollow(
+                workspace.root,
+                relative,
+                expected_root_identity=workspace.root_identity,
+            )
+        ).hexdigest() != expected:
+            raise RuntimeError(
+                f"semantic patch immutable input changed: {relative}"
+            )
+        canonical = read_regular_file_nofollow(
+            workspace.run_dir,
+            relative,
+            expected_root_identity=workspace.binding.identity,
+        )
+        if hashlib.sha256(canonical).hexdigest() != expected:
+            raise RuntimeError(
+                f"semantic patch canonical input changed: {relative}"
+            )
+
+
+def _semantic_patch_submission_prompt(
+    *,
+    workspace: _BoundSemanticPatchWorkspace,
+    target_selectors: list[str],
+    errors: tuple[str, ...],
+    rejection: SemanticRepairPatchError | None = None,
+) -> str:
+    relative_patch = workspace.patch_path.relative_to(workspace.root).as_posix()
+    rejection_text = (
+        "\nPrevious patch was rejected deterministically.\n"
+        f"- code: `{rejection.code}`\n"
+        f"- operation_index: `{rejection.operation_index}`\n"
+        f"- message: `{str(rejection)}`\n"
+        "Rewrite the patch file; do not defend the rejected operation.\n"
+        if rejection is not None
+        else ""
+    )
+    return (
+        "# Semantic Repair Patch Planner\n\n"
+        "Do not edit story.md, script.md, video_manifest.md, review artifacts, "
+        "state, or any other source file. They are immutable inputs.\n"
+        f"Write exactly one JSON object to `{relative_patch}`.\n"
+        "Use schema_version `semantic_repair_patch_v1`, the exact stage and "
+        "semantic_review_input_digest already present in that file, and a "
+        "non-empty `operations` array.\n"
+        "Every operation must contain only: op=`replace`, artifact=`script.md`, "
+        "selector, path, expected_old, value, reason_key.\n"
+        "Paths are selector-relative dotted paths. List items must use one stable "
+        "key selector such as `event_sequence[beat_id=scene20_event_turn]`. "
+        "Never use indexes, wildcards, add/remove, source IDs, scene/cut/beat IDs, "
+        "digests, schema/policy versions, status, or generated/provider fields.\n"
+        "Copy expected_old exactly from the immutable source. Make the smallest "
+        "number of leaf/key replacements needed. Do not output Markdown.\n\n"
+        f"- stage: `{workspace.stage}`\n"
+        f"- writable scene roots: `{sorted(SEMANTIC_PATCH_SCENE_ROOTS)}`\n"
+        f"- writable cut roots: `{sorted(SEMANTIC_PATCH_CUT_ROOTS)}`\n"
+        "- failed selectors: "
+        + json.dumps(target_selectors, ensure_ascii=False)
+        + "\n- gate errors: "
+        + json.dumps(list(errors), ensure_ascii=False)
+        + "\n"
+        + rejection_text
+    )
+
+
+def _semantic_patch_scope_is_canonical(
+    stage: str,
+    scope: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(scope, Mapping):
+        return False
+    if (
+        scope.get("stage") != stage
+        or scope.get("semantic_review_input_schema")
+        != SEMANTIC_REVIEW_INPUT_SCHEMA
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            str(scope.get("semantic_review_input_digest") or ""),
+        )
+        is None
+    ):
+        return False
+    for key in ("scope_binding_sha256", "collection_sha256", "prompt_sha256"):
+        if re.fullmatch(r"[0-9a-f]{64}", str(scope.get(key) or "")) is None:
+            return False
+    source_digests = scope.get("source_artifact_digests")
+    return bool(source_digests) and isinstance(source_digests, list) and all(
+        isinstance(record, Mapping)
+        and bool(str(record.get("path") or "").strip())
+        and re.fullmatch(r"[0-9a-f]{64}", str(record.get("sha256") or ""))
+        is not None
+        for record in source_digests
+    )
+
+
+def _semantic_patch_route_enabled(
+    stage: str,
+    target_selectors: Iterable[str],
+    *,
+    scope: Mapping[str, Any] | None = None,
+) -> bool:
+    if (
+        stage not in SEMANTIC_PATCH_STAGES
+        or not _semantic_patch_scope_is_canonical(stage, scope)
+    ):
+        return False
+    selectors = [str(value or "").strip() for value in target_selectors]
+    if not selectors:
+        return False
+    return _semantic_patch_selectors_supported(selectors)
+
+
+def _semantic_patch_selectors_supported(
+    target_selectors: Iterable[str],
+) -> bool:
+    selectors = [str(value or "").strip() for value in target_selectors]
+    return bool(selectors) and all(
+        re.fullmatch(
+            r"scene:?\d+(?:\.\d+)*(?:_cut:?\d+(?:\.\d+)*)?",
+            selector,
+        ) is not None
+        for selector in selectors
+    )
+
+
+def _load_semantic_patch_payload(
+    workspace: _BoundSemanticPatchWorkspace,
+) -> dict[str, Any]:
+    _verify_bound_semantic_patch_workspace(workspace)
+    try:
+        payload = json.loads(
+            read_regular_file_nofollow(
+                workspace.root,
+                workspace.patch_path.relative_to(workspace.root),
+                expected_root_identity=workspace.root_identity,
+            ).decode("utf-8")
+        )
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SemanticRepairPatchError(
+            "patch_json_invalid",
+            "patch file is not valid UTF-8 JSON",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise SemanticRepairPatchError("patch_not_object", "patch must be an object")
+    return payload
 
 
 def _validate_semantic_repair_structured_output(
@@ -25270,15 +26268,6 @@ def _semantic_failure_selector_scope_key(
             return f"scene:{scene_id}"
         return normalized
 
-    field_selector_pattern = re.compile(
-        r"[A-Za-z_][A-Za-z0-9_-]*"
-        r"(?:"
-        r"\.[A-Za-z_][A-Za-z0-9_-]*"
-        r"|\[(?:\*|\d+|[\w.-]+|[A-Za-z_][A-Za-z0-9_-]*="
-        r"[\w.-]+(?:, *[\w.-]+)*)\]"
-        r")*"
-    )
-
     current_scope = tuple(
         str(entry_id or "").strip()
         for entry_id in scope_entry_ids
@@ -25308,7 +26297,7 @@ def _semantic_failure_selector_scope_key(
         if nested_field_path:
             first_segment = nested_field_path.split(".", 1)[0].split("[", 1)[0]
             if (
-                field_selector_pattern.fullmatch(nested_field_path) is None
+                not _semantic_field_selector_is_valid(nested_field_path)
                 or re.fullmatch(
                     r"scene[_:]?\d+(?:\.\d+)*",
                     first_segment,
@@ -25341,7 +26330,7 @@ def _semantic_failure_selector_scope_key(
             if not raw_lower.startswith(prefix):
                 continue
             field_path = raw[len(prefix) :]
-            if field_selector_pattern.fullmatch(field_path) is not None:
+            if _semantic_field_selector_is_valid(field_path):
                 nested_scope_matches.add(canonical)
     if len(nested_scope_matches) == 1:
         return next(iter(nested_scope_matches))
@@ -25358,7 +26347,7 @@ def _semantic_failure_selector_scope_key(
     }
     if separator != ":" or artifact not in in_scope_artifacts:
         return None
-    if field_selector_pattern.fullmatch(field_path) is None:
+    if not _semantic_field_selector_is_valid(field_path):
         return None
     return current_scope[0]
 
@@ -25519,6 +26508,277 @@ async def _run_turn_until_semantic_artifact_completed(
         raise
 
 
+def _apply_bound_semantic_patch_workspace(
+    workspace: _BoundSemanticPatchWorkspace,
+    *,
+    target_selectors: list[str],
+) -> list[str]:
+    payload = _load_semantic_patch_payload(workspace)
+    paths = semantic_repair_relpaths(workspace.stage, workspace.round_number)
+    script_path = workspace.run_dir / "script.md"
+    manifest_path = workspace.run_dir / "video_manifest.md"
+    asset_plan_path = workspace.run_dir / "asset_plan.md"
+    original_script, script = load_structured_document(script_path)
+    original_manifest, manifest = load_structured_document(manifest_path)
+    original_asset_plan = ""
+    asset_plan: dict[str, Any] = {"assets": []}
+    if asset_plan_path.is_file():
+        original_asset_plan, loaded_asset_plan = load_structured_document(
+            asset_plan_path
+        )
+        if isinstance(loaded_asset_plan, dict):
+            asset_plan = loaded_asset_plan
+    if not isinstance(script, dict) or not isinstance(manifest, dict):
+        raise SemanticRepairPatchError(
+            "canonical_document_invalid",
+            "script/manifest must be structured mappings",
+        )
+    script_before = deepcopy(script)
+    manifest_before = deepcopy(manifest)
+    asset_before = deepcopy(asset_plan)
+    result = apply_semantic_repair_patch_documents(
+        stage=workspace.stage,
+        expected_review_input_digest=workspace.expected_review_input_digest,
+        patch=payload,
+        script=script,
+        manifest=manifest,
+        asset_plan=asset_plan,
+        allowed_selectors=target_selectors,
+    )
+    changed_artifacts: list[str] = []
+    outputs: dict[Path, str] = {}
+    if script != script_before:
+        changed_artifacts.append("script.md")
+        outputs[script_path] = _render_manifest_data(original_script, script)
+    if manifest != manifest_before:
+        changed_artifacts.append("video_manifest.md")
+        outputs[manifest_path] = _render_manifest_data(
+            original_manifest, manifest
+        )
+    if asset_plan != asset_before and original_asset_plan:
+        changed_artifacts.append("asset_plan.md")
+        outputs[asset_plan_path] = _render_manifest_data(
+            original_asset_plan, asset_plan
+        )
+    if not changed_artifacts:
+        raise SemanticRepairPatchError(
+            "patch_no_effect",
+            "validated operations produced no canonical change",
+        )
+    patch_canonical_path = workspace.run_dir / paths["patch"]
+    result_path = workspace.run_dir / paths["result"]
+    report_path = workspace.run_dir / paths["report"]
+    patch_text = json.dumps(
+        payload,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    ) + "\n"
+    patch_sha256 = hashlib.sha256(patch_text.encode("utf-8")).hexdigest()
+    reason_keys = list(
+        dict.fromkeys(
+            str(operation.get("reason_key") or "").strip()
+            for operation in payload["operations"]
+            if str(operation.get("reason_key") or "").strip()
+        )
+    )
+    result_payload = {
+        "schema_version": "semantic_repair_patch_result_v1",
+        "status": "applied",
+        "stage": workspace.stage,
+        "round_number": workspace.round_number,
+        "semantic_review_input_digest": workspace.expected_review_input_digest,
+        "patch_sha256": patch_sha256,
+        "applied_operation_count": result.applied_operation_count,
+        "changed_artifacts": changed_artifacts,
+        "changed_selectors": list(result.changed_selectors),
+        "reason_keys": reason_keys,
+    }
+    result_text = json.dumps(
+        result_payload,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+    report_lines = [
+        f"# Semantic Producer Repair Report: {workspace.stage}",
+        "",
+        "status: done",
+        f"round: {workspace.round_number}",
+        f"repair_input_digest: {workspace.expected_review_input_digest}",
+        f"patch_sha256: {patch_sha256}",
+        "changed_artifacts:",
+        *[f"  - {artifact}" for artifact in changed_artifacts],
+        "changed_selectors:",
+        *[f"  - {selector}" for selector in result.changed_selectors],
+        "reason_keys:",
+        *[f"  - {reason_key}" for reason_key in reason_keys],
+        "generated_by: deterministic_semantic_patch_orchestrator",
+        "",
+    ]
+    outputs.update(
+        {
+            patch_canonical_path: patch_text,
+            result_path: result_text,
+            report_path: "\n".join(report_lines),
+        }
+    )
+    before = _capture_file_transaction(
+        tuple(outputs),
+        state_paths=(workspace.run_dir / "state.txt",),
+    )
+    try:
+        for path, text in outputs.items():
+            _write_semantic_artifact_text(workspace.run_dir, path, text)
+        append_state_snapshot(
+            workspace.run_dir / "state.txt",
+            {
+                f"review.semantic.{workspace.stage}.repair.patch": (
+                    paths["patch"].as_posix()
+                ),
+                f"review.semantic.{workspace.stage}.repair.patch_sha256": (
+                    patch_sha256
+                ),
+                f"review.semantic.{workspace.stage}.repair.apply.status": (
+                    "applied"
+                ),
+                f"review.semantic.{workspace.stage}.repair.apply.operation_count": str(
+                    result.applied_operation_count
+                ),
+                f"review.semantic.{workspace.stage}.repair.apply.changed_selectors": ", ".join(
+                    result.changed_selectors
+                ),
+            },
+        )
+    except Exception:
+        _restore_file_transaction(before)
+        raise
+    return changed_artifacts
+
+
+async def _run_semantic_patch_producer_repair(
+    *,
+    job_id: str,
+    run_dir: Path,
+    binding: RunRootBinding,
+    stage: str,
+    round_number: int,
+    errors: tuple[str, ...],
+    target_selectors: list[str],
+    paths: dict[str, Path],
+) -> list[str]:
+    workspace = _prepare_bound_semantic_patch_workspace(
+        run_dir=run_dir,
+        binding=binding,
+        stage=stage,
+        round_number=round_number,
+    )
+    client = create_codex_app_server_client(
+        cwd=workspace.root,
+        scrub_sensitive_env=True,
+    )
+    rejection: SemanticRepairPatchError | None = None
+    transcript: list[dict[str, Any]] = []
+    try:
+        thread_id = await asyncio.wait_for(
+            client.start_thread(
+                cwd=workspace.root,
+                approval_policy="never",
+                sandbox="workspace-write",
+            ),
+            timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS,
+        )
+        for planner_attempt in range(1, 4):
+            if planner_attempt > 1:
+                _reset_bound_semantic_patch_file(workspace)
+            prompt = _semantic_patch_submission_prompt(
+                workspace=workspace,
+                target_selectors=target_selectors,
+                errors=errors,
+                rejection=rejection,
+            )
+            try:
+                transcript, _completed_from_patch = (
+                    await _run_turn_until_semantic_artifact_completed(
+                        client,
+                        thread_id=thread_id,
+                        text=prompt,
+                        cwd=workspace.root,
+                        timeout_seconds=semantic_repair_timeout_seconds(),
+                        report_path=workspace.patch_path,
+                        is_completed=lambda _path: _semantic_patch_file_completed(
+                            workspace
+                        ),
+                        progress_callback=lambda notification: (
+                            _write_semantic_turn_activity_marker(
+                                run_dir,
+                                paths["report"],
+                                notification,
+                            )
+                        ),
+                    )
+                )
+            except CodexAppServerTransportError:
+                if not _semantic_patch_file_completed(workspace):
+                    raise
+            try:
+                async with _serialized_run_write(run_dir, "run_artifacts"):
+                    changed = _apply_bound_semantic_patch_workspace(
+                        workspace,
+                        target_selectors=target_selectors,
+                    )
+                write_app_server_debug_log(
+                    run_dir=run_dir,
+                    operation="semantic_repair_patch_apply",
+                    status="completed",
+                    item_id=job_id,
+                    request={
+                        "stage": stage,
+                        "round": round_number,
+                        "plannerAttempt": planner_attempt,
+                        "patch": (
+                            paths.get("patch")
+                            or (
+                                run_dir
+                                / semantic_repair_relpaths(
+                                    stage, round_number
+                                )["patch"]
+                            )
+                        ).as_posix(),
+                    },
+                    response={"changedArtifacts": changed},
+                    transcript=transcript,
+                )
+                return changed
+            except SemanticRepairPatchError as exc:
+                rejection = exc
+                write_app_server_debug_log(
+                    run_dir=run_dir,
+                    operation="semantic_repair_patch_apply",
+                    status="rejected_retrying",
+                    item_id=job_id,
+                    request={
+                        "stage": stage,
+                        "round": round_number,
+                        "plannerAttempt": planner_attempt,
+                    },
+                    response={
+                        "code": exc.code,
+                        "operationIndex": exc.operation_index,
+                    },
+                    error=str(exc),
+                )
+                if planner_attempt >= 3:
+                    raise
+        raise RuntimeError("semantic patch planner exhausted retries")
+    finally:
+        try:
+            await client.stop()
+        finally:
+            workspace.cleanup()
+
+
 async def _run_semantic_review_producer_repair(
     job_id: str,
     *,
@@ -25544,6 +26804,20 @@ async def _run_semantic_review_producer_repair(
     )
     source_fingerprint_before = _semantic_repair_source_artifact_fingerprint(run_dir, stage)
     target_selectors = _semantic_repair_target_selectors(run_dir, stage)
+    semantic_scope: Mapping[str, Any] | None = None
+    if binding is not None:
+        try:
+            semantic_scope_payload = json.loads(
+                read_regular_file_nofollow(
+                    run_dir,
+                    semantic_review_relpaths(stage)["scope"],
+                    expected_root_identity=binding.identity,
+                ).decode("utf-8")
+            )
+        except (ValueError, UnicodeError, json.JSONDecodeError):
+            semantic_scope_payload = None
+        if isinstance(semantic_scope_payload, Mapping):
+            semantic_scope = semantic_scope_payload
     report_relpath = paths["report"].relative_to(run_dir).as_posix()
     prompt_relpath = paths["prompt"].relative_to(run_dir).as_posix()
     activity_relpath = _semantic_turn_activity_relpath(paths["report"].relative_to(run_dir)).as_posix()
@@ -25603,6 +26877,98 @@ async def _run_semantic_review_producer_repair(
             "noProgressTimeoutSeconds": _semantic_repair_no_progress_timeout_seconds(),
         },
     )
+
+    if _semantic_patch_route_enabled(
+        stage,
+        target_selectors,
+        scope=semantic_scope,
+    ):
+        if binding is None:
+            raise RuntimeError(
+                "semantic patch repair requires a bound canonical run"
+            )
+        changed_artifacts = await _run_semantic_patch_producer_repair(
+            job_id=job_id,
+            run_dir=run_dir,
+            binding=binding,
+            stage=stage,
+            round_number=round_number,
+            errors=errors,
+            target_selectors=target_selectors,
+            paths={
+                key: run_dir / relative
+                for key, relative in semantic_repair_relpaths(
+                    stage, round_number
+                ).items()
+            },
+        )
+        source_fingerprint_after = (
+            _semantic_repair_source_artifact_fingerprint(run_dir, stage)
+        )
+        report_status = _semantic_repair_report_status(paths["report"])
+        done_updates = semantic_repair_state_updates(
+            stage,
+            status="done",
+            round_number=round_number,
+            max_attempts=max_attempts,
+            error_count=len(errors),
+        )
+        done_updates.update(
+            {
+                f"review.semantic.{stage}.repair.changed_artifacts_detected": ", ".join(
+                    changed_artifacts
+                ),
+                f"review.semantic.{stage}.repair.report_status": report_status,
+                f"review.semantic.{stage}.repair.source_fingerprint.after": _json_hash(
+                    source_fingerprint_after
+                ),
+                f"review.semantic.{stage}.repair.source_fingerprint.after_count": str(
+                    len(source_fingerprint_after)
+                ),
+                f"review.semantic.{stage}.repair.pending.status": "applied",
+            }
+        )
+        if slot:
+            done_updates[f"slot.{slot}.status"] = "in_progress"
+            done_updates[f"slot.{slot}.note"] = (
+                f"semantic {stage} patch applied; fresh rereview required"
+            )
+        append_state_snapshot(run_dir / "state.txt", done_updates)
+        write_app_server_debug_log(
+            run_dir=run_dir,
+            operation="semantic_review_producer_repair",
+            status="completed_patch_apply",
+            item_id=job_id,
+            request={
+                "stage": stage,
+                "round": round_number,
+                "maxAttempts": max_attempts,
+                "patch": semantic_repair_relpaths(stage, round_number)[
+                    "patch"
+                ].as_posix(),
+            },
+            response={
+                "changedArtifacts": changed_artifacts,
+                "reportStatus": report_status,
+                "sourceFingerprintAfter": _semantic_repair_fingerprint_summary(
+                    source_fingerprint_after
+                ),
+            },
+        )
+        return
+
+    if (
+        stage in SEMANTIC_PATCH_STAGES
+        and target_selectors
+        and not (
+            isinstance(semantic_scope, Mapping)
+            and semantic_scope.get("semantic_review_input_schema")
+            == LEGACY_SEMANTIC_REVIEW_INPUT_SCHEMA
+        )
+    ):
+        raise RuntimeError(
+            "canonical scene repair cannot fall back to whole-file producer editing"
+        )
 
     completion_log_status = "completed"
     completion_log_response: dict[str, Any] = {"errorCount": len(errors)}
@@ -25987,6 +27353,7 @@ async def _run_create_job(
     create_mode: str = CREATE_MODE_NORMAL,
     stop_target: str = "p680",
     target_duration_seconds: int = 300,
+    review_mode: Literal["standard", "preapproved"] = "standard",
     expected_run_identity: tuple[int, int] | None = None,
     reservation: _FrontendCreateRunReservation | None = None,
 ) -> None:
@@ -26008,6 +27375,7 @@ async def _run_create_job(
             create_mode=create_mode,
             stop_target=stop_target,
             target_duration_seconds=target_duration_seconds,
+            review_mode=review_mode,
             expected_run_identity=None,
         )
         return
@@ -26033,6 +27401,7 @@ async def _run_create_job(
                 create_mode=create_mode,
                 stop_target=stop_target,
                 target_duration_seconds=target_duration_seconds,
+                review_mode=review_mode,
                 expected_run_identity=expected_run_identity,
                 retained_reservation=reservation,
             )
@@ -26080,9 +27449,12 @@ async def _run_create_job_bound(
     create_mode: str = CREATE_MODE_NORMAL,
     stop_target: str = "p680",
     target_duration_seconds: int = 300,
+    review_mode: Literal["standard", "preapproved"] = "standard",
     expected_run_identity: tuple[int, int] | None = None,
     retained_reservation: _FrontendCreateRunReservation | None = None,
 ) -> None:
+    if review_mode not in {"standard", "preapproved"}:
+        raise ValueError("review_mode must be standard or preapproved")
     if stop_target not in CREATE_STOP_TARGETS:
         raise ValueError("stop_target must be p650 or p680")
     if (
@@ -26140,6 +27512,7 @@ async def _run_create_job_bound(
                 "createMode": create_mode,
                 "stopTarget": stop_target,
                 "targetDurationSeconds": target_duration_seconds,
+                "reviewMode": review_mode,
             },
         )
         if generate_images:
@@ -26150,6 +27523,7 @@ async def _run_create_job_bound(
                 run_id=run_id,
                 stop_target=stop_target,
                 target_duration_seconds=target_duration_seconds,
+                **({"review_mode": review_mode} if review_mode != "standard" else {}),
                 **helper_binding,
             )
         else:
@@ -26160,6 +27534,7 @@ async def _run_create_job_bound(
                 run_id=run_id,
                 stop_target=stop_target,
                 target_duration_seconds=target_duration_seconds,
+                **({"review_mode": review_mode} if review_mode != "standard" else {}),
                 materialize_only=True,
                 **helper_binding,
             )
@@ -26302,6 +27677,7 @@ async def _run_world_walk_create_job(
     source_run_id: str,
     run_id: str,
     target_duration_seconds: int = 300,
+    review_mode: Literal["standard", "preapproved"] = "standard",
     expected_run_identity: tuple[int, int] | None = None,
     reservation: _FrontendCreateRunReservation | None = None,
 ) -> None:
@@ -26320,6 +27696,7 @@ async def _run_world_walk_create_job(
             source_run_id=source_run_id,
             run_id=run_id,
             target_duration_seconds=target_duration_seconds,
+            review_mode=review_mode,
             expected_run_identity=None,
         )
         return
@@ -26342,6 +27719,7 @@ async def _run_world_walk_create_job(
                 source_run_id=source_run_id,
                 run_id=run_id,
                 target_duration_seconds=target_duration_seconds,
+                review_mode=review_mode,
                 expected_run_identity=expected_run_identity,
                 retained_reservation=reservation,
             )
@@ -26386,9 +27764,12 @@ async def _run_world_walk_create_job_bound(
     source_run_id: str,
     run_id: str,
     target_duration_seconds: int = 300,
+    review_mode: Literal["standard", "preapproved"] = "standard",
     expected_run_identity: tuple[int, int] | None = None,
     retained_reservation: _FrontendCreateRunReservation | None = None,
 ) -> None:
+    if review_mode not in {"standard", "preapproved"}:
+        raise ValueError("review_mode must be standard or preapproved")
     run_dir = safe_run_dir(run_id, ROOT)
     started = time.monotonic()
     try:
@@ -26432,6 +27813,7 @@ async def _run_world_walk_create_job_bound(
                 "runId": run_id,
                 "sourceRunId": source_run_id,
                 "targetDurationSeconds": target_duration_seconds,
+                "reviewMode": review_mode,
             },
         )
         await _run_toc_immersive_frontend_cli_helper(
@@ -26440,6 +27822,7 @@ async def _run_world_walk_create_job_bound(
             experience=CREATE_MODE_WORLD_WALK,
             source_run_id=source_run_id,
             target_duration_seconds=target_duration_seconds,
+            **({"review_mode": review_mode} if review_mode != "standard" else {}),
             **(
                 {
                     "expected_run_identity": helper_identity,
@@ -26560,6 +27943,7 @@ async def api_create_run(req: CreateRunRequest) -> dict[str, Any]:
     source = (req.source or "").strip() or title
     stop_target = req.stop_target
     target_duration_seconds = req.target_duration_seconds
+    review_mode = req.review_mode
     job_id = uuid.uuid4().hex
     async with _create_jobs_lock:
         running_count = sum(1 for existing in _create_jobs.values() if existing.get("status") == "running")
@@ -26585,6 +27969,7 @@ async def api_create_run(req: CreateRunRequest) -> dict[str, Any]:
             "title": title,
             "createMode": CREATE_MODE_NORMAL,
             "targetDurationSeconds": target_duration_seconds,
+            "reviewMode": review_mode,
             "stopTarget": stop_target,
             "stopTargetNumber": _process_number(stop_target),
             "currentProcess": "p000",
@@ -26635,6 +28020,7 @@ async def api_create_run(req: CreateRunRequest) -> dict[str, Any]:
                         "createMode": CREATE_MODE_NORMAL,
                         "stopTarget": stop_target,
                         "targetDurationSeconds": target_duration_seconds,
+                        "reviewMode": review_mode,
                         "processStore": process_store_result,
                     },
                     response={"path": f"output/{run_id}"},
@@ -26655,6 +28041,7 @@ async def api_create_run(req: CreateRunRequest) -> dict[str, Any]:
             create_mode=CREATE_MODE_NORMAL,
             stop_target=stop_target,
             target_duration_seconds=target_duration_seconds,
+            **({"review_mode": review_mode} if review_mode != "standard" else {}),
             reservation=reservation,
             ),
         )
@@ -26682,6 +28069,7 @@ async def api_create_storyboard_run(req: CreateStoryboardRunRequest) -> dict[str
     source = (req.source or "").strip() or title
     stop_target = req.stop_target
     target_duration_seconds = req.target_duration_seconds
+    review_mode = req.review_mode
     job_id = uuid.uuid4().hex
     async with _create_jobs_lock:
         running_count = sum(1 for existing in _create_jobs.values() if existing.get("status") == "running")
@@ -26709,6 +28097,7 @@ async def api_create_storyboard_run(req: CreateStoryboardRunRequest) -> dict[str
             "title": title,
             "createMode": CREATE_MODE_SCENE_STORYBOARD,
             "targetDurationSeconds": target_duration_seconds,
+            "reviewMode": review_mode,
             "stopTarget": stop_target,
             "stopTargetNumber": _process_number(stop_target),
             "currentProcess": "p000",
@@ -26759,6 +28148,7 @@ async def api_create_storyboard_run(req: CreateStoryboardRunRequest) -> dict[str
                         "createMode": CREATE_MODE_SCENE_STORYBOARD,
                         "stopTarget": stop_target,
                         "targetDurationSeconds": target_duration_seconds,
+                        "reviewMode": review_mode,
                         "processStore": process_store_result,
                     },
                     response={"path": f"output/{run_id}"},
@@ -26779,6 +28169,7 @@ async def api_create_storyboard_run(req: CreateStoryboardRunRequest) -> dict[str
             create_mode=CREATE_MODE_SCENE_STORYBOARD,
             stop_target=stop_target,
             target_duration_seconds=target_duration_seconds,
+            **({"review_mode": review_mode} if review_mode != "standard" else {}),
             reservation=reservation,
             ),
         )
@@ -26811,6 +28202,7 @@ async def api_create_world_walk_run(
     if not title:
         raise HTTPException(status_code=400, detail="title must not be blank")
     target_duration_seconds = req.target_duration_seconds
+    review_mode = req.review_mode
     job_id = uuid.uuid4().hex
     async with _create_jobs_lock:
         running_count = sum(
@@ -26852,6 +28244,7 @@ async def api_create_world_walk_run(
             "sourceRunId": source_run_id,
             "sourceRunPath": f"output/{source_run_id}",
             "targetDurationSeconds": target_duration_seconds,
+            "reviewMode": review_mode,
             "stopTarget": "p680",
             "stopTargetNumber": _process_number("p680"),
             "currentProcess": "p000",
@@ -26900,6 +28293,7 @@ async def api_create_world_walk_run(
                         "createMode": CREATE_MODE_WORLD_WALK,
                         "stopTarget": "p680",
                         "targetDurationSeconds": target_duration_seconds,
+                        "reviewMode": review_mode,
                         "processStore": process_store_result,
                     },
                     response={"path": f"output/{run_id}"},
@@ -26917,6 +28311,7 @@ async def api_create_world_walk_run(
             source_run_id=source_run_id,
             run_id=run_id,
             target_duration_seconds=target_duration_seconds,
+            **({"review_mode": review_mode} if review_mode != "standard" else {}),
             reservation=reservation,
             ),
         )
@@ -27946,29 +29341,39 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
         raise
 
 
-@router.get("/api/image-gen/requests")
-async def api_requests(run_id: str, kind: str = Query(pattern="^(asset|scene)$")) -> dict[str, Any]:
-    try:
-        run_dir = safe_run_dir(run_id, ROOT)
-    except FileNotFoundError:
-        restored = restore_first_image_retention_run(run_id, root=ROOT)
-        if restored is None:
-            raise
-        run_dir = restored
-    if is_first_image_retention_restored_run(run_dir):
-        restore_first_image_retention_run(run_id, root=ROOT)
+def _request_gallery_payload(
+    *,
+    run_dir: Path,
+    run_id: str,
+    kind: str,
+    restore_retained_candidates: bool,
+) -> dict[str, Any]:
+    """Build the read-only gallery without generation-grade verification."""
+
     items = []
-    request_items = load_request_items(run_dir, kind)
-    blocked_scene_item_ids = _semantic_blocked_image_item_ids(run_dir, request_items) if kind == "scene" else set()
+    request_items = load_request_items_for_display(run_dir, kind)
+    blocked_scene_item_ids = (
+        _semantic_blocked_image_item_ids(run_dir, request_items)
+        if kind == "scene"
+        else set()
+    )
     for item in request_items:
         payload = item_to_api(item)
-        rehydrate_retained_first_image(
-            run_dir,
-            root=ROOT,
-            kind=kind,
-            item_id=str(item.id),
-        )
         persisted_candidates = list_candidate_items(run_dir, item.id)
+        if (
+            restore_retained_candidates
+            or (
+                not persisted_candidates
+                and not item.existing_image
+            )
+        ):
+            rehydrate_retained_first_image(
+                run_dir,
+                root=ROOT,
+                kind=kind,
+                item_id=str(item.id),
+            )
+            persisted_candidates = list_candidate_items(run_dir, item.id)
         if str(item.id) in blocked_scene_item_ids:
             payload["generationStatus"] = "blocked"
             payload["candidates"] = [
@@ -27979,10 +29384,17 @@ async def api_requests(run_id: str, kind: str = Query(pattern="^(asset|scene)$")
         else:
             payload["candidates"] = persisted_candidates
         items.append(payload)
-    if not request_items and is_first_image_retention_restored_run(run_dir):
-        for retention in list_first_image_retentions(root=ROOT, run_id=run_id, kind=kind):
+    if not request_items and restore_retained_candidates:
+        for retention in list_restored_first_image_items(
+            run_dir,
+            kind=kind,
+        ):
             item_id = str(retention["itemId"])
-            output = str(retention.get("destination") or "") if retention.get("storageRole") == "canonical" else None
+            output = (
+                str(retention.get("destination") or "")
+                if retention.get("storageRole") == "canonical"
+                else None
+            )
             items.append(
                 {
                     "id": item_id,
@@ -28004,14 +29416,43 @@ async def api_requests(run_id: str, kind: str = Query(pattern="^(asset|scene)$")
                     "candidates": list_candidate_items(run_dir, item_id),
                 }
             )
-    references = [reference_to_api(option) for option in list_reference_options(run_dir)]
+    references = [
+        reference_to_api(option)
+        for option in list_reference_options(run_dir)
+    ]
     return {
         "run": {"id": run_id, "path": f"output/{run_id}"},
         "kind": kind,
         "items": items,
         "references": references,
-        "progress": read_run_progress(run_dir),
+        "progress": read_run_progress(
+            run_dir,
+            validate_request_outputs=False,
+        ),
     }
+
+
+@router.get("/api/image-gen/requests")
+async def api_requests(run_id: str, kind: str = Query(pattern="^(asset|scene)$")) -> dict[str, Any]:
+    try:
+        run_dir = safe_run_dir(run_id, ROOT)
+    except FileNotFoundError:
+        restored = await asyncio.to_thread(
+            restore_first_image_retention_run,
+            run_id,
+            root=ROOT,
+        )
+        if restored is None:
+            raise
+        run_dir = restored
+    restore_retained_candidates = is_first_image_retention_restored_run(run_dir)
+    return await asyncio.to_thread(
+        _request_gallery_payload,
+        run_dir=run_dir,
+        run_id=run_id,
+        kind=kind,
+        restore_retained_candidates=restore_retained_candidates,
+    )
 
 
 @router.get("/api/image-gen/narration-items")

@@ -62,7 +62,7 @@ class StagePlaybookSelectionError(RuntimeError):
 
 def normalize_review_policy_value(value: str | None, *, default: str = "required") -> str:
     raw = str(value or "").strip().lower()
-    if raw in {"required", "optional"}:
+    if raw in {"required", "optional", "skipped"}:
         return raw
     return default
 

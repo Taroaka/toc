@@ -4101,6 +4101,82 @@ class TestStageEvaluatorScripts(unittest.TestCase):
             self.assertEqual(updates["eval.p400_readiness.status"], "changes_requested")
             self.assertIn("p400.script_readiness_contract", stage["reason_keys"])
 
+    def test_preapproved_p450_skips_coverage_verdict_but_keeps_scene_event_required(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="toc_stage_eval_preapproved_coverage_") as td:
+            run_dir = Path(td) / "output" / "momotaro_20990101_preapproved"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "state.txt").write_text(
+                "timestamp=2026-04-04T00:00:00+09:00\n"
+                "job_id=JOB_2026-04-04_PREAPPROVED\n"
+                "topic=桃太郎\n"
+                "status=MANIFEST\n"
+                "runtime.review_mode=preapproved\n"
+                "runtime.review_policy=preapproved\n"
+                "---\n",
+                encoding="utf-8",
+            )
+            create_input = run_dir / "logs/orchestration/create_input.json"
+            create_input.parent.mkdir(parents=True)
+            create_input.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "toc.create_input.v1",
+                        "review_mode": "preapproved",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _write_valid_immersive_p400_pair(
+                run_dir,
+                target_duration=300,
+                cut_duration=15,
+                scene_count=10,
+            )
+            script_data = _read_script_yaml(run_dir)
+            script_data["script"]["scenes"][0].pop("coverage_review", None)
+            _write_script_yaml(run_dir, script_data)
+            _write_p400_review_artifacts(run_dir)
+            _resolve_ready_grounding(run_dir, "script", "manifest", flow="immersive")
+
+            script_stage, _script_updates = STAGE_EVALUATOR.check_script_single(
+                run_dir,
+                "standard",
+            )
+            manifest_stage, manifest_updates = STAGE_EVALUATOR.check_manifest_single(
+                run_dir,
+                "standard",
+                "immersive",
+            )
+
+            self.assertTrue(script_stage["passed"], script_stage["reason_keys"])
+            self.assertTrue(manifest_stage["passed"], manifest_stage["reason_keys"])
+            self.assertEqual(manifest_updates["eval.p400_readiness.status"], "approved")
+
+            script_data = _read_script_yaml(run_dir)
+            script_data["script"]["scenes"][0].pop("scene_event", None)
+            _write_script_yaml(run_dir, script_data)
+            _write_p400_review_artifacts(run_dir)
+            _resolve_ready_grounding(run_dir, "script", "manifest", flow="immersive")
+
+            broken_script, _ = STAGE_EVALUATOR.check_script_single(
+                run_dir,
+                "standard",
+            )
+            broken_manifest, broken_updates = STAGE_EVALUATOR.check_manifest_single(
+                run_dir,
+                "standard",
+                "immersive",
+            )
+
+            self.assertFalse(broken_script["passed"])
+            self.assertFalse(broken_manifest["passed"])
+            self.assertEqual(
+                broken_updates["eval.p400_readiness.status"],
+                "changes_requested",
+            )
+            self.assertIn("p400.script_readiness_contract", broken_manifest["reason_keys"])
+
     def test_manifest_p400_readiness_includes_script_scene_event_contract(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_stage_eval_p400_script_event_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0018e"

@@ -3,6 +3,7 @@
 更新日: 2026-08-09
 
 注記: 最初の顧客像は、`.steering/20260810-marketing-first-persona/` の決定により、`自分の知識や経験を、顔出しなしの動画にしたい副業個人` へ絞られた。
+その後、`.steering/20260829-marketing-remove-faceless-emphasis/` により、顔出しなしを顧客像と訴求の中心から外した。
 
 ## 目的
 
