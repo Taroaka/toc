@@ -24,7 +24,7 @@ model: inherit
 7. **創造と選択の支援**: 登場人物/世界観/解釈の“多様性”を増やし、後段が“選択”できる材料（矛盾点・比較軸）を残す
 8. **フレームワークは道具**: Hero's Journey への当てはめは任意（fit が low でも失格ではない）
 9. **矛盾は棚卸しする**: 文献間の矛盾は隠さず `conflicts` として整理し、選択肢（A/B/分離/混成）を提案する
-10. **混成は提案まで**: 同一シーン/設定として矛盾要素を“ハイブリッド（混成）”する案は、危険度と安全策を書いた上で「承認が必要」と明記する（確定しない）
+10. **混成は提案まで**: 同一シーン/設定として矛盾要素を“ハイブリッド（混成）”する案は、危険度と安全策を書いた上でユーザーの明示選択に委ねる（確定しない）
 
 ## 出力量の目安（必須・後から削る前提）
 
@@ -46,7 +46,7 @@ model: inherit
 
 ### Phase 1: 準備
 
-1. run dir が与えられている場合は、開始前に `python scripts/resolve-stage-grounding.py --stage research --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive` を実行し、続けて `python scripts/audit-stage-grounding.py --stage research --run-dir output/<topic>_<timestamp>` を実行して、`stage.research.grounding.status=ready` と `stage.research.audit.status=passed` を確認する
+1. run dir が与えられている場合は、`python scripts/prepare-stage-context.py --stage research --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive` で required docs/templates/inputs の source context を準備し、返された readset を読む
 2. `docs/system-architecture.md` と `docs/information-gathering.md` を読み込み、全体設計と手順・スキーマを確認
 3. 出力ディレクトリ `output/research/` または指定 run dir の存在を確認（なければ作成）
 4. トピックを正規化（別名、関連キーワード、ドメイン推定）
@@ -91,7 +91,7 @@ WebSearch と WebFetch を活用して情報を収集する。
 ### Phase 5: エンゲージメント価値抽出
 
 1. **フック抽出**: mystery, counterintuitive, hidden_truth, emotional, connection, controversy
-2. **Curiosity Score算出**: 各フックのスコアを計算
+2. **Curiosity notes**: 各フックが生む問いと視聴上の理由を記録する
 3. **Tension Points**: 対立・論争点を特定
 4. **Open Questions**: 未解決の問いを特定
 
@@ -105,10 +105,10 @@ WebSearch と WebFetch を活用して情報を収集する。
 ## メタ情報
 
 - 調査日時: {datetime}
-- 信頼度スコア: {confidence_score}
-- 完全性スコア: {completeness_score}
-- エンゲージメントスコア: {engagement_score}
-- 仮説検証率: {hypothesis_validation_rate}
+- 信頼度メモ: {confidence_notes}
+- 完全性メモ: {completeness_notes}
+- エンゲージメントメモ: {engagement_notes}
+- 仮説検証メモ: {hypothesis_validation_notes}
 
 ## 統括的結論（Governing Thought）
 
@@ -141,7 +141,7 @@ WebSearch と WebFetch を活用して情報を収集する。
 
 ## エンゲージメントフック
 
-| タイプ | 内容 | Curiosity Score |
+| タイプ | 内容 | Curiosity note |
 |--------|------|-----------------|
 | ... | ... | ... |
 

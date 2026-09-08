@@ -1,7 +1,7 @@
 ---
 name: vertical-shorts-creator
 description: |
-  Select high-impact scenes from an approved 16:9 ToC run and prepare the command for a centered 9:16 short.
+  Select high-impact scenes from a completed 16:9 ToC run and prepare the command for a centered 9:16 short.
   Use when: the user asks for a vertical short, short-form recut, highlight clip, or a way to turn an approved horizontal ToC run into a 9:16 short without regenerating scenes.
 ---
 
@@ -9,24 +9,17 @@ description: |
 
 ## Overview
 
-完成・承認済みの run から、60秒の縦ショートを作る。
+完成した run から、ユーザーが選んだ scene を使って60秒の縦ショートを作る。
 このスキルは “自動実行” ではなく、**選ぶべき scene と実行コマンド**を出す。
 
 ## Preconditions（必須）
 
 - run dir: `output/<topic>_<timestamp>/`
-- `state.txt` に `review.video.status=approved` が入っている（人間の最終OK）
 - `video.mp4`（または `artifact.video`）が存在する
-
-未承認なら先に承認する:
-
-```bash
-python scripts/toc-state.py approve-video --run-dir output/<topic>_<timestamp> --note "OK"
-```
 
 ## How to choose scenes（刺激強めの選び方）
 
-“刺激”は主観なので、まず候補を10個程度挙げ、最終は人間が選ぶ。
+“刺激”は主観なので、まず候補を10個程度挙げ、最終はユーザーが選ぶ。
 判断の軸（例）:
 
 - 危機/緊張（追跡、落下、爆発、水、怪異）

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Materialize a frontend-review ToC immersive run through p650/p680.
+"""Materialize a frontend ToC immersive run through p650/p680.
 
 This is the Codex-native helper for app-server create flows.  It intentionally
 does not call Claude slash commands.  It writes real p100-p650 run artifacts and,
@@ -1095,7 +1095,7 @@ def _write_cut_design_failure_log(
             "slot.p420.note": (
                 "cut design failed before frontend handoff"
             ),
-            "eval.cut_blueprint.status": "changes_requested",
+            "cut_design.status": "failed",
         },
     )
 
@@ -1306,25 +1306,25 @@ def _run_materialization_lock(
         os.close(root_descriptor)
 
 
-def _profile_from_reviewed_research(profile: dict[str, Any], research: dict[str, Any]) -> dict[str, Any]:
-    """Carry the approved research foundation into story and cut builders."""
+def _profile_from_research(profile: dict[str, Any], research: dict[str, Any]) -> dict[str, Any]:
+    """Project researched source material into story and cut builders."""
 
-    reviewed = dict(profile)
+    projected = dict(profile)
     materials = research.get("story_materials") if isinstance(research.get("story_materials"), dict) else {}
     setting = materials.get("setting") if isinstance(materials.get("setting"), dict) else {}
-    reviewed["story_time"] = str(setting.get("time_or_era") or profile.get("story_time") or "").strip()
+    projected["story_time"] = str(setting.get("time_or_era") or profile.get("story_time") or "").strip()
     raw_events = materials.get("chronological_events") if isinstance(materials.get("chronological_events"), list) else []
     event_records = [item for item in raw_events if isinstance(item, dict) and str(item.get("event") or "").strip()]
     if event_records:
-        reviewed["events"] = [str(item["event"]).strip() for item in event_records]
-        reviewed["research_event_ids_by_text"] = {
+        projected["events"] = [str(item["event"]).strip() for item in event_records]
+        projected["research_event_ids_by_text"] = {
             str(item["event"]).strip(): str(item.get("event_id") or f"E{index:02d}").strip()
             for index, item in enumerate(event_records, start=1)
         }
-        reviewed["research_event_ids"] = list(reviewed["research_event_ids_by_text"].values())
+        projected["research_event_ids"] = list(projected["research_event_ids_by_text"].values())
     canonical_dump = str(materials.get("canonical_story_dump") or "").strip()
     if canonical_dump:
-        reviewed["summary"] = canonical_dump
+        projected["summary"] = canonical_dump
     characters = materials.get("characters") if isinstance(materials.get("characters"), list) else []
     protagonist = next(
         (
@@ -1339,7 +1339,7 @@ def _profile_from_reviewed_research(profile: dict[str, Any], research: dict[str,
         None,
     )
     if isinstance(protagonist, dict) and str(protagonist.get("name") or "").strip():
-        reviewed["protagonist_name"] = str(protagonist["name"]).strip()
+        projected["protagonist_name"] = str(protagonist["name"]).strip()
     passages = research.get("source_passages") if isinstance(research.get("source_passages"), list) else []
     passage_records = [
         item
@@ -1348,43 +1348,43 @@ def _profile_from_reviewed_research(profile: dict[str, Any], research: dict[str,
         and str(item.get("passage_id") or "").strip()
         and str(item.get("passage") or "").strip()
     ]
-    reviewed["research_passage_ids"] = [str(item["passage_id"]).strip() for item in passage_records]
-    reviewed["research_passage_ids_by_text"] = {
+    projected["research_passage_ids"] = [str(item["passage_id"]).strip() for item in passage_records]
+    projected["research_passage_ids_by_text"] = {
         str(item["passage"]).strip(): str(item["passage_id"]).strip()
         for item in passage_records
     }
-    reviewed["reviewed_research"] = research
-    return reviewed
+    projected["research"] = research
+    return projected
 
 
-def _profile_from_reviewed_story(profile: dict[str, Any], story: dict[str, Any]) -> dict[str, Any]:
-    """Carry approved scene intent into cut construction without inventing a second story."""
+def _profile_from_story(profile: dict[str, Any], story: dict[str, Any]) -> dict[str, Any]:
+    """Project authored scene intent into cut construction without inventing a second story."""
 
-    reviewed = dict(profile)
+    projected = dict(profile)
     metadata = story.get("story_metadata") if isinstance(story.get("story_metadata"), dict) else {}
-    # The reviewed story is canonical.  An explicit empty string is meaningful
+    # The authored story is canonical.  An explicit empty string is meaningful
     # for user-created worlds and must not resurrect a topic-derived era.
-    reviewed["story_time"] = str(metadata.get("time") or "").strip()
+    projected["story_time"] = str(metadata.get("time") or "").strip()
     script = story.get("script") if isinstance(story.get("script"), dict) else {}
     scenes = [item for item in script.get("scenes", []) if isinstance(item, dict)]
-    reviewed["reviewed_story"] = story
-    reviewed["reviewed_story_scenes"] = scenes
+    projected["story"] = story
+    projected["story_scenes"] = scenes
     source_contract = story.get("adaptation_source_contract")
     if isinstance(source_contract, dict) and source_contract:
-        reviewed["adaptation_source_contract"] = deepcopy(source_contract)
+        projected["adaptation_source_contract"] = deepcopy(source_contract)
     if not scenes:
-        return reviewed
+        return projected
 
     existing_titles = [str(item) for item in profile.get("scene_titles") or []]
-    reviewed["scene_titles"] = [
+    projected["scene_titles"] = [
         str(scene.get("title") or (existing_titles[index] if index < len(existing_titles) else f"scene {index + 1}")).strip()
         for index, scene in enumerate(scenes)
     ]
-    reviewed["scene_ids"] = [
+    projected["scene_ids"] = [
         str(scene.get("scene_id") or f"scene_{index + 1:02d}").strip()
         for index, scene in enumerate(scenes)
     ]
-    reviewed["scene_semantic_responsibility_ids"] = [
+    projected["scene_semantic_responsibility_ids"] = [
         str(
             scene.get("semantic_scene_responsibility_id")
             or scene.get("scene_id")
@@ -1403,10 +1403,10 @@ def _profile_from_reviewed_story(profile: dict[str, Any], story: dict[str, Any])
     )
     existing_location_sequences = resized(profile.get("scene_location_sequences"), [])
     existing_location_segments = resized(profile.get("scene_location_segments"), [])
-    reviewed_locations: list[str] = []
-    reviewed_location_ids: list[str] = []
-    reviewed_location_sequences: list[list[str]] = []
-    reviewed_location_segments: list[list[dict[str, Any]]] = []
+    projected_locations: list[str] = []
+    projected_location_ids: list[str] = []
+    projected_location_sequences: list[list[str]] = []
+    projected_location_segments: list[list[dict[str, Any]]] = []
     for scene, fallback_name, fallback_sequence, fallback_segments in zip(
         scenes,
         existing_locations,
@@ -1416,7 +1416,7 @@ def _profile_from_reviewed_story(profile: dict[str, Any], story: dict[str, Any])
     ):
         location = scene.get("location") if isinstance(scene.get("location"), dict) else {}
         location_name = str(location.get("name") or fallback_name).strip()
-        reviewed_location_ids.append(
+        projected_location_ids.append(
             str(location.get("location_id") or location.get("place_id") or "").strip()
         )
         raw_sequence = location.get("sequence")
@@ -1436,50 +1436,50 @@ def _profile_from_reviewed_story(profile: dict[str, Any], story: dict[str, Any])
             if (segment := _normalize_location_segment(value))
             and segment["location"] in normalized_sequence
         ]
-        reviewed_locations.append(location_name)
-        reviewed_location_sequences.append(normalized_sequence)
-        reviewed_location_segments.append(segments)
-    reviewed["scene_locations"] = reviewed_locations
-    reviewed["scene_location_ids"] = reviewed_location_ids
-    reviewed["scene_location_sequences"] = reviewed_location_sequences
-    reviewed["scene_location_segments"] = reviewed_location_segments
+        projected_locations.append(location_name)
+        projected_location_sequences.append(normalized_sequence)
+        projected_location_segments.append(segments)
+    projected["scene_locations"] = projected_locations
+    projected["scene_location_ids"] = projected_location_ids
+    projected["scene_location_sequences"] = projected_location_sequences
+    projected["scene_location_segments"] = projected_location_segments
     existing_times_of_day = resized(profile.get("scene_times_of_day"), "")
-    reviewed["scene_times_of_day"] = [
+    projected["scene_times_of_day"] = [
         str(scene.get("time_of_day") if "time_of_day" in scene else value).strip()
         for scene, value in zip(scenes, existing_times_of_day)
     ]
-    reviewed["scene_time_of_day_visual_bases"] = [
+    projected["scene_time_of_day_visual_bases"] = [
         str(
             scene.get("time_of_day_visual_basis")
             or _time_of_day_visual_basis(time_of_day)
         ).strip()
         for scene, time_of_day in zip(
             scenes,
-            reviewed["scene_times_of_day"],
+            projected["scene_times_of_day"],
             strict=True,
         )
     ]
-    reviewed["canonical_scene_indices"] = [
+    projected["canonical_scene_indices"] = [
         int(scene.get("canonical_scene_index") or value)
         for scene, value in zip(scenes, resized(profile.get("canonical_scene_indices"), 1))
     ]
-    reviewed["scene_target_durations"] = [
+    projected["scene_target_durations"] = [
         int(scene.get("target_duration_seconds") or value)
         for scene, value in zip(scenes, resized(profile.get("scene_target_durations"), 40))
     ]
-    reviewed["scene_segment_positions"] = [
+    projected["scene_segment_positions"] = [
         int((scene.get("segment") or {}).get("position") or value)
         for scene, value in zip(scenes, resized(profile.get("scene_segment_positions"), 1))
     ]
-    reviewed["scene_segment_counts"] = [
+    projected["scene_segment_counts"] = [
         int((scene.get("segment") or {}).get("count") or value)
         for scene, value in zip(scenes, resized(profile.get("scene_segment_counts"), 1))
     ]
-    reviewed["scene_segment_roles"] = [
+    projected["scene_segment_roles"] = [
         str((scene.get("segment") or {}).get("role") or value)
         for scene, value in zip(scenes, resized(profile.get("scene_segment_roles"), "全体"))
     ]
-    return reviewed
+    return projected
 
 
 def _positive_story_duration_seconds(value: Any) -> float | None:
@@ -1494,34 +1494,34 @@ def _positive_story_duration_seconds(value: Any) -> float | None:
     return seconds
 
 
-def _reviewed_research_duration_contract_errors(
+def _research_duration_contract_errors(
     research: dict[str, Any],
     *,
     target_duration_seconds: int,
 ) -> list[str]:
-    """Ensure semantic repair preserved the requested planning contract."""
+    """Ensure researched source material preserves the requested duration plan."""
 
     plan = build_duration_plan(target_duration_seconds)
     metadata = research.get("metadata") if isinstance(research.get("metadata"), dict) else {}
     errors: list[str] = []
     raw_target = metadata.get("target_duration_seconds")
     if raw_target is None:
-        reviewed_target = None
+        normalized_target = None
     else:
         try:
-            reviewed_target = normalize_target_duration(raw_target)
+            normalized_target = normalize_target_duration(raw_target)
         except ValueError:
-            reviewed_target = None
-    if reviewed_target != plan.target_seconds:
+            normalized_target = None
+    if normalized_target != plan.target_seconds:
         errors.append(
             "metadata.target_duration_seconds must preserve the requested target "
-            f"({reviewed_target!r}!={plan.target_seconds})"
+            f"({normalized_target!r}!={plan.target_seconds})"
         )
 
-    reviewed_plan = metadata.get("duration_plan") if isinstance(metadata.get("duration_plan"), dict) else {}
+    duration_plan = metadata.get("duration_plan") if isinstance(metadata.get("duration_plan"), dict) else {}
     expected_plan = plan.to_dict()
     for key, expected in expected_plan.items():
-        raw_value = reviewed_plan.get(key)
+        raw_value = duration_plan.get(key)
         if raw_value is None or isinstance(raw_value, bool):
             actual: float | None = None
         else:
@@ -1534,22 +1534,22 @@ def _reviewed_research_duration_contract_errors(
     return errors
 
 
-def _validate_reviewed_research_duration_contract(
+def _validate_research_duration_contract(
     research: dict[str, Any],
     *,
     target_duration_seconds: int,
 ) -> None:
-    errors = _reviewed_research_duration_contract_errors(
+    errors = _research_duration_contract_errors(
         research,
         target_duration_seconds=target_duration_seconds,
     )
     if errors:
         raise RuntimeError(
-            "reviewed research duration contract failed before story authoring: " + "; ".join(errors)
+            "research duration contract failed before story authoring: " + "; ".join(errors)
         )
 
 
-def _reviewed_story_duration_contract_errors(
+def _story_duration_contract_errors(
     story: dict[str, Any],
     *,
     target_duration_seconds: int,
@@ -1559,18 +1559,18 @@ def _reviewed_story_duration_contract_errors(
     plan = build_duration_plan(target_duration_seconds)
     errors: list[str] = []
     metadata = story.get("story_metadata") if isinstance(story.get("story_metadata"), dict) else {}
-    raw_reviewed_target = metadata.get("target_duration_seconds")
-    if raw_reviewed_target is None:
-        reviewed_target = None
+    raw_target = metadata.get("target_duration_seconds")
+    if raw_target is None:
+        normalized_target = None
     else:
         try:
-            reviewed_target = normalize_target_duration(raw_reviewed_target)
+            normalized_target = normalize_target_duration(raw_target)
         except ValueError:
-            reviewed_target = None
-    if reviewed_target != plan.target_seconds:
+            normalized_target = None
+    if normalized_target != plan.target_seconds:
         errors.append(
             "story_metadata.target_duration_seconds must preserve the requested target "
-            f"({reviewed_target!r}!={plan.target_seconds})"
+            f"({normalized_target!r}!={plan.target_seconds})"
         )
 
     script = story.get("script") if isinstance(story.get("script"), dict) else {}
@@ -1621,22 +1621,22 @@ def _reviewed_story_duration_contract_errors(
     return errors
 
 
-def _validate_reviewed_story_duration_contract(
+def _validate_story_duration_contract(
     story: dict[str, Any],
     *,
     target_duration_seconds: int,
 ) -> None:
-    errors = _reviewed_story_duration_contract_errors(
+    errors = _story_duration_contract_errors(
         story,
         target_duration_seconds=target_duration_seconds,
     )
     if errors:
         raise RuntimeError(
-            "reviewed story duration contract failed before cut materialization: " + "; ".join(errors)
+            "story duration contract failed before cut materialization: " + "; ".join(errors)
         )
 
 
-def _reviewed_story_time_of_day_contract_errors(story: dict[str, Any]) -> list[str]:
+def _story_time_of_day_contract_errors(story: dict[str, Any]) -> list[str]:
     metadata = story.get("story_metadata") if isinstance(story.get("story_metadata"), dict) else {}
     semantic_scene_contract = (
         str(metadata.get("scene_authoring_contract") or "").strip()
@@ -1736,11 +1736,11 @@ def _reviewed_story_time_of_day_contract_errors(story: dict[str, Any]) -> list[s
     return errors
 
 
-def _validate_reviewed_story_time_of_day_contract(story: dict[str, Any]) -> None:
-    errors = _reviewed_story_time_of_day_contract_errors(story)
+def _validate_story_time_of_day_contract(story: dict[str, Any]) -> None:
+    errors = _story_time_of_day_contract_errors(story)
     if errors:
         raise RuntimeError(
-            "reviewed story scene time-of-day contract failed before cut materialization: "
+            "story scene time-of-day contract failed before cut materialization: "
             + "; ".join(errors)
         )
 
@@ -1796,7 +1796,7 @@ def _scene_time_of_day(profile: dict[str, Any], scene_index: int) -> str:
 
 
 def _time_of_day_visual_basis(time_of_day: str) -> str:
-    """Turn an open daypart string into explicit, reviewable lighting evidence."""
+    """Turn an open daypart string into explicit lighting evidence."""
 
     value = str(time_of_day or "").strip()
     if not value:
@@ -1858,7 +1858,7 @@ def _scene_location_sequence(profile: dict[str, Any], scene_index: int) -> list[
 
 
 def _normalize_location_segment(value: Any) -> dict[str, Any]:
-    """Normalize one review-owned location segment without inventing content."""
+    """Normalize one authored location segment without inventing content."""
 
     if not isinstance(value, dict):
         return {}
@@ -2024,13 +2024,13 @@ def _artifact_first_scene_index(profile: dict[str, Any]) -> int:
 def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
     specs: list[dict[str, Any]] = []
 
-    research = profile.get("reviewed_research")
+    research = profile.get("research")
     materials = research.get("story_materials") if isinstance(research, dict) else {}
     raw_characters = materials.get("characters") if isinstance(materials, dict) else []
     character_records = [item for item in raw_characters or [] if isinstance(item, dict)]
 
-    reviewed_story = profile.get("reviewed_story")
-    story_script = reviewed_story.get("script") if isinstance(reviewed_story, dict) else {}
+    authored_story = profile.get("story")
+    story_script = authored_story.get("script") if isinstance(authored_story, dict) else {}
     story_scenes = story_script.get("scenes") if isinstance(story_script, dict) else []
     slug = str(profile.get("slug") or "story")
     for index, record in enumerate(character_records, start=1):
@@ -2118,9 +2118,9 @@ def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str,
 
 
 def _protagonist_appearance_contract(profile: dict[str, Any]) -> dict[str, Any]:
-    """Project reviewed role/appearance facts without inventing a costume."""
+    """Project authored role and appearance facts without inventing a costume."""
 
-    research = profile.get("reviewed_research")
+    research = profile.get("research")
     materials = research.get("story_materials") if isinstance(research, dict) else {}
     records = materials.get("characters") if isinstance(materials, dict) else []
     protagonist_record = next(
@@ -2206,12 +2206,12 @@ def _supporting_character_ids_for_cut(
         or str(spec.get("character_id") or "").strip() in explicit_source_ids
     ]
     evidence_items = drawable_evidence if isinstance(drawable_evidence, list) else []
-    review_text = json.dumps(evidence_items, ensure_ascii=False, sort_keys=True).lower()
+    evidence_text = json.dumps(evidence_items, ensure_ascii=False, sort_keys=True).lower()
     named_matches = [
         spec
         for spec in scene_candidates
         if any(
-            token and token.lower() in review_text
+            token and token.lower() in evidence_text
             for token in (str(spec.get("source_character_id") or "").strip(), str(spec.get("name") or "").strip())
         )
     ]
@@ -2288,7 +2288,7 @@ def _supporting_character_ids_for_cut(
     selected = [selected_by_identity[identity] for identity in selected_specs]
     for spec in selected:
         name = str(spec.get("name") or "").strip()
-        if name and name.lower() not in review_text:
+        if name and name.lower() not in evidence_text:
             evidence_items.append(
                 {
                     "source_field": "resolved_visible_character_role",
@@ -2313,7 +2313,7 @@ def _supporting_object_ids_for_cut(
     """Bind reusable objects grounded in this cut's drawable event."""
 
     evidence_items = drawable_evidence if isinstance(drawable_evidence, list) else []
-    review_text = json.dumps(evidence_items, ensure_ascii=False, sort_keys=True).lower()
+    evidence_text = json.dumps(evidence_items, ensure_ascii=False, sort_keys=True).lower()
     plan = cut_plan if isinstance(cut_plan, dict) else {}
     event = scene_event if isinstance(scene_event, dict) else {}
     source_event_beat_ids = {
@@ -2352,7 +2352,7 @@ def _supporting_object_ids_for_cut(
             str(spec.get("object_id") or "").strip(),
             str(spec.get("name") or "").strip(),
         )
-        named_in_evidence = any(token and token.lower() in review_text for token in tokens)
+        named_in_evidence = any(token and token.lower() in evidence_text for token in tokens)
         named_in_source_event = source_object_is_drawable and any(
             token and token.lower() in source_event_text for token in tokens
         )
@@ -2360,7 +2360,7 @@ def _supporting_object_ids_for_cut(
             continue
         selected.append(spec)
         name = str(spec.get("name") or "").strip()
-        if named_in_source_event and name and name.lower() not in review_text:
+        if named_in_source_event and name and name.lower() not in evidence_text:
             evidence_items.append(
                 {
                     "source_field": "resolved_visible_object_role",
@@ -2842,7 +2842,7 @@ def _validate_exact_obligation_string_list(
 def _drawable_forbidden_reveal_names_for_scaffold(
     profile: dict[str, Any], raw_values: Any
 ) -> list[str]:
-    """Resolve review reveal keys to known drawable asset display names only.
+    """Resolve reveal keys to known drawable asset display names only.
 
     Reveal contracts may contain opaque IDs or abstract information such as a
     deadline's consequence.  Provider-facing still prompts must only name a
@@ -3891,7 +3891,7 @@ def _first_frame_visual_plan_for_scaffold(
     scene_time_of_day: str = "",
     drawable_evidence: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Derive the immutable, reviewable first-frame plan from the cut contract."""
+    """Derive the immutable provider-facing first-frame plan from the cut contract."""
 
     source_event = (
         cut_contract.get("source_event_contract")
@@ -4219,13 +4219,13 @@ def _first_frame_visual_plan_for_scaffold(
             ]
         )
     )
-    # `must_not_advance_beyond` is a progression-review boundary.  In the
+    # `must_not_advance_beyond` is a progression boundary.  In the
     # scaffold it is commonly the next cut's *positive* first-frame brief, so
     # projecting it into provider-facing `not_yet` prose reverses its polarity.
     # Only explicit
     # reveal/future-outcome constraints belong in the drawable negative list;
     # the progression boundary remains available in cut_state_progression for
-    # the semantic reviewer.
+    # downstream consumer.
 
     visual_spec = location_spec.get("visual_spec")
     location_texture = (
@@ -4411,9 +4411,9 @@ def _first_frame_visual_plan_for_scaffold(
 
 
 def _scene_source_events(profile: dict[str, Any], idx: int) -> list[str]:
-    reviewed_events = _reviewed_story_source_events(profile, idx)
-    if reviewed_events:
-        return reviewed_events
+    authored_events = _story_source_events(profile, idx)
+    if authored_events:
+        return authored_events
     events = [str(event) for event in profile.get("events", []) if str(event).strip()]
     if not events:
         return []
@@ -4459,8 +4459,8 @@ def _scene_research_refs(
     return list(dict.fromkeys(refs))
 
 
-def _reviewed_story_research_refs(profile: dict[str, Any], idx: int) -> list[str]:
-    scenes = profile.get("reviewed_story_scenes")
+def _story_research_refs(profile: dict[str, Any], idx: int) -> list[str]:
+    scenes = profile.get("story_scenes")
     if not isinstance(scenes, list) or not 0 <= idx - 1 < len(scenes):
         return []
     scene = scenes[idx - 1]
@@ -4480,11 +4480,11 @@ def _research_ref_entry_id(ref: str, section: str) -> str:
     return ref[len(prefix) : -1].strip() if ref.startswith(prefix) and ref.endswith("]") else ""
 
 
-def _reviewed_story_source_events(profile: dict[str, Any], idx: int) -> list[str]:
-    """Resolve the reviewed scene allocation against the reviewed research artifact."""
+def _story_source_events(profile: dict[str, Any], idx: int) -> list[str]:
+    """Resolve authored scene allocation against the researched source artifact."""
 
-    refs = _reviewed_story_research_refs(profile, idx)
-    research = profile.get("reviewed_research")
+    refs = _story_research_refs(profile, idx)
+    research = profile.get("research")
     if not refs or not isinstance(research, dict):
         return []
     materials = research.get("story_materials") if isinstance(research.get("story_materials"), dict) else {}
@@ -4570,8 +4570,8 @@ def _downstream_scene_research_refs(
     source_events: list[str],
     profile: dict[str, Any],
 ) -> list[str]:
-    reviewed_refs = _reviewed_story_research_refs(profile, idx)
-    return reviewed_refs or _scene_research_refs(idx, source_events, profile)
+    authored_refs = _story_research_refs(profile, idx)
+    return authored_refs or _scene_research_refs(idx, source_events, profile)
 
 
 def _next_scene_title(profile: dict[str, Any], idx: int) -> str:
@@ -4588,29 +4588,29 @@ def _previous_scene_title(profile: dict[str, Any], idx: int) -> str:
     return "開始前の状況"
 
 
-def _reviewed_story_scene(profile: dict[str, Any], idx: int) -> dict[str, Any]:
-    scenes = profile.get("reviewed_story_scenes")
+def _story_scene(profile: dict[str, Any], idx: int) -> dict[str, Any]:
+    scenes = profile.get("story_scenes")
     if isinstance(scenes, list) and 0 <= idx - 1 < len(scenes) and isinstance(scenes[idx - 1], dict):
         return scenes[idx - 1]
     return {}
 
 
-def _apply_reviewed_story_scene_to_blueprint(
+def _apply_story_scene_to_blueprint(
     blueprint: dict[str, Any],
     *,
     profile: dict[str, Any],
     idx: int,
 ) -> dict[str, Any]:
-    """Overlay only reviewed story-owned meaning onto downstream cut inputs."""
+    """Overlay only authored story meaning onto downstream cut inputs."""
 
-    reviewed_scene = _reviewed_story_scene(profile, idx)
-    if not reviewed_scene:
+    authored_scene = _story_scene(profile, idx)
+    if not authored_scene:
         return blueprint
     merged = dict(blueprint)
-    purpose = str(reviewed_scene.get("purpose") or "").strip()
-    conflict = str(reviewed_scene.get("conflict") or "").strip()
-    turn = str(reviewed_scene.get("turn") or "").strip()
-    visual_action = str(reviewed_scene.get("visualizable_action") or "").strip()
+    purpose = str(authored_scene.get("purpose") or "").strip()
+    conflict = str(authored_scene.get("conflict") or "").strip()
+    turn = str(authored_scene.get("turn") or "").strip()
+    visual_action = str(authored_scene.get("visualizable_action") or "").strip()
     if purpose:
         merged["story_purpose"] = purpose
     if conflict:
@@ -4622,12 +4622,12 @@ def _apply_reviewed_story_scene_to_blueprint(
         merged["payoff"] = f"{turn}の結果が{merged.get('handoff_anchor', '次のscene')}へ残る"
     # ``visualizable_action`` is a story/scene overview, even when the scene
     # uses only one location.  It may describe A→B→C across several beats, so
-    # it is review context rather than cut-local drawable evidence.  The cut
+    # it is scene overview context rather than cut-local drawable evidence. The cut
     # event projection below owns the concrete still state.
     if visual_action:
-        merged["review_only_visualizable_action"] = visual_action
-    merged["reviewed_story_scene_id"] = str(reviewed_scene.get("scene_id") or idx)
-    merged["research_refs"] = list(reviewed_scene.get("research_refs") or merged.get("research_refs") or [])
+        merged["story_overview_visualizable_action"] = visual_action
+    merged["story_scene_id"] = str(authored_scene.get("scene_id") or idx)
+    merged["research_refs"] = list(authored_scene.get("research_refs") or merged.get("research_refs") or [])
     return merged
 
 
@@ -4871,7 +4871,7 @@ def _scene_generation_for_scene(
     profile: dict[str, Any],
 ) -> dict[str, Any]:
     source_events = _scene_source_events(profile, idx)
-    blueprint = _apply_reviewed_story_scene_to_blueprint(
+    blueprint = _apply_story_scene_to_blueprint(
         _scene_blueprint(
             profile=profile,
             idx=idx,
@@ -5027,7 +5027,7 @@ def _scene_generation_for_scene(
                 "後段の画像生成詳細",
                 "後段の動画生成詳細",
                 "後段の音声生成詳細",
-                "review 用の内部診断",
+                "内部診断",
             ],
             "forbidden_event_changes_source": "scene_event.forbidden_event_changes",
         },
@@ -5499,7 +5499,7 @@ def _story_event_obligations_for_scene(
     source_events = _scene_source_events(profile, idx)
     if not source_events:
         return []
-    blueprint = _apply_reviewed_story_scene_to_blueprint(
+    blueprint = _apply_story_scene_to_blueprint(
         _scene_blueprint(
             profile=profile,
             idx=idx,
@@ -5528,7 +5528,7 @@ def _story_event_obligations_for_scene(
 
 
 def _adaptation_source_contract_for_profile(profile: dict[str, Any]) -> dict[str, Any]:
-    """Build a candidate value root that mandatory story review must verify."""
+    """Build the adaptation value root used by downstream contracts."""
 
     protagonist = str(profile.get("protagonist_name") or "主人公").strip()
     artifact = str(profile.get("artifact_name") or "物語の証拠").strip()
@@ -5538,8 +5538,7 @@ def _adaptation_source_contract_for_profile(profile: dict[str, Any]) -> dict[str
     return {
         "schema_version": "adaptation_source_contract_v1",
         "mode": "existing_story",
-        "authoring_provenance": "deterministic_candidate_requires_story_semantic_review",
-        "semantic_review_criterion": "adaptation_value_fidelity",
+        "authoring_provenance": "story_authoring_projection",
         "source_story_promise": f"{protagonist}が圧力の中でも失わなかった価値を、選択と{artifact}の証明によって取り戻す。",
         "core_values": [
             {
@@ -5605,8 +5604,8 @@ def _scene_value_amplification_for_profile(
     idx: int,
     title: str,
 ) -> dict[str, Any]:
-    reviewed_amplifications = profile.get("scene_value_amplifications")
-    if isinstance(reviewed_amplifications, dict):
+    authored_amplifications = profile.get("scene_value_amplifications")
+    if isinstance(authored_amplifications, dict):
         runtime_scene_id = _runtime_scene_id(idx)
         for selector in (
             str(runtime_scene_id),
@@ -5615,12 +5614,12 @@ def _scene_value_amplification_for_profile(
             f"scene{idx}",
             f"scene{idx:02d}",
         ):
-            reviewed = reviewed_amplifications.get(selector)
-            if isinstance(reviewed, dict) and reviewed:
-                return deepcopy(reviewed)
+            authored = authored_amplifications.get(selector)
+            if isinstance(authored, dict) and authored:
+                return deepcopy(authored)
         raise RuntimeError(
-            "reviewed visual_value.md is missing scene_value_amplification "
-            f"for scene{idx}; deterministic fallback is forbidden after p300 review"
+            "authored visual_value.md is missing scene_value_amplification "
+            f"for scene{idx}; deterministic fallback is forbidden"
         )
     value_ids = _adaptation_value_ids_for_profile(profile)
     if not value_ids:
@@ -5745,7 +5744,7 @@ def _scene_intent_for_cut_design(
         profile=profile,
         include_artifact=include_artifact,
     )
-    blueprint = _apply_reviewed_story_scene_to_blueprint(
+    blueprint = _apply_story_scene_to_blueprint(
         _scene_blueprint(
             profile=profile,
             idx=idx,
@@ -5772,9 +5771,9 @@ def _scene_intent_for_cut_design(
     causal_turn = str(blueprint["causal_turn"])
     if is_terminal:
         causal_turn = str(blueprint["causal_turn"])
-    reviewed_turn = str(_reviewed_story_scene(profile, idx).get("turn") or "").strip()
-    if reviewed_turn:
-        causal_turn = reviewed_turn
+    authored_turn = str(_story_scene(profile, idx).get("turn") or "").strip()
+    if authored_turn:
+        causal_turn = authored_turn
     done_when = (
         f"{title}の問い、終結、物証の一致が、人物・場所・光・{profile['artifact_name']}の関係で説明なしに読める"
         if is_terminal
@@ -5792,8 +5791,8 @@ def _scene_intent_for_cut_design(
             idx=idx,
             title=title,
         ),
-        "review_only_visualizable_action": str(
-            blueprint.get("review_only_visualizable_action") or ""
+        "story_overview_visualizable_action": str(
+            blueprint.get("story_overview_visualizable_action") or ""
         ),
         "dramatic_question": blueprint["dramatic_question"],
         "scene_spine": blueprint["scene_spine"],
@@ -5923,7 +5922,7 @@ def _scene_intent_for_cut_design(
         "handoff_to_next_scene": f"{title}の出口側に残る光と人物の視線が、まだ画面内の導線を指す" if not is_terminal else "",
         "terminal_resolution": f"{profile['artifact_name']}が主人公の価値を証明する" if is_terminal else "",
     }
-    authored_scene = _reviewed_story_scene(profile, idx)
+    authored_scene = _story_scene(profile, idx)
     for key in ("start_state", "end_state", "handoff_chain", "preservation", "reveal_contract"):
         if isinstance(authored_scene.get(key), dict):
             intent[key] = deepcopy(authored_scene[key])
@@ -5950,7 +5949,7 @@ def _legacy_scene_event_for_cut_design(
     source_story_beat_id = f"story_scene{idx:02d}_primary"
     source_events = _scene_source_events(profile, idx)
     research_refs = _downstream_scene_research_refs(idx, source_events, profile)
-    blueprint = _apply_reviewed_story_scene_to_blueprint(
+    blueprint = _apply_story_scene_to_blueprint(
         _scene_blueprint(
             profile=profile,
             idx=idx,
@@ -6583,7 +6582,7 @@ def _scene_event_for_cut_design(
         profile=profile,
         include_artifact=include_artifact,
     )
-    authored_scene = _reviewed_story_scene(profile, idx)
+    authored_scene = _story_scene(profile, idx)
     authored_beats = authored_scene.get("event_sequence")
     if not isinstance(authored_beats, list) or not authored_beats:
         return projected
@@ -6711,7 +6710,10 @@ def _story_event_obligations_from_scene_event(scene_event: dict[str, Any]) -> li
                 "event_id": beat_id,
                 "source_event_beat_id": beat_id,
                 "source_events": [str(beat.get("what_happens") or "").strip()],
-                "audience_knowledge_delta": str(beat.get("immediate_consequence") or "").strip(),
+                "audience_knowledge_delta": (
+                    str(beat.get("audience_knowledge_delta") or "").strip()
+                    or str(beat.get("immediate_consequence") or "").strip()
+                ),
                 "causal_proof": str(beat.get("visible_action") or "").strip(),
                 "visual_evidence": [str(item) for item in beat.get("required_visual_evidence", []) if str(item).strip()] if isinstance(beat.get("required_visual_evidence"), list) else [],
                 "required_roles": [
@@ -7463,6 +7465,11 @@ def _scene_cut_coverage_plan(
     ) -> None:
         """Project one canonical event beat into one drawable/motion cut state."""
 
+        # Audience interpretation is authored separately from physical consequence.
+        # Keep it bound to the selected beat instead of a scaffold's generic claim.
+        audience_delta = str(beat.get("audience_knowledge_delta") or "").strip()
+        if audience_delta:
+            obligation["audience_knowledge_delta"] = audience_delta
         obligation_id = str(obligation.get("obligation_id") or "").strip()
         concrete = beat.get("concrete_event") if isinstance(beat.get("concrete_event"), dict) else {}
         raw_obligation_overrides = beat.get("obligation_overrides")
@@ -8242,7 +8249,7 @@ def _story_scene_character_ids(
 ) -> list[str]:
     """Carry research character responsibility into each authored story scene."""
 
-    research = profile.get("reviewed_research")
+    research = profile.get("research")
     materials = research.get("story_materials") if isinstance(research, dict) else None
     raw_events = materials.get("chronological_events") if isinstance(materials, dict) else None
     character_ids: list[str] = []
@@ -8425,77 +8432,6 @@ def _authored_location_segments_for_story(
         materialized.append(materialized_segment)
     return materialized
 
-
-def _materialize_exact_reviewed_story_location_segments(
-    story: dict[str, Any], *, profile: dict[str, Any]
-) -> bool:
-    """Repair only review output whose route is exactly the authored route."""
-
-    script = story.get("script") if isinstance(story.get("script"), dict) else {}
-    scenes = script.get("scenes") if isinstance(script.get("scenes"), list) else []
-    changed = False
-    for scene_index, scene in enumerate(scenes, start=1):
-        if not isinstance(scene, dict):
-            continue
-        location = (
-            scene.get("location")
-            if isinstance(scene.get("location"), dict)
-            else {}
-        )
-        raw_route = location.get("sequence")
-        route = [
-            str(item).strip()
-            for item in (raw_route if isinstance(raw_route, list) else [])
-            if str(item).strip()
-        ]
-        authored_route = _scene_location_sequence(profile, scene_index)
-        if len(route) <= 1 or route != authored_route:
-            continue
-        segments = [
-            segment
-            for item in (
-                location.get("segments")
-                if isinstance(location.get("segments"), list)
-                else []
-            )
-            if (segment := _normalize_location_segment(item))
-        ]
-        segment_locations = [segment["location"] for segment in segments]
-        has_complete_exact_route = (
-            segment_locations == route
-            and all(
-                all(
-                    segment.get(key)
-                    for key in (
-                        "responsibility",
-                        "primary_subject",
-                        "visible_action",
-                        "required_visual_evidence",
-                        "motion_brief",
-                        "motion_end_state",
-                    )
-                )
-                for segment in segments
-            )
-        )
-        if has_complete_exact_route:
-            continue
-        title = str(scene.get("title") or f"scene {scene_index}").strip()
-        blueprint = _scene_blueprint(
-            profile=profile,
-            idx=scene_index,
-            title=title,
-            location_name=str(location.get("name") or route[0]),
-            include_artifact=_scene_uses_artifact(profile, scene_index),
-        )
-        location["segments"] = _authored_location_segments_for_story(
-            profile=profile,
-            scene_index=scene_index,
-            blueprint=blueprint,
-        )
-        scene["location"] = location
-        changed = True
-    return changed
 
 
 def _validate_next_cut_last_frame_boundary(
@@ -9052,7 +8988,7 @@ def _scene_acceptance_role_character_id(
 
 
 def _scene_acceptance_source_ledger(profile: dict[str, Any]) -> dict[str, Any]:
-    """Freeze the reviewed profile facts addressed by contract JSON Pointers."""
+    """Freeze the authored profile facts addressed by contract JSON Pointers."""
 
     return {
         "schema_version": "scene_acceptance_source_ledger_v1",
@@ -10004,11 +9940,9 @@ def _build_script_and_manifest(
             "owner": criterion["owner"],
             "instruction": criterion["authoring_instruction"],
             "required_inputs": criterion["required_inputs"],
-        }
-        for criterion in criterion_registry_payload()
-        if criterion["first_enforced_stage"]
-        in {"scene_authoring", "scene_authoring_preflight"}
-    ]
+            }
+            for criterion in criterion_registry_payload()
+        ]
     for authored_record in scene_authoring_records:
         authored_record["scene_generation"]["scene_acceptance_prompt_packet"] = {
             "schema_version": "scene_authoring_prompt_packet_v1",
@@ -12171,7 +12105,6 @@ def materialize_run(
         experience=experience,
         source_run=source_run,
         target_duration_seconds=target_duration_seconds,
-        review_mode=review_mode,
         expected_run_identity=materialization_root_identity,
     )
     if (
@@ -12271,12 +12204,12 @@ def materialize_run(
             _build_research(topic, source, now, profile),
         ),
     )
-    _research_text, reviewed_research = load_structured_document(run_dir / "research.md")
-    if not reviewed_research:
+    _research_text, researched_source = load_structured_document(run_dir / "research.md")
+    if not researched_source:
         raise RuntimeError("research.md is not a structured document")
     try:
-        _validate_reviewed_research_duration_contract(
-            reviewed_research,
+        _validate_research_duration_contract(
+            researched_source,
             target_duration_seconds=target_duration_seconds,
         )
     except RuntimeError as exc:
@@ -12297,7 +12230,7 @@ def materialize_run(
             "research.duration_contract.status": "passed",
         },
     )
-    profile = _profile_from_reviewed_research(profile, reviewed_research)
+    profile = _profile_from_research(profile, researched_source)
     append_state_snapshot(
         run_dir / "state.txt",
         {
@@ -12321,30 +12254,30 @@ def materialize_run(
             "slot.p200.note": "LLM-authored story.md passed deterministic research and handoff validation",
         },
     )
-    _story_text, reviewed_story = load_structured_document(run_dir / "story.md")
-    if not reviewed_story:
+    _story_text, authored_story = load_structured_document(run_dir / "story.md")
+    if not authored_story:
         raise RuntimeError("story.md is not a structured document")
-    reviewed_story_contract_errors = validate_story_document(
-        reviewed_story,
-        build_research_registry(reviewed_research),
+    story_contract_errors = validate_story_document(
+        authored_story,
+        build_research_registry(researched_source),
     )
-    if reviewed_story_contract_errors:
+    if story_contract_errors:
         append_state_snapshot(
             run_dir / "state.txt",
             {
                 "timestamp": _now_iso(),
                 "runtime.stage": "story_contract_failed",
                 "story.contract.status": "failed",
-                "last_error": ", ".join(reviewed_story_contract_errors)[:2000],
+                "last_error": ", ".join(story_contract_errors)[:2000],
             },
         )
         raise RuntimeError(
             "story contract failed before cut materialization: "
-            + ", ".join(reviewed_story_contract_errors)
+            + ", ".join(story_contract_errors)
         )
     try:
-        _validate_reviewed_story_duration_contract(
-            reviewed_story,
+        _validate_story_duration_contract(
+            authored_story,
             target_duration_seconds=target_duration_seconds,
         )
     except RuntimeError as exc:
@@ -12366,7 +12299,7 @@ def materialize_run(
         },
     )
     try:
-        _validate_reviewed_story_time_of_day_contract(reviewed_story)
+        _validate_story_time_of_day_contract(authored_story)
     except RuntimeError as exc:
         append_state_snapshot(
             run_dir / "state.txt",
@@ -12385,10 +12318,10 @@ def materialize_run(
             "story.time_of_day_contract.status": "passed",
         },
     )
-    reviewed_adaptation_contract = reviewed_story.get("adaptation_source_contract")
-    if isinstance(reviewed_adaptation_contract, dict) and reviewed_adaptation_contract:
-        profile["adaptation_source_contract"] = deepcopy(reviewed_adaptation_contract)
-    profile = _profile_from_reviewed_story(profile, reviewed_story)
+    authored_adaptation_contract = authored_story.get("adaptation_source_contract")
+    if isinstance(authored_adaptation_contract, dict) and authored_adaptation_contract:
+        profile["adaptation_source_contract"] = deepcopy(authored_adaptation_contract)
+    profile = _profile_from_story(profile, authored_story)
     protagonist_asset = profile["protagonist_asset_id"]
     artifact_asset = profile["artifact_asset_id"]
     visual = {
@@ -12428,28 +12361,28 @@ def materialize_run(
             visual,
         ),
     )
-    _visual_text, reviewed_visual_value = load_structured_document(
+    _visual_text, authored_visual_value = load_structured_document(
         run_dir / "visual_value.md"
     )
-    if not reviewed_visual_value:
+    if not authored_visual_value:
         raise RuntimeError("visual_value.md is not a structured document")
     visual_adaptation_issues = visual_value_adaptation_issues(
-        reviewed_visual_value,
-        source_value_ids=adaptation_source_value_ids(reviewed_story),
+        authored_visual_value,
+        source_value_ids=adaptation_source_value_ids(authored_story),
     )
     if visual_adaptation_issues:
         raise RuntimeError(
             "visual_value adaptation contract is invalid: "
             + ", ".join(visual_adaptation_issues[:12])
         )
-    reviewed_intent = reviewed_visual_value.get("adaptation_intent")
-    if isinstance(reviewed_intent, dict) and reviewed_intent:
-        profile["adaptation_intent"] = deepcopy(reviewed_intent)
+    authored_intent = authored_visual_value.get("adaptation_intent")
+    if isinstance(authored_intent, dict) and authored_intent:
+        profile["adaptation_intent"] = deepcopy(authored_intent)
     profile["scene_value_amplifications"] = {
         str(scene_value.get("scene_selector") or scene_value.get("scene_id")): deepcopy(
             scene_value["scene_value_amplification"]
         )
-        for scene_value in reviewed_visual_value.get("scene_visual_values", [])
+        for scene_value in authored_visual_value.get("scene_visual_values", [])
         if isinstance(scene_value, dict)
         and isinstance(scene_value.get("scene_value_amplification"), dict)
         and scene_value.get("scene_selector") is not None
@@ -12751,46 +12684,23 @@ def materialize_run(
         _md_yaml("Asset Plan", asset_plan),
     )
     _prepare_authoring_grounding(run_dir)
-    _refresh_p400_review_artifacts(run_dir)
     _require_fresh_p400_readiness(run_dir)
     _write_asset_request_files(run_dir, asset_plan, profile)
     _materialize_standard_request_files(run_dir)
-    # Request projection persists compiled video payloads back into the
-    # production manifest. Re-ground and re-freeze P400 against that final
-    # pre-provider revision so p450 never consumes stale review snapshots.
+    # Request projection persists compiled provider payloads back into the
+    # production manifest. Re-ground and recheck the final structural revision
+    # before handing concrete requests to the provider.
     _prepare_authoring_grounding(run_dir)
-    _refresh_p400_review_artifacts(run_dir)
     _require_fresh_p400_readiness(run_dir)
-    state_updates = _write_orchestration(
-        run_dir,
-        stop_target,
-        now,
-        foundation_reviews_passed=foundation_review_runner is not None,
-    )
+    state_updates = _write_orchestration(run_dir, stop_target, now)
     media_slot_updates = _fresh_materialized_media_slot_updates(stop_target)
     slots = P680_SLOTS if stop_target == "p680" else P650_SLOTS
     for slot in slots:
         if f"slot.{slot}.status" in media_slot_updates:
             continue
         state_updates[f"slot.{slot}.status"] = "awaiting_approval" if slot in AWAITING_ALLOWED else "done"
-        state_updates[f"slot.{slot}.note"] = "frontend handoff" if slot in AWAITING_ALLOWED else "completed by frontend-review workflow"
-    state_updates.update(
-        {
-            "review.image_prompt.request_freeze.status": "draft",
-            "review.image_prompt.request_freeze.request": "image_generation_requests.md",
-            "review.image_prompt.request_freeze.snapshot": "image_generation_request_snapshot.json",
-        }
-    )
+        state_updates[f"slot.{slot}.note"] = "frontend handoff" if slot in AWAITING_ALLOWED else "completed by frontend create workflow"
     state_updates.update(media_slot_updates)
-    if foundation_review_runner is not None:
-        state_updates.update(
-            {
-                "slot.p130.status": "done",
-                "slot.p130.note": "research semantic review/repair passed",
-                "slot.p230.status": "done",
-                "slot.p230.note": "story semantic review/repair passed",
-            }
-        )
     state_updates.update(
         {
             "timestamp": now,
@@ -12802,30 +12712,20 @@ def materialize_run(
             "runtime.duration_plan.minimum_scene_count": str(duration_plan["minimum_scene_count"]),
             "runtime.duration_plan.minimum_narration_seconds": str(duration_plan["minimum_narration_seconds"]),
             "status": "P650",
-            "runtime.stage": "image_prompt_semantic_review_pending",
+            "runtime.stage": "provider_requests_ready",
             "runtime.stage_target": "p600",
             "runtime.stop_slot": stop_target,
             "runtime.scaffold.content_status": "authored",
-            "runtime.review_policy": review_policy,
-            "runtime.review_mode": review_mode,
-            "review.policy.story": required_review_gate,
-            "review.policy.image": required_review_gate,
-            "review.policy.narration": optional_review_gate,
-            "gate.research_review": required_review_gate,
-            "gate.story_review": required_review_gate,
-            "gate.narration_review": optional_review_gate,
             "immersive.experience": experience,
-            "review.research.status": "approved" if foundation_review_runner is not None else "pending",
-            "review.story.status": "approved" if foundation_review_runner is not None else "pending",
-            "review.script.status": "approved",
-            "stage.research.status": "reviewed" if foundation_review_runner is not None else "awaiting_approval",
-            "stage.story.status": "reviewed" if foundation_review_runner is not None else "awaiting_approval",
-            "stage.visual_value.status": "awaiting_approval",
-            "stage.script.status": "awaiting_approval",
-            "stage.asset.status": "awaiting_approval",
-            "stage.scene_implementation.status": "awaiting_approval",
-            "review.image.status": "pending",
-            "gate.image_review": required_review_gate,
+            "stage.research.status": "authored",
+            "stage.story.status": "authored",
+            "stage.visual_value.status": "authored",
+            "stage.script.status": "authored",
+            "stage.asset.status": "planned",
+            "stage.scene_implementation.status": "planned",
+            "generation.image_prompt.request_freeze.status": "draft",
+            "generation.image_prompt.request_freeze.request": "image_generation_requests.md",
+            "generation.image_prompt.request_freeze.snapshot": "image_generation_request_snapshot.json",
         }
     )
     append_state_snapshot(run_dir / "state.txt", state_updates)
@@ -12846,32 +12746,12 @@ def _prepare_authoring_grounding(run_dir: Path) -> None:
 def prepare_grounding(
     run_dir: Path,
     *,
-    verify_p450: bool = True,
+    verify_p450: bool = False,
 ) -> None:
-    # materialize_run() has already prepared the authoring readsets before it
-    # freezes the p400 review-loop snapshots. Re-running those stages here
-    # changes readset hashes after the freeze and makes the otherwise-current
-    # p400 review artifacts stale.
-    if verify_p450:
-        _run_materialization_subprocess(
-            run_dir,
-            [
-                sys.executable,
-                str(REPO_ROOT / "scripts" / "verify-pipeline.py"),
-                "--run-dir",
-                str(run_dir),
-                "--flow",
-                "immersive",
-                "--profile",
-                "standard",
-                "--stage-target",
-                "p450",
-            ],
-            cwd=REPO_ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+    # Keep this compatibility keyword for callers that used to request a
+    # p450 gate. Grounding prepares source/readset artifacts only; the state
+    # worker records their progress.
+    del verify_p450
     grounding_slots = {
         "asset": ("p510", "asset grounding completed"),
         "scene_implementation": ("p610", "scene implementation grounding completed"),
@@ -12900,61 +12780,47 @@ async def generate_images(run_dir: Path, stop_target: str) -> None:
 
     run_id = _run_id_from_dir(run_dir)
     if stop_target == "p650":
-        await image_gen_app._run_pre_asset_semantic_fixed_point(
-            "toc-immersive-frontend-run",
-            run_dir=run_dir,
-        )
         image_gen_app._validate_pre_asset_provider_gate(run_dir)
         await image_gen_app._generate_request_outputs(run_dir=run_dir, kind="asset")
         try:
-            image_gen_app._validate_p560_asset_quality(run_dir)
+            image_gen_app._validate_generated_outputs(run_dir, "asset")
         except Exception as exc:
-            retryable_visual_quality = (
-                isinstance(exc, image_gen_app.P560AssetGateError)
-                and exc.retryable_visual_quality
+            failed_check_ids = getattr(
+                exc,
+                "failed_check_ids",
+                ("p570.asset_output_validation",),
             )
-            if retryable_visual_quality:
-                image_gen_app._mark_asset_generation_handoff(
-                    run_dir,
-                    asset_quality_passed=False,
-                )
-            else:
-                failed_check_ids = getattr(
-                    exc,
-                    "failed_check_ids",
-                    ("p570.unclassified_failure",),
-                )
-                append_state_snapshot(
-                    run_dir / "state.txt",
-                    {
-                        "timestamp": _now_iso(),
-                        "runtime.stage": "p570_non_visual_gate_failed",
-                        "review.asset_visual_gate.status": "blocked_non_visual_validation",
-                        "review.asset_visual_gate.last_error": str(exc)[:2000],
-                        "review.asset_visual_gate.failed_check_ids": ", ".join(
-                            str(check_id)
-                            for check_id in failed_check_ids
-                            if str(check_id).strip()
-                        ),
-                        "slot.p550.status": "done",
-                        "slot.p550.note": "asset requests were submitted to the image provider",
-                        "slot.p560.status": "done",
-                        "slot.p560.note": "reusable asset image generation completed before p570 validation failed",
-                        "slot.p570.status": "failed",
-                        "slot.p570.note": "non-visual p570 validation failed",
-                        "stage.asset.status": "failed",
-                    },
-                )
+            append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "timestamp": _now_iso(),
+                    "runtime.stage": "asset_output_validation_failed",
+                    "generation.asset_validation.status": "failed",
+                    "generation.asset_validation.last_error": str(exc)[:2000],
+                    "generation.asset_validation.failed_check_ids": ", ".join(
+                        str(check_id)
+                        for check_id in failed_check_ids
+                        if str(check_id).strip()
+                    ),
+                    "slot.p550.status": "done",
+                    "slot.p550.note": "asset requests were submitted to the image provider",
+                    "slot.p560.status": "done",
+                    "slot.p560.note": "reusable asset image generation completed before output validation failed",
+                    "slot.p570.status": "failed",
+                    "slot.p570.note": "asset output validation failed",
+                    "stage.asset.status": "failed",
+                },
+            )
             raise
         image_gen_app._mark_asset_generation_handoff(
             run_dir,
             asset_quality_passed=True,
         )
-        await image_gen_app._run_semantic_review("toc-immersive-frontend-run", run_dir=run_dir, stage="image_prompt")
-        result = check_semantic_review(run_dir, "image_prompt")
-        if not result.passed:
-            raise RuntimeError(f"image_prompt semantic review did not pass: {'; '.join(result.errors)}")
-        _refresh_downstream_review_input_snapshots(run_dir)
+        async with image_gen_app._serialized_run_write(
+            run_dir,
+            "scene_request_revision",
+        ):
+            image_gen_app._mark_image_prompt_request_freeze_done(run_dir)
     else:
         generation_completed = await image_gen_app._generate_create_images(
             "toc-immersive-frontend-run",
@@ -12962,35 +12828,9 @@ async def generate_images(run_dir: Path, stop_target: str) -> None:
         )
         if generation_completed is False:
             raise RuntimeError(
-                "p570 asset continuity review is required; "
-                "p680 scene generation and validation are blocked"
+                "asset output validation did not complete; "
+                "p680 scene generation is blocked"
             )
-        _refresh_downstream_review_input_snapshots(run_dir)
-
-
-async def run_pre_media_semantic_pipeline(
-    run_dir: Path,
-    *,
-    image_prompt_provider_ready: bool,
-) -> None:
-    """Review every authored design even when media generation is disabled."""
-
-    from server import image_gen_app
-
-    await image_gen_app._run_pre_asset_semantic_fixed_point(
-        "toc-immersive-frontend-run",
-        run_dir=run_dir,
-    )
-    await image_gen_app._run_semantic_review(
-        "toc-immersive-frontend-run",
-        run_dir=run_dir,
-        stage="image_prompt",
-        image_prompt_provider_ready=image_prompt_provider_ready,
-    )
-    result = check_semantic_review(run_dir, "image_prompt")
-    if not result.passed:
-        raise RuntimeError(f"image_prompt semantic review did not pass: {'; '.join(result.errors)}")
-    _refresh_downstream_review_input_snapshots(run_dir)
 
 
 def validate(run_dir: Path, stop_target: str) -> None:
@@ -13016,8 +12856,22 @@ def _require_materialization_free_space(run_dir: Path) -> None:
     )
 
 
+# Compatibility names used by the resume helper and older structural fixtures.
+# They only project authored source data; no review step is restored.
+_profile_from_reviewed_research = _profile_from_research
+_profile_from_reviewed_story = _profile_from_story
+_reviewed_research_duration_contract_errors = _research_duration_contract_errors
+_validate_reviewed_research_duration_contract = _validate_research_duration_contract
+_reviewed_story_duration_contract_errors = _story_duration_contract_errors
+_validate_reviewed_story_duration_contract = _validate_story_duration_contract
+_reviewed_story_time_of_day_contract_errors = _story_time_of_day_contract_errors
+_validate_reviewed_story_time_of_day_contract = _validate_story_time_of_day_contract
+_reviewed_story_scene = _story_scene
+_apply_reviewed_story_scene_to_blueprint = _apply_story_scene_to_blueprint
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the ToC immersive frontend-review workflow to p650/p680.")
+    parser = argparse.ArgumentParser(description="Run the ToC immersive frontend create workflow to p650/p680.")
     parser.add_argument("--topic", required=True)
     parser.add_argument("--source", default="")
     parser.add_argument("--run-dir", required=True)
@@ -13054,12 +12908,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--review-mode",
-        choices=sorted(REVIEW_MODES),
-        default="standard",
-        help=(
-            "standard runs external review agents; preapproved emits "
-            "digest-bound approved review artifacts without reviewer turns"
-        ),
+        default=None,
+        help="Deprecated compatibility option; accepted and ignored.",
     )
     parser.add_argument("--materialize-only", action="store_true", help="Write text artifacts only; do not generate images or validate media.")
     parser.add_argument("--skip-validation", action="store_true")
@@ -13174,7 +13024,6 @@ def main() -> None:
             materialize_stop_target,
             target_duration_seconds=target_duration_seconds,
             review_mode=args.review_mode,
-            foundation_review_runner=_run_foundation_semantic_review,
             experience=args.experience,
             source_run=source_run,
             world_walk_source_identity=world_walk_source_identity,
@@ -13187,15 +13036,7 @@ def main() -> None:
             ),
         )
         prepare_grounding(run_dir)
-        _refresh_downstream_review_artifacts(run_dir)
-        if args.materialize_only:
-            asyncio.run(
-                run_pre_media_semantic_pipeline(
-                    run_dir,
-                    image_prompt_provider_ready=False,
-                )
-            )
-        else:
+        if not args.materialize_only:
             asyncio.run(generate_images(run_dir, args.stop_target))
         write_run_index(run_dir)
         if not args.skip_validation:

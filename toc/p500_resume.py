@@ -24,7 +24,6 @@ from toc.run_index import build_run_index_markdown, classify_run_file
 from toc.run_root_binding import bind_run_root
 from toc.state_store import read_current_state
 from toc.runtime_locks import FileLockUnavailable, sync_file_lock
-from toc.stage_evaluator import check_manifest_single
 from scripts.world_walk_source import (
     read_regular_file_nofollow,
     write_regular_file_nofollow,
@@ -140,35 +139,6 @@ _DOWNSTREAM_STATE_PREFIXES = (
     "stage.video_generation.",
     "stage.render.",
     "stage.qa.",
-    "review.asset",
-    "review.image",
-    "review.narration",
-    "review.duration_fit",
-    "review.video",
-    "review.final",
-    "review.frontend.",
-    "review.semantic.scene_set",
-    "review.semantic.scene_detail",
-    "review.semantic.cut_blueprint",
-    "review.semantic.asset_plan",
-    "review.semantic.asset_output",
-    "review.semantic.image_prompt",
-    "review.semantic.scene_image",
-    "review.semantic.narration",
-    "review.semantic.video_motion",
-    "review.semantic.video_clip",
-    "review.semantic.render",
-    "review.semantic.create_",
-    "eval.asset",
-    "eval.scene_set",
-    "eval.scene_detail",
-    "eval.cut_blueprint",
-    "eval.image",
-    "eval.manifest",
-    "eval.scene_image",
-    "eval.narration",
-    "eval.video",
-    "eval.render",
     "image_generation.",
     "video_generation.",
     "audio_generation.",
@@ -964,33 +934,15 @@ def _validate_upstream(run_dir: Path) -> None:
 
 
 def _p400_readiness(run_dir: Path) -> tuple[str, tuple[str, ...]]:
-    result, updates = check_manifest_single(
-        run_dir,
-        "standard",
-        "immersive",
-        # A Codex fix may intentionally make the old p400 review digest stale.
-        # The continuation path rematerializes those reviews and runs the full
-        # gate before any p500 request/provider work.
-        require_review_artifacts=False,
-    )
-    status = str(updates.get("eval.p400_readiness.status") or "")
-    reason_keys = tuple(
-        value
-        for value in str(updates.get("eval.p400_readiness.reason_keys") or "").split(",")
-        if value
-    )
-    if status != "approved":
-        failed = [
-            str(check.get("id") or "")
-            for check in result.get("checks", [])
-            if isinstance(check, dict) and check.get("passed") is False
-        ]
-        reasons = reason_keys or tuple(value for value in failed if value.startswith("p400."))
-        raise P500ResumeError(
-            "fresh p400 readiness is not approved"
-            + (f": {', '.join(reasons)}" if reasons else "")
-        )
-    return status, reason_keys
+    """Check only that the preserved p400 inputs exist before resuming.
+
+    Resume safety is provided by the bound canonical files, source identity,
+    checkpoint token, and downstream fingerprints.  Historical reviewer or
+    evaluator state is deliberately ignored and never gates the reset.
+    """
+
+    _validate_upstream(run_dir)
+    return "ready", ()
 
 
 def _is_downstream_semantic_log(rel: str) -> bool:
@@ -1359,8 +1311,9 @@ def _state_updates_for_reset(
                     sort_keys=True,
                 ).encode("utf-8")
             ).hexdigest(),
-            "review.image_prompt.request_freeze.status": "pending",
-            "review.image.status": "pending",
+            "generation.image_prompt.request_freeze.status": "pending",
+            "generation.image_prompt.request_freeze.request": "image_generation_requests.md",
+            "generation.image_prompt.request_freeze.snapshot": "image_generation_request_snapshot.json",
             "stage.asset.status": "pending",
             "stage.scene_implementation.status": "pending",
             "image_generation.status": "not_started",

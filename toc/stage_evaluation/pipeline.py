@@ -25,7 +25,6 @@ from toc.story_duration import audit_duration, normalize_target_duration
 from .common import (
     IMAGE_API_PROMPT_POLICY_VERSION,
     IMAGE_API_PROMPT_POLICY_VERSION_V2,
-    P400_READINESS_CHECK_IDS,
     SCENE_GENERATION_REQUIRED_BLOCKS,
     SCENE_GENERATION_REQUIRED_OUTPUTS,
     SCENE_PROMPT_PAYLOAD_FORBIDDEN_DIRECTING_TERMS_RE,
@@ -459,7 +458,10 @@ def _manifest_checks(
     profile: str,
     flow: str,
     path_label: str,
+    run_dir: Path | None = None,
+    script_data: dict[str, Any] | None = None,
 ) -> None:
+    del run_dir, script_data
     scenes = as_list(data.get("scenes"))
     add_check(checks, f"{path_label}.scenes_type", isinstance(data.get("scenes"), list), f"{path_label} scenes are represented as a list")
     _validate_unique_ids(scenes, id_key="scene_id", label=f"{path_label}.scene", checks=checks)
@@ -501,10 +503,11 @@ def _manifest_checks(
             narration = audio.get("narration")
             if narration is not None and not isinstance(narration, dict):
                 invalid.append(f"scene{scene_id}:audio.narration.type")
-            elif isinstance(narration, dict) and "output" in narration and not _valid_relative_path(Path("/"), narration.get("output")):
-                # The helper only checks lexical containment; absolute paths
-                # are rejected before a caller joins them to a run root.
-                path_issues.append(f"scene{scene_id}:audio.narration.output")
+            elif isinstance(narration, dict) and "output" in narration:
+                raw_output = str(narration.get("output") or "").strip()
+                output_path = Path(raw_output)
+                if output_path.is_absolute() or ".." in output_path.parts:
+                    path_issues.append(f"scene{scene_id}:audio.narration.output")
             image_payload = image.get("api_prompt_payload")
             if image_payload is not None and not isinstance(image_payload, dict):
                 invalid.append(f"scene{scene_id}:image_generation.api_prompt_payload.type")
@@ -544,7 +547,16 @@ def _minimum_cut_issues(manifest: dict[str, Any], *, min_cuts_per_scene: int | N
     return issues
 
 
-def check_manifest_single(run_dir: Path, profile: str = "standard", flow: str = "toc-run") -> tuple[dict[str, Any], dict[str, str]]:
+def check_manifest_single(
+    run_dir: Path,
+    profile: str = "standard",
+    flow: str = "toc-run",
+    *,
+    require_review_artifacts: bool | None = None,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    # The keyword remains accepted for old callers while having no effect.
+    # Review reports are never consulted by the structural validator.
+    del require_review_artifacts
     path = run_dir / "video_manifest.md"
     checks: list[dict[str, Any]] = []
     add_check(checks, "manifest.file_exists", path.is_file(), f"{path.name} exists")
@@ -678,7 +690,6 @@ def check_video_scene_series(run_dir: Path, *, target_slot: str = "p930", durati
 
 
 __all__ = [
-    "P400_READINESS_CHECK_IDS",
     "STORY_REQUIRED_SCENE_FIELDS",
     "_iter_manifest_nodes",
     "_iter_manifest_nodes_with_selectors",

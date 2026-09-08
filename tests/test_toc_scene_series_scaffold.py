@@ -22,8 +22,6 @@ class TestTocSceneSeriesScaffold(unittest.TestCase):
                     "--base",
                     str(base),
                     "--dry-run",
-                    "--review-policy",
-                    "drafts",
                 ],
                 check=True,
                 capture_output=True,
@@ -36,12 +34,15 @@ class TestTocSceneSeriesScaffold(unittest.TestCase):
             self.assertTrue((run_dir / "logs" / "grounding" / "research.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "story.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "story.readset.json").exists())
-            self.assertTrue((run_dir / "logs" / "grounding" / "story.audit.json").exists())
+            self.assertFalse((run_dir / "logs" / "grounding" / "story.audit.json").exists())
             self.assertTrue((run_dir / "scenes" / "scene01" / "evidence.md").exists())
             self.assertTrue((run_dir / "scenes" / "scene01" / "script.md").exists())
             self.assertTrue((run_dir / "scenes" / "scene01" / "video_manifest.md").exists())
-            self.assertTrue((run_dir / "scenes" / "scene01" / "logs" / "grounding" / "narration.json").exists())
-            self.assertTrue((run_dir / "scenes" / "scene01" / "logs" / "grounding" / "narration.audit.json").exists())
+            self.assertFalse((run_dir / "scenes" / "scene01" / "logs" / "grounding" / "narration.json").exists())
+            state = (run_dir / "state.txt").read_text(encoding="utf-8")
+            self.assertNotIn("review.", state)
+            self.assertNotIn("eval.", state)
+            self.assertNotIn("gate.video_review", state)
 
 
 if __name__ == "__main__":

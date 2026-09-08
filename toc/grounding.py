@@ -1,4 +1,4 @@
-"""Stage grounding contracts, readsets, and audit helpers."""
+"""Stage grounding contracts, readsets, and deterministic input resolution."""
 
 from __future__ import annotations
 
@@ -11,15 +11,6 @@ from toc.harness import append_state_snapshot, extract_yaml_block, now_iso, pars
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GROUNDING_CONTRACT_PATH = REPO_ROOT / "workflow" / "stage-grounding.yaml"
-APPROVAL_POLICY_DEFAULTS: dict[str, str] = {
-    # Kept as an empty compatibility export.  Production grounding no longer
-    # carries approval policy state.
-}
-APPROVAL_POLICY_PRESETS: dict[str, dict[str, str]] = {
-    "disabled": {},
-}
-
-
 class StageGroundingError(RuntimeError):
     def __init__(self, *, stage: str, status: str, run_dir: Path, report: dict[str, Any]) -> None:
         self.stage = stage
@@ -52,34 +43,6 @@ class StagePlaybookSelectionError(RuntimeError):
         invalid = ", ".join(self.invalid_paths) or "none"
         available = ", ".join(self.available_paths) or "none"
         return f"Playbook selection failed for stage={self.stage} run_dir={self.run_dir} invalid={invalid} available={available}"
-
-
-def normalize_review_policy_value(value: str | None, *, default: str = "required") -> str:
-    """Compatibility shim for callers that still import the old helper."""
-
-    del value, default
-    return "disabled"
-
-
-def resolve_review_policy(
-    *,
-    preset: str = "strict",
-    story_review: str | None = None,
-    image_review: str | None = None,
-    narration_review: str | None = None,
-) -> dict[str, str]:
-    del preset, story_review, image_review, narration_review
-    return {}
-
-
-def review_policy_state_entries(policy: dict[str, str]) -> dict[str, str]:
-    del policy
-    return {}
-
-
-def current_review_policy(state: dict[str, str]) -> dict[str, str]:
-    del state
-    return {}
 
 
 def detect_flow(run_dir: Path) -> str:
@@ -220,32 +183,6 @@ def load_grounding_readset(run_dir: Path, stage: str, contract: dict[str, Any] |
 
 def state_readset_report_key_candidates(stage: str, contract: dict[str, Any] | None = None) -> list[str]:
     return [f"stage.{candidate}.readset.report" for candidate in stage_name_candidates(stage, contract)]
-
-
-def grounding_audit_relpath(stage: str) -> Path:
-    return Path("logs") / "grounding" / f"{stage}.audit.json"
-
-
-def grounding_audit_path(run_dir: Path, stage: str) -> Path:
-    return run_dir / grounding_audit_relpath(stage)
-
-
-def load_grounding_audit(run_dir: Path, stage: str, contract: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, Path | None]:
-    loaded = contract or load_grounding_contract()
-    for candidate in stage_name_candidates(stage, loaded):
-        path = grounding_audit_path(run_dir, candidate)
-        data = _load_mapping_file(path)
-        if isinstance(data, dict) and data:
-            return data, path
-    return None, None
-
-
-def state_audit_status_key_candidates(stage: str, contract: dict[str, Any] | None = None) -> list[str]:
-    return [f"stage.{candidate}.audit.status" for candidate in stage_name_candidates(stage, contract)]
-
-
-def state_audit_report_key_candidates(stage: str, contract: dict[str, Any] | None = None) -> list[str]:
-    return [f"stage.{candidate}.audit.report" for candidate in stage_name_candidates(stage, contract)]
 
 
 def playbooks_report_relpath(stage: str) -> Path:
@@ -511,7 +448,6 @@ def build_stage_grounding_readset(report: dict[str, Any], *, stage: str) -> dict
         "flow": report.get("flow"),
         "run_dir": report.get("run_dir"),
         "grounding_report": str(grounding_report_relpath(stage)),
-        "verified_before_edit": bool(report.get("status") == "ready"),
         "global_docs": list(report.get("resolved_paths", {}).get("global_docs", [])),
         "stage_docs": list(report.get("resolved_paths", {}).get("docs", [])),
         "templates": list(report.get("resolved_paths", {}).get("templates", [])),
@@ -527,107 +463,11 @@ def write_stage_grounding_readset(*, run_dir: Path, stage: str, readset: dict[st
     return path
 
 
-def build_stage_grounding_audit(
-    *,
-    run_dir: Path,
-    stage: str,
-    report: dict[str, Any],
-    readset: dict[str, Any],
-    contract: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    loaded = contract or load_grounding_contract()
-    current_contract_version = str(loaded.get("contract_version") or "").strip()
-    report_contract_version = str(report.get("contract_version") or "").strip()
-    readset_contract_version = str(readset.get("contract_version") or "").strip()
-    report_contract_current = bool(current_contract_version) and report_contract_version == current_contract_version
-    readset_contract_current = bool(current_contract_version) and readset_contract_version == current_contract_version
-    expected_global = set(global_required_docs(loaded))
-    readset_global = {str(entry.get("path") or "").strip() for entry in readset.get("global_docs", []) if str(entry.get("path") or "").strip()}
-    current_stage_spec = stage_contract(stage, loaded)
-    expected_stage_docs = {
-        str(path).strip()
-        for path in current_stage_spec.get("required_docs", [])
-        if isinstance(path, str) and path.strip()
-    }
-    readset_stage_docs = {str(entry.get("path") or "").strip() for entry in readset.get("stage_docs", []) if str(entry.get("path") or "").strip()}
-
-    missing_global = sorted(expected_global - readset_global)
-    missing_stage_docs = sorted(expected_stage_docs - readset_stage_docs)
-    readset_global_exists = all(bool(entry.get("exists")) for entry in readset.get("global_docs", []))
-    readset_stage_docs_exist = all(bool(entry.get("exists")) for entry in readset.get("stage_docs", []))
-    readset_verified = bool(readset.get("verified_before_edit"))
-
-    checks = [
-        {
-            "id": f"{stage}.audit.report_contract_current",
-            "passed": report_contract_current,
-            "message": (
-                "grounding report contract_version matches the current contract "
-                f"(current {current_contract_version or '(unset)'}, got {report_contract_version or '(unset)'})"
-            ),
-        },
-        {
-            "id": f"{stage}.audit.readset_contract_current",
-            "passed": readset_contract_current,
-            "message": (
-                "grounding readset contract_version matches the current contract "
-                f"(current {current_contract_version or '(unset)'}, got {readset_contract_version or '(unset)'})"
-            ),
-        },
-        {"id": f"{stage}.audit.grounding_ready", "passed": report.get("status") == "ready", "message": f"grounding status is ready (got {report.get('status', '(unset)')})"},
-        {"id": f"{stage}.audit.readset_verified", "passed": readset_verified, "message": "readset is marked verified_before_edit"},
-        {"id": f"{stage}.audit.global_docs_present", "passed": not missing_global, "message": f"global docs are included in readset (missing {missing_global or 'none'})"},
-        {"id": f"{stage}.audit.global_docs_exist", "passed": readset_global_exists, "message": "global docs in readset all resolve to existing files"},
-        {"id": f"{stage}.audit.stage_docs_present", "passed": not missing_stage_docs, "message": f"stage docs are included in readset (missing {missing_stage_docs or 'none'})"},
-        {"id": f"{stage}.audit.stage_docs_exist", "passed": readset_stage_docs_exist, "message": "stage docs in readset all resolve to existing files"},
-    ]
-    status = "passed" if all(check["passed"] for check in checks) else "failed"
-    return {
-        "generated_at": now_iso(),
-        "contract_version": loaded.get("contract_version"),
-        "grounding_report_contract_version": report.get("contract_version"),
-        "readset_contract_version": readset.get("contract_version"),
-        "stage": stage,
-        "canonical_stage": report.get("canonical_stage"),
-        "flow": report.get("flow"),
-        "run_dir": str(run_dir.resolve()),
-        "grounding_report": str(grounding_report_relpath(stage)),
-        "readset_report": str(grounding_readset_relpath(stage)),
-        "status": status,
-        "checks": checks,
-        "missing_global_docs": missing_global,
-        "missing_stage_docs": missing_stage_docs,
-    }
-
-
-def write_stage_grounding_audit(*, run_dir: Path, stage: str, audit: dict[str, Any]) -> Path:
-    path = grounding_audit_path(run_dir, stage)
-    write_json(path, audit)
-    return path
-
-
 def grounding_validation(run_dir: Path, stage: str, contract: dict[str, Any] | None = None) -> dict[str, Any]:
     loaded = contract or load_grounding_contract()
     report, path = load_grounding_report(run_dir, stage, loaded)
     readset, readset_path = load_grounding_readset(run_dir, stage, loaded)
-    audit, audit_path = load_grounding_audit(run_dir, stage, loaded)
     playbooks, playbooks_path = load_playbooks_report(run_dir, stage, loaded)
-    current_contract_audit: dict[str, Any] | None = None
-    if report is not None and readset is not None:
-        try:
-            current_contract_audit = build_stage_grounding_audit(
-                run_dir=run_dir,
-                stage=stage,
-                report=report,
-                readset=readset,
-                contract=loaded,
-            )
-        except (AttributeError, KeyError, TypeError, ValueError):
-            current_contract_audit = None
-    # Audit artifacts are legacy diagnostics.  Grounding readiness is based on
-    # the resolved inputs and readset; an old/missing audit must not block a
-    # production stage.
-    audit_current_contract_passed = bool(report and report.get("status") == "ready" and readset is not None)
     report_flow = str((report or {}).get("flow") or "")
     state = _load_state_for_grounding(run_dir, flow=report_flow or None)
 
@@ -645,16 +485,6 @@ def grounding_validation(run_dir: Path, stage: str, contract: dict[str, Any] | N
     for candidate in state_readset_report_key_candidates(stage, loaded):
         if candidate in state:
             readset_key = candidate
-            break
-    audit_status_key = None
-    for candidate in state_audit_status_key_candidates(stage, loaded):
-        if candidate in state:
-            audit_status_key = candidate
-            break
-    audit_report_key = None
-    for candidate in state_audit_report_key_candidates(stage, loaded):
-        if candidate in state:
-            audit_report_key = candidate
             break
     playbooks_report_key = None
     for candidate in state_playbooks_report_key_candidates(stage, loaded):
@@ -675,22 +505,12 @@ def grounding_validation(run_dir: Path, stage: str, contract: dict[str, Any] | N
         "readset": readset,
         "readset_path": readset_path,
         "readset_exists": readset is not None and readset_path is not None,
-        "audit": audit,
-        "audit_path": audit_path,
-        "audit_exists": audit is not None and audit_path is not None,
-        "audit_passed": bool(report and report.get("status") == "ready" and readset is not None),
-        "current_contract_audit": current_contract_audit,
-        "audit_current_contract_passed": audit_current_contract_passed,
         "state_status_key": status_key,
         "state_status": state.get(status_key, "").strip() if status_key else "",
         "state_report_key": report_key,
         "state_report": state.get(report_key, "").strip() if report_key else "",
         "state_readset_key": readset_key,
         "state_readset": state.get(readset_key, "").strip() if readset_key else "",
-        "state_audit_status_key": audit_status_key,
-        "state_audit_status": state.get(audit_status_key, "").strip() if audit_status_key else "",
-        "state_audit_report_key": audit_report_key,
-        "state_audit_report": state.get(audit_report_key, "").strip() if audit_report_key else "",
         "playbooks": playbooks,
         "playbooks_path": playbooks_path,
         "playbooks_exists": playbooks is not None and playbooks_path is not None,
@@ -785,5 +605,4 @@ def prepare_stage_context(
         "selected_optional_playbooks": list((playbooks or {}).get("selected_optional_playbooks") or []),
         "selected_optional_playbook_paths": list((playbooks or {}).get("selected_paths") or []),
         "selected_optional_playbook_count": int((playbooks or {}).get("selected_count", 0) or 0),
-        "verified_before_edit": bool(readset.get("verified_before_edit")),
     }

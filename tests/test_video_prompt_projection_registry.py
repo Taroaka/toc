@@ -7,6 +7,7 @@ from toc.video_prompt_projection_registry import (
     VIDEO_PROMPT_GROUP_ORDER,
     VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION,
     build_video_prompt_projection,
+    projection_rules,
     rule_for_source_key,
     video_projection_registry_issues,
 )
@@ -93,6 +94,10 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
     def test_registry_is_well_formed_and_declares_provider_group_order(self) -> None:
         self.assertEqual(video_projection_registry_issues(), [])
         self.assertEqual(VIDEO_PROMPT_GROUP_ORDER, EXPECTED_GROUP_ORDER)
+        for rule in projection_rules():
+            payload = rule.as_dict()
+            self.assertNotIn("review_visibility", payload)
+            self.assertNotIn("semantic_checks", payload)
 
     def test_registry_classifies_canonical_and_legacy_motion_sources(self) -> None:
         expectations = {
@@ -142,7 +147,7 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
                 None,
                 "conditional",
                 "must_not_surface",
-                "review_only",
+                "excluded",
             ),
             "compiler_normalized.authoring_source.primary_motion": (
                 "primary_motion",
@@ -160,19 +165,19 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
                 None,
                 "conditional",
                 "must_not_surface",
-                "review_only",
+                "excluded",
             ),
             "scene.location_sequence": (
                 None,
                 "conditional",
                 "must_not_surface",
-                "review_only",
+                "excluded",
             ),
             "scene.visualizable_action": (
                 None,
                 "none",
                 "must_not_surface",
-                "review_only",
+                "excluded",
             ),
             "first_frame_visual_plan.temporal_boundary.event_fact_visible_in_still": (
                 "start_state",
@@ -184,19 +189,19 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
                 None,
                 "conditional",
                 "must_not_surface",
-                "review_only",
+                "excluded",
             ),
             "cut.cut_contract.use_next_cut_first_frame_as_last_frame": (
                 None,
                 "conditional",
                 "must_not_surface",
-                "review_only",
+                "excluded",
             ),
             "cut.cut_contract.continuity_contract.location_ids": (
                 None,
                 "required",
                 "must_not_surface",
-                "review_only",
+                "excluded",
             ),
             "cut.cut_contract.first_frame_contract.visible_start_state.spatial_state": (
                 "start_state",
@@ -208,37 +213,37 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
                 None,
                 "conditional",
                 "must_not_surface",
-                "review_only",
+                "excluded",
             ),
             "cut.cut_blueprint.first_frame_asset_policy.character_asset_overrides": (
                 None,
                 "conditional",
                 "must_not_surface",
-                "review_only",
+                "excluded",
             ),
             "cut.cut_blueprint.first_frame_character_asset_overrides": (
                 None,
                 "conditional",
                 "must_not_surface",
-                "review_only",
+                "excluded",
             ),
             "cut.cut_blueprint.first_frame_excluded_object_ids": (
                 None,
                 "conditional",
                 "must_not_surface",
-                "review_only",
+                "excluded",
             ),
             "cut.cut_blueprint.first_frame_asset_policy.excluded_object_ids": (
                 None,
                 "conditional",
                 "must_not_surface",
-                "review_only",
+                "excluded",
             ),
             "cut.cut_contract.first_frame_excluded_object_ids": (
                 None,
                 "conditional",
                 "must_not_surface",
-                "review_only",
+                "excluded",
             ),
         }
 
@@ -252,12 +257,10 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
                         rule.target_group,
                         rule.authoring_relevance,
                         rule.provider_projection,
-                        rule.review_visibility,
                     ),
-                    expected,
+                    expected[:3],
                 )
                 self.assertTrue(rule.transform)
-                self.assertTrue(rule.semantic_checks)
 
     def test_first_frame_visual_plan_outranks_generic_contract_start_in_projection_trace(self) -> None:
         plan_start = "主人公の片手が灰の床で止まり、顔は継母の足元へ向いている"
@@ -296,11 +299,11 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
         )
         traced = {
             item["source_key"]: item["value"]
-            for item in projection["review_only_sources"]
+            for item in projection["excluded_sources"]
         }
         self.assertEqual(traced["first_frame_visual_plan"], plan)
 
-    def test_boundary_and_first_frame_provenance_are_review_only(self) -> None:
+    def test_boundary_and_first_frame_provenance_are_excluded(self) -> None:
         contract = {
             "location": "大階段",
             "source_event_contract": {
@@ -346,7 +349,7 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
         )
         traced = {
             item["source_key"]: item["value"]
-            for item in projection["review_only_sources"]
+            for item in projection["excluded_sources"]
         }
         expected = {
             "cut.cut_contract.location": "大階段",
@@ -428,13 +431,10 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
             shadowed_sources,
         )
 
-    def test_scene_visualizable_action_is_review_only_and_never_provider_projection(self) -> None:
+    def test_scene_visualizable_action_is_excluded_and_never_provider_projection(self) -> None:
         overview = "家族が去る→助力者が現れる→衣装が変わる"
         projection = build_video_prompt_projection(
-            scene={
-                "visualizable_action": overview,
-                "review_only_visualizable_action": overview,
-            },
+            scene={"visualizable_action": overview},
             cut_contract={
                 "motion_contract": {
                     "motion_brief": "主人公が扉へ一歩だけ進む",
@@ -451,10 +451,9 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
         )
         traced = {
             item["source_key"]: item["value"]
-            for item in projection["review_only_sources"]
+            for item in projection["excluded_sources"]
         }
         self.assertEqual(traced["scene.visualizable_action"], overview)
-        self.assertEqual(traced["scene.review_only_visualizable_action"], overview)
 
     def test_compiler_normalized_authoring_groups_replace_raw_free_text_trace(self) -> None:
         projection = build_video_prompt_projection(
@@ -500,7 +499,7 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
         )
         self.assertIsNotNone(internal_id_rule)
         self.assertEqual(internal_id_rule.provider_projection, "must_not_surface")
-        self.assertEqual(internal_id_rule.review_visibility, "review_only")
+        self.assertFalse(hasattr(internal_id_rule, "review_visibility"))
 
         for excluded_key in (
             "cut.image_generation.prompt",
@@ -514,9 +513,9 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
                     excluded_rule.provider_projection,
                     "must_not_surface",
                 )
-                self.assertEqual(excluded_rule.review_visibility, "review_only")
+                self.assertFalse(hasattr(excluded_rule, "review_visibility"))
 
-    def test_review_only_sources_keep_exact_resolved_values_outside_provider_groups(self) -> None:
+    def test_excluded_sources_keep_exact_resolved_values_outside_provider_groups(self) -> None:
         basis = {
             "light_source": "東向きの小窓から入る朝日",
             "brightness": "薄暗い室内に朝の光が差す",
@@ -541,7 +540,7 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
 
         traced = {
             item["source_key"]: item["value"]
-            for item in projection["review_only_sources"]
+            for item in projection["excluded_sources"]
         }
         self.assertEqual(traced["scene.time_of_day_visual_basis"], basis)
         self.assertEqual(traced["scene.location_mode"], "sequence")
@@ -685,11 +684,11 @@ class VideoPromptProjectionRegistryTests(unittest.TestCase):
             tuple(preserve),
         )
         for projection in (canonical, legacy_scene_contract):
-            review_only = {
+            excluded = {
                 item["source_key"]: item["value"]
-                for item in projection["review_only_sources"]
+                for item in projection["excluded_sources"]
             }
-            self.assertIn(preserve, review_only.values())
+            self.assertIn(preserve, excluded.values())
 
     def test_reveal_allowlist_flat_alias_matches_canonical_constraint_projection(self) -> None:
         allowlist = ["ガラスの靴", "かぼちゃの馬車"]

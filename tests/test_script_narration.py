@@ -27,7 +27,7 @@ class TestScriptNarration(unittest.TestCase):
         self.assertEqual(prompt["spoken_body"], "むかし、ある むらに しょうねんが いました。")
         self.assertEqual(prompt["stability_profile"], "")
 
-    def test_resolve_script_cut_tts_text_prefers_approved_value(self) -> None:
+    def test_resolve_script_cut_tts_text_prefers_canonical_value(self) -> None:
         cut = {
             "tts_text": "かのじょは [whispers] あるきだします。",
             "elevenlabs_prompt": {
@@ -40,7 +40,7 @@ class TestScriptNarration(unittest.TestCase):
                 "approved_tts_text": "[whispers] しょうにんずみです。",
             },
         }
-        self.assertEqual(resolve_script_cut_tts_text(cut), "[whispers] しょうにんずみです。")
+        self.assertEqual(resolve_script_cut_tts_text(cut), "かのじょは [whispers] あるきだします。")
 
     def test_resolve_script_metadata_elevenlabs_merges_defaults(self) -> None:
         script_data = {

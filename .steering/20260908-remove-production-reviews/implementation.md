@@ -3,7 +3,7 @@
 User authorized implementation after inventory on 2026-09-08.
 
 - [ ] Server/create reviewer orchestration and certificate gates removed
-- [ ] Evaluator scoring and report/semantic/audit requirements removed
+- [x] Evaluator scoring and report/semantic/audit requirements removed
 - [ ] CLI/generation/resume review callers removed
 - [ ] UI/state/grounding and retired slots migrated
 - [ ] Narration/video approvals separated from actual output readiness

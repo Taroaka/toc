@@ -1,144 +1,152 @@
 # Entrypoint（/toc-immersive-ride）仕様（正本）
 
-このドキュメントは `.steering/20260131-immersive-ride/` で合意した内容を **恒久仕様として昇華**したもの。
+Codex assistant command を起点に、topic/source から没入型の実写 cinematic video run を作る。
+Claude Code slash command は互換入口として扱う。
 
-## 目的
+## 1. Command
 
-Codex 主軸の assistant command を起点に、Claude Code slash command 互換も保ちながら、最小限の入力（topic）で
-「没入型（実写シネマティック体験）」動画を **1本**生成する。
-（視点は experience / scene の意図に応じて選び、必ずしも一人称POVに固定しない）
+```text
+/toc-immersive-ride --topic "桃太郎"
+/toc-immersive-ride --topic "かぐや姫" --stage p300 --experience cinematic_story
+/toc-world-walk --source-run output/桃太郎_<timestamp>
+```
 
-## 仕様（想定）
+arguments:
 
-- コマンド: `/toc-immersive-ride`
-- 関連コマンド: `/toc-world-walk`（既存 run の asset を参照する `world_walk` 専用入口）
-- 引数:
-  - `--topic`（必須）
-  - `--dry-run`（任意。外部生成APIは呼ばない）
-  - `--config`（任意。`config/system.yaml` を差し替え）
-  - `--stage`（任意。default: `video`）
-    - `p100` / `100` / `research`: `p130` research review handoff まで
-    - `p200` / `200` / `story`: `p230` story review handoff まで
-    - `p300` / `300` / `visual_value`: `p330` visual planning handoff まで
-    - `p400` / `400`: `p450` script handoff / skeleton manifest materialization まで
-    - `p450` / `450` / `script`: skeleton `video_manifest.md` まで
-    - `p500` / `500` / `asset`: `p570` asset continuity / human review handoff まで
-    - `p600` / `600` / `scene_implementation` / `image`: `p680` image review handoff まで
-    - `p700` / `700` / `narration`: `p750` audio QA / human review handoff まで
-    - `p800` / `800` / `video_generation`: `p850` video review / exclusions handoff まで
-    - `p900` / `900` / `render` / `video`: `p930` final QA / runtime handoff まで
-    - 100 番台の coarse p-number target は stage 冒頭ではなく、対応 stage の human-review handoff slot まで進める。細番号 target はその slot を直接指す。
-  - `--experience`（任意。default: `cloud_island_walk`）
-    - `cinematic_story`: 物語を映画的に見せる（視点は必要に応じて。固定デバイスを前提にしない）
-    - `cloud_island_walk`: 雲上の島を歩いて理解を深める（哲学/概念の比喩）パターン
-    - `world_walk`: 既存 run の asset 内を観察者 POV で散歩し、物語を遠目に見かけるパターン
-    - `ride_action_boat`: 互換用の legacy 名（内部的には `cinematic_story` 扱い）
-  - `--source-run`（`world_walk` では必須。既存 `output/<topic>_<timestamp>/` を参照）
-  - `world_walk` の scaffold helper は `--stage` 省略時に `p450` で停止する。
-    Image generation app のフロント作成は direct frontend runner で `p680` まで進める。
+- `--topic`: 必須
+- `--source-run`: `world_walk` では必須
+- `--dry-run`: provider call をせず materialization/structural checks を行う
+- `--config`: config override
+- `--stage`: default `video`。coarse target は active bucket の最後まで進む
+- `--experience`: `cinematic_story|cloud_island_walk|world_walk|ride_action_boat`
+- `--target-duration-seconds`: 300–1200、default 300
 
-## 挙動（成果物）
+active target map:
 
-run root:
+```text
+p100→p120  p200→p220  p300→p330  p400→p450  p500→p570
+p600→p680  p700→p750  p800→p840  p900→p920
+```
 
-- `output/<topic>_<timestamp>/`
-  - `state.txt`（追記型）
-  - `research.md`
-  - `story.md`
-  - `visual_value.md`
-  - `script.md`（言語情報の正本）
-  - `video_manifest.md`
-  - `assets/**`
-  - `video.mp4`（完成。1280x720 / 24fps）
+p410/p420 は authoring slots。p400 では scene/cut structure を作り、p450 で skeleton
+manifest を materialize する。asset/image、TTS、video、render は後続 bucket で行う。
 
-## 表現の固定条件（experience別）
+## 2. Run artifacts
 
-共通（必須）:
+```text
+output/<topic>_<timestamp>/
+  state.txt
+  p000_index.md
+  research.md
+  story.md
+  visual_value.md
+  script.md
+  video_manifest.md
+  asset_inventory.md
+  asset_plan.md
+  assets/
+  audio/
+  video.mp4
+  logs/grounding/
+  logs/orchestration/
+  logs/validation/
+```
 
-- 視点: scene の意図に応じて **POV / 三人称** を選んでよい（ただし 1カット内で視点ブレさせない）
-- Style: photorealistic / cinematic / practical effects（アニメ調排除）
-- 映像内の文字は禁止（画面内テキスト/字幕/ウォーターマーク/ロゴ）
-- ガイドは音声（ナレーション）として必須（視覚的に登場させない）
+`state.txt` は append-only。source bytes/hash、stage status、slot status、artifact digest、
+request revisions、provider provenance、ordinary validation results を記録する。
+
+## 3. Experience rules
+
+共通:
+
+- photorealistic/cinematic/live-action の実写系表現を使う
+- 画面内 text、字幕、logo、watermark を生成 prompt に入れない
+- 1 cut は一つの primary intent を持つ
+- character/object/location identity と time/time-of-day を manifest で固定する
+- 画像、音声、動画 provider output は request-bound provenance を持つ
 
 `cinematic_story`:
 
-- 統一要素:
-  - 視点は必要に応じて（POV固定にしない）
-  - 固定の乗り物/デバイスを前景アンカーにしない
-  - 物語キャラクター / 主役級アイテム（例: 玉手箱）をアンカーにして連続性を作る（照明/色/構図も含む）
-  - story scene は **10刻み**（10,20,30...）で振る
-  - `scene_id: 0` の character_reference は別枠として扱い、**全身（頭からつま先まで）** の参照に限定する
+- POV/三人称は scene intent に応じて選べるが、1 cut 内の視点は固定
+- 物語 character や主役級 object を continuity anchor にする
+- scene IDs は manifest 順に処理し、数値の連番を仮定しない
 
-`cloud_island_walk`（default）:
+`cloud_island_walk`:
 
-- 統一要素（推奨）:
-  - 手元の“アンカー”（例: compass / journal）を前景に置き、POVの安定を作る
-  - 島の各ゾーンを“概念の比喩（物理メタファ）”として設計する（文字で説明しない）
-  - 道/橋/階段など「前進の導線」が常に画面にある（scene間の連続性を作る）
+- anchor、道/橋/階段などの前進導線、物理メタファを scene contract に書く
+- 文字で概念を説明せず、形、光、距離、動きで示す
 
 `world_walk`:
 
-- 統一要素:
-  - source run の `story.md` / `assets/` を参照し、`video_metadata.source_run` / `source_assets` に記録する
-  - 観察者 POV。カメラは世界の中を歩くが、主人公本人や参照キャラ本人の視点にしない
-  - 少し遠目（中景〜遠景）を維持し、派手な演出・急接近・観察者の介入を避ける
-  - 序盤は物語が進まない asset 内散歩にし、中盤以降に参照キャラが遠景に現れて物語が別導線で始まる
+- source run の `story.md`、`assets/`、source asset IDs を参照し、source run path を記録
+- 観察者 POV で source character 本人の視点へ置き換えない
+- source asset の identity を保ち、既存 asset と参照 bytes を request に束縛する
 
-## 生成設計（最小）
+## 4. Generation flow
 
-- 画像:
-  - 参照画像（キャラクター/重要小道具）を **必要なscene** に適用（必要なら scene 側で `references` を指定）
-  - 16:9 / 1K（素材側の既定。必要な scene だけ個別に引き上げる）
-- 動画:
-  - provider は `video_manifest.md` の `scenes[].video_generation.tool` で選ぶ（default: `kling_3_0` / alt: `seedance`）
-  - 注: Google Veo は安全のためこのリポジトリでは無効化している
-  - first-last-frame-to-video
-  - 8秒/clip
-  - scene画像の **manifest順** をつないでclipを作る（scene_id の連番を前提にしない）
-  - シームレス性を上げるため、以下を review 前に設計へ固定して併用する
-    - `last_frame` 制約（`--enable-last-frame`）
-    - ネガティブプロンプトでフェード/カット系を抑制（`--video-negative-prompt`）
-    - 直前clip終盤のフレームを次clipの first frame に使う場合は、前clip生成後にchain frameを保存し、次clipを再materialize・再review・再approveする二段階workflowにする。`--chain-first-frame-from-prev-video` によるprovider実行中の動的差し替えはexact approvalと両立しないため禁止
-- 音声:
-  - ElevenLabs（voice/model は運用で確定）
-  - cutは映像単位、narration spanは文章・演技単位。互換上`audio.narration.output`をcutへanchorしてよいが、spanは複数cutをまたげる
-  - `audio.narration.text` は物語原稿、`audio.narration.tts_text` は ElevenLabs に送るひらがな原稿として Narration Writer が確定する（`TODO:` 等のメタ情報は入れない）
-  - 未記入は `text` / `tts_text` に placeholder を置かず、空文字 + `audio.narration.authoring_status: "missing"` で表す
-  - `audio.narration.contract.schema_version: narration_contract_v2` で voice function / visual distance / pronunciation targets を管理する
-  - 先に音声だけ生成し、実秒から `duration_seconds` / `timestamp` を同期してから映像生成に進む
-  - 反復中に意図的に音声を省略してサイレントで進める場合のみ `--skip-audio` を使う
-  - 例外として、`visual_value.md` に基づく silent cut は `audio.narration.tool: "silent"` と `text: ""` を許可する
-
-## コスト最適化（任意）
-
-- Seedance を使う場合は `ARK_SEEDANCE_*_MODEL` を運用で切り替える
-- Kling を使う場合は `KLING_VIDEO_MODEL` / `KLING_OMNI_VIDEO_MODEL` を運用で切り替える
-
-## state（追記）
-
-`state.txt` に追記（例）:
-
-- `runtime.stage=research|story|script|manifest|assets|render|done`
-- `runtime.stage=research|story|visual_value|script|manifest|assets|render|done`
-- `runtime.render.status=started|success|failed`
-- `artifact.video=output/<topic>_<timestamp>/video.mp4`
-- `review.video.status=pending|approved|changes_requested`（最終判断は人間）
-
-人間の承認（例）:
-
-```bash
-python scripts/toc-state.py approve-video --run-dir output/<topic>_<timestamp> --note "OK"
+```text
+source context → research → story → visual value → script
+  → skeleton manifest → asset plan/generation
+  → scene image generation → narration/TTS
+  → motion/video generation → stream normalization/render → ordinary QA
 ```
 
-## 参照
+画像:
 
-- `.claude/commands/toc/toc-immersive-ride.md`
-- `docs/how-to-run.md`
-- `docs/implementation/video-integration.md`
+- Codex built-in image generation（`codex_builtin_image` / `gpt-image-2`）
+- reusable assets は `asset_plan.md` に stable IDs と output path を持つ
+- scene image は `scene_event → cut_contract → first_frame_visual_plan →
+  drawable_prompt_ir → image_api_prompt_v2` を通る
+- provider prompt、request snapshot、reference bytes hash を保存する
 
-## scene_id の運用（推奨）
+音声:
 
-- **最初から 10 刻み**で振る（例: 10, 20, 30, 40, ...）
-  - 後から中間シーンを差し込みたい時に `15` や `35` のように追加できる
-  - 後段処理は **scene_id の連番** を前提にしない（manifest順を正とする）
-- ただし `scene_id: 0` の character_reference は story scene とは別枠で固定する
+- ElevenLabs
+- `script.md` が readable narration と `tts_text` の source
+- candidate listening/selection/editing は任意の user action
+- TTS output を実測し、intentional silence の reason/duration とともに audio timeline を作る
+
+動画:
+
+- Kling 3.0/Omni または Seedance
+- `cut_contract → video_prompt_ir → video_api_prompt_v1` を通る
+- first/last frame、ordered references、provider capability、prompt/source hashes を保存する
+- materialize した payload と current design が一致する場合だけ provider を呼ぶ
+
+## 5. Structural validation
+
+stage 間で次を確認する。
+
+- schema、types、enum、unique IDs
+- source/asset/selector/location/handoff reference
+- event ordering、reveal boundary、first-frame/motion boundary
+- manifest/script selectors と target duration
+- request snapshot、prompt/source/provider hash
+- output existence、file type、decode、duration、stream compatibility、provenance
+
+壊れた input、missing reference、hash drift、decode failure、runtime transport failure は該当
+item の processing error として停止し、source artifact を修正して再実行する。
+
+## 6. Optional user actions
+
+candidate の選択、listening、image/narration editing、change request は任意である。
+`human_choice.*` に actor、timestamp、selector、revision、description を記録し、変更後に
+structural/request/provenance checks を再実行する。
+
+contradictory source variants の hybridization と publication は、別々の明示 user action として
+保存する。どちらも生成の代替結果として扱わない。
+
+## 7. State and resume
+
+resume は同じ run の append-only state に新しい delta を追加する。upstream digest が変わった
+downstream item だけを stale にして再 materialize/re-generate し、valid output は完全な binding
+が一致する限り保持する。run lease と destination lock を使って concurrent mutation を防ぐ。
+
+## References
+
+- docs/data-contracts.md
+- docs/how-to-run.md
+- docs/implementation/video-integration.md
+- docs/implementation/image-prompting.md
+- workflow/video-manifest-template.md
+

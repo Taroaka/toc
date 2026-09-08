@@ -356,7 +356,9 @@ class P400RebuildTests(unittest.TestCase):
                 + plan.candidate["preflight_semantic_sha256"],
                 state,
             )
-            self.assertIn("review.semantic.scene_set.status=invalidated", state)
+            # Historical reviewer state is preserved as opaque history; the
+            # rebuild does not synthesize an invalidated reviewer verdict.
+            self.assertNotIn("review.semantic.scene_set.status=invalidated", state)
             journal = json.loads((checkpoint / "publish.journal.json").read_text())
             self.assertEqual(journal["phase"], "completed")
 

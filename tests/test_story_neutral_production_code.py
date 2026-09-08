@@ -11,8 +11,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PRODUCTION_FILES = (
     "scripts/toc-immersive-frontend-run.py",
-    "scripts/build-semantic-review-pack.py",
-    "scripts/review-image-prompt-story-consistency.py",
+    "toc/image_prompt_compiler.py",
     "toc/scene_acceptance_contract.py",
 )
 FORBIDDEN_STORY_TOKENS = re.compile(

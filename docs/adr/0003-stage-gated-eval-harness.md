@@ -1,6 +1,6 @@
-# ADR-0003: Stage Gated Eval Harness を標準化する
+# ADR-0003: Stage Gated Eval Harness を標準化する（履歴）
 
-- Status: Accepted
+- Status: Superseded by ADR-0005
 - Date: 2026-03-09
 
 ## Context

@@ -8,7 +8,6 @@ only ordinary checks and a structural ``passed`` value.
 from toc.harness import load_structured_document
 
 from toc.stage_evaluation.common import (
-    SCENE_COVERAGE_REVIEW_REQUIRED_KEYS,
     _cut_contract_structure_issues,
     _node_cut_contract,
     add_check,
@@ -82,7 +81,6 @@ from toc.stage_evaluation.script import (
 
 
 __all__ = [
-    "SCENE_COVERAGE_REVIEW_REQUIRED_KEYS",
     "STORY_REQUIRED_SCENE_FIELDS",
     "_append_immersive_manifest_checks",
     "_append_manifest_contract_checks",

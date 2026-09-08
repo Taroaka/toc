@@ -44,6 +44,28 @@ p400 は story の各部分を、観客が映像で経験できる不可逆な s
 割った説明段落は scene にならない。場所、情報、感情、因果、視覚価値のいずれかが変化し、
 次 scene の起点を生む必要がある。
 
+### 観客の理解と意味の引き継ぎ
+
+story で採用された [観客の理解と意味の設計](story-creation.md#観客の理解と意味の設計) を、
+既存の scene/cut 記述へ具体化する。`visual_value.md` がない場合は story の意図と根拠から
+引き継ぐ。別の計画 block、象徴、反復回数、肯定的な変容を追加義務にしない。
+
+- scene の `start_state / end_state` 内の `audience_knowledge` と `reveal_contract` を引き継ぎ、
+  その時点の観客に何が分かり、何はまだ分からないかを保つ。人物の知識とは区別する。
+- `scene_intent.value_shift.visible_evidence` と `scene_event.event_sequence[]` の
+  `visible_action / required_visual_evidence / audience_knowledge_delta` で、解釈を支える
+  行動・関係・状況を具体化する。世界観はその主体の立場から示し、全員の総意へ一般化しない。
+- `cut_blueprint.audience_knowledge_delta / visual_evidence`（manifest では
+  `cut_contract.viewer_contract.audience_knowledge_delta / visual_evidence`）へ、その cut が理解を更新・補強・維持する具体的な証拠を置く。
+  毎 cut の新情報や意味の反転は求めず、scene を割る理由のない追加 cut を作らない。
+- 反復を採用した場面では、同じと認識させる要素と、その時点の行動・文脈の違いを分ける。
+  映像・音・台詞・ナレーションの分担を決め、説明で未開示の情報や意図的な曖昧さを消さない。
+- first frame へ後段の結果を描かない。motion には今回起こる動作、narration には担当する
+  情報を渡す。抽象的な象徴の解説や全編の意味の推移を provider prompt に連結しない。
+
+事実・結末・開示順は上流を保ち、表現上の意味を物理的な状態変化や新しい story event と
+取り違えない。適用しない作品には、既存の source / event / cut 契約だけを使う。
+
 ### Scene Intent Card
 
 ```yaml
@@ -296,4 +318,3 @@ Older short-form templates may contain fields that are ignored by current genera
 source for new authoring. Current runs use the active slots and contracts in
 `docs/data-contracts.md`; old state entries are preserved as history and never synthesized into a
 new production slot.
-

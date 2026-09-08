@@ -291,14 +291,16 @@ class P500ResumeTests(unittest.TestCase):
             self.assertEqual(state["slot.p520.status"], "pending")
             self.assertEqual(
                 state["review.semantic.asset_plan.status"],
-                "pending",
+                "passed",
             )
             self.assertEqual(state["artifact.asset_plan"], "")
             self.assertEqual(state["runtime.resume.p500.status"], "prepared")
             self.assertEqual(state["runtime.create_job.status"], "pending")
             self.assertEqual(state["runtime.failure.stage"], "")
             self.assertEqual(state["runtime.app_server.transport.status"], "pending")
-            self.assertEqual(state["review.semantic.create_failure_count"], "")
+            # Historical reviewer state is preserved as opaque run history;
+            # it is neither rewritten nor consulted by the reset.
+            self.assertEqual(state["review.semantic.create_failure_count"], "2")
 
     @patch("toc.p500_resume._p400_readiness", return_value=("approved", ()))
     def test_apply_rejects_state_bytes_changed_after_dry_run_before_writes(
@@ -2482,7 +2484,6 @@ class P500ResumeTests(unittest.TestCase):
                     "_resume_profile",
                     return_value=(profile, manifest),
                 ),
-                patch.object(module, "_archive_p400_review_evidence"),
                 patch.object(
                     module,
                     "_recompile_resumed_image_prompt_payloads",
@@ -2490,8 +2491,6 @@ class P500ResumeTests(unittest.TestCase):
                 ),
                 patch.object(module, "_resume_state_updates", return_value={}),
                 patch.object(frontend, "_prepare_authoring_grounding"),
-                patch.object(frontend, "_refresh_p400_review_artifacts"),
-                patch.object(frontend, "_require_fresh_p400_readiness"),
                 patch.object(frontend, "_materialize_standard_request_files"),
             ):
                 module.materialize_from_p500(
@@ -2623,19 +2622,12 @@ class P500ResumeTests(unittest.TestCase):
                         ),
                     )
                     module = self._resume_cli_module()
-                    archive_p400 = Mock()
-
                     with (
                         patch.object(module, "REPO_ROOT", root),
                         patch.object(
                             module,
                             "_resume_profile",
                             return_value=({}, manifest),
-                        ),
-                        patch.object(
-                            module,
-                            "_archive_p400_review_evidence",
-                            archive_p400,
                         ),
                         self.assertRaisesRegex(
                             P500ResumeError,
@@ -2653,7 +2645,6 @@ class P500ResumeTests(unittest.TestCase):
                     build_asset_artifacts.assert_not_called()
                     write_asset_requests.assert_not_called()
                     materialize_scene_requests.assert_not_called()
-                    archive_p400.assert_not_called()
                     self.assertEqual(
                         (run_dir / "state.txt").read_bytes(),
                         state_before,
@@ -2697,7 +2688,6 @@ class P500ResumeTests(unittest.TestCase):
                     "_resume_profile",
                     return_value=({}, manifest),
                 ),
-                patch.object(module, "_archive_p400_review_evidence"),
                 patch.object(
                     module,
                     "_preflight_world_walk_reference_restore",
@@ -2731,416 +2721,7 @@ class P500ResumeTests(unittest.TestCase):
 
             build_asset_artifacts.assert_not_called()
 
-    def test_materialize_refreshes_p400_grounding_before_snapshot_freeze(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            run_dir = Path(td)
-            manifest_path = run_dir / "video_manifest.md"
-            manifest_path.write_text(
-                "video_metadata:\n  topic: sample\n  revision: before_requests\n",
-                encoding="utf-8",
-            )
-            (run_dir / "state.txt").write_text(
-                "topic=sample\nimmersive.experience=cinematic_story\n---\n",
-                encoding="utf-8",
-            )
-            module = self._resume_cli_module()
-            events: list[str] = []
-            grounding_revision = {"current": 0, "frozen": -1}
 
-            def prepare_authoring_grounding(_run_dir: Path) -> None:
-                grounding_revision["current"] += 1
-                events.append("authoring_grounding")
-
-            def legacy_prepare_stage_context(
-                _run_dir: Path,
-                stage: str,
-            ) -> None:
-                grounding_revision["current"] += 1
-                events.append(f"legacy_grounding:{stage}")
-
-            def freeze_reviews(_run_dir: Path) -> None:
-                grounding_revision["frozen"] = grounding_revision["current"]
-                events.append("freeze_p400_snapshots")
-                manifest_sha = hashlib.sha256(
-                    manifest_path.read_bytes()
-                ).hexdigest()
-                for stage in (
-                    "scene_set",
-                    "scene_detail",
-                    "cut_blueprint",
-                    "script",
-                    "production_readiness",
-                ):
-                    snapshot = (
-                        run_dir
-                        / "logs/eval"
-                        / stage
-                        / "round_01/review_input_snapshot.json"
-                    )
-                    snapshot.parent.mkdir(parents=True, exist_ok=True)
-                    snapshot.write_text(
-                        json.dumps(
-                            {
-                                "source_artifacts": [
-                                    {
-                                        "path": "video_manifest.md",
-                                        "sha256": manifest_sha,
-                                    }
-                                ]
-                            }
-                        )
-                        + "\n",
-                        encoding="utf-8",
-                    )
-
-            def require_current_p400(_run_dir: Path) -> None:
-                self.assertEqual(
-                    grounding_revision["frozen"],
-                    grounding_revision["current"],
-                    "p400 snapshot must bind the current authoring readsets",
-                )
-                events.append("require_fresh_p400")
-
-            def materialize_scene_requests(_run_dir: Path) -> None:
-                events.append("scene_requests")
-                manifest_path.write_text(
-                    "video_metadata:\n"
-                    "  topic: sample\n"
-                    "  revision: final_post_request_projection\n",
-                    encoding="utf-8",
-                )
-
-            normal_asset_plan = {
-                "assets": [
-                    {
-                        "asset_id": "normal_seed",
-                        "fixed_prompts": ["通常生成"],
-                        "generation_plan": {
-                            "reference_inputs": [],
-                            "execution_lane": "bootstrap_builtin",
-                            "bootstrap_allowed": True,
-                            "output": "assets/characters/normal_seed.png",
-                        },
-                    }
-                ]
-            }
-            frontend = SimpleNamespace(
-                _now_iso=lambda: "2026-07-25T12:00:00+09:00",
-                _prepare_authoring_grounding=prepare_authoring_grounding,
-                _build_asset_artifacts_from_manifest=lambda **_kwargs: (
-                    {"asset_inventory": {"items": []}},
-                    normal_asset_plan,
-                ),
-                _md_yaml=lambda _title, _payload: "fixture\n",
-                _refresh_p400_review_artifacts=freeze_reviews,
-                _require_fresh_p400_readiness=require_current_p400,
-                _write_asset_request_files=lambda *_args: events.append(
-                    "asset_requests"
-                ),
-                _materialize_standard_request_files=materialize_scene_requests,
-            )
-            profile = {
-                "duration_plan": {
-                    "target_seconds": 300,
-                    "minimum_effective_seconds": 240,
-                    "minimum_scene_count": 8,
-                    "minimum_narration_seconds": 180,
-                }
-            }
-            manifest = {
-                "video_metadata": {
-                    "topic": "sample",
-                    "experience": "cinematic_story",
-                }
-            }
-
-            with (
-                patch.object(
-                    module,
-                    "_resume_profile",
-                    return_value=(profile, manifest),
-                ),
-                patch.object(module, "_archive_p400_review_evidence"),
-                patch.object(
-                    module,
-                    "_recompile_resumed_image_prompt_payloads",
-                    side_effect=lambda _run_dir: (
-                        events.append("image_prompt_recompile") or []
-                    ),
-                ),
-                patch.object(
-                    module,
-                    "_prepare_stage_context",
-                    side_effect=legacy_prepare_stage_context,
-                ),
-            ):
-                module.materialize_from_p500(
-                    frontend,
-                    run_dir=run_dir,
-                    topic="sample",
-                    source="sample",
-                    stop_target="p650",
-                )
-
-            self.assertEqual(
-                events,
-                [
-                    "image_prompt_recompile",
-                    "authoring_grounding",
-                    "freeze_p400_snapshots",
-                    "require_fresh_p400",
-                    "asset_requests",
-                    "scene_requests",
-                    "authoring_grounding",
-                    "freeze_p400_snapshots",
-                    "require_fresh_p400",
-                ],
-            )
-            self.assertEqual(
-                normal_asset_plan,
-                {
-                    "assets": [
-                        {
-                            "asset_id": "normal_seed",
-                            "fixed_prompts": ["通常生成"],
-                            "generation_plan": {
-                                "reference_inputs": [],
-                                "execution_lane": "bootstrap_builtin",
-                                "bootstrap_allowed": True,
-                                "output": (
-                                    "assets/characters/normal_seed.png"
-                                ),
-                            },
-                        }
-                    ]
-                },
-            )
-            final_manifest_sha = hashlib.sha256(
-                manifest_path.read_bytes()
-            ).hexdigest()
-            for stage in (
-                "scene_set",
-                "scene_detail",
-                "cut_blueprint",
-                "script",
-                "production_readiness",
-            ):
-                snapshot = json.loads(
-                    (
-                        run_dir
-                        / "logs/eval"
-                        / stage
-                        / "round_01/review_input_snapshot.json"
-                    ).read_text(encoding="utf-8")
-                )
-                manifest_source = next(
-                    item
-                    for item in snapshot["source_artifacts"]
-                    if item["path"] == "video_manifest.md"
-                )
-                self.assertEqual(
-                    manifest_source["sha256"],
-                    final_manifest_sha,
-                    stage,
-                )
-
-    def test_materialize_recompiles_repaired_image_prompt_before_first_p400_gate(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            run_dir = Path(td)
-            plan = {
-                "schema_version": "first_frame_visual_plan_v1",
-                "temporal_boundary": {
-                    "event_fact_visible_in_still": "継母の影を前に立ち止まる",
-                    "not_yet_happened_in_still": ["台所から走り出す"],
-                },
-                "subject_binding": {
-                    "primary_subject": {"name": "シンデレラ"}
-                },
-                "character_state_gate": {
-                    "costume_state": "灰の付いた麻布の仕事着",
-                    "pose": "台所の出口へ重心を向けて立ち止まる",
-                    "gaze": "出口をふさぐ影を見る",
-                },
-                "spatial_composition": {
-                    "foreground": "灰と家事道具",
-                    "midground": "シンデレラ",
-                    "background": "薄暗い台所の出口",
-                    "shot_size": "medium_wide",
-                },
-                "scene_material_pack": {
-                    "light_source": "朝の低い自然光",
-                    "dominant_materials": ["灰", "麻布", "石"],
-                },
-            }
-            payload = compile_image_api_prompt_v2(
-                first_frame_visual_plan=plan,
-                character_ids=["cinderella"],
-                location_ids=["ash_kitchen"],
-                reference_images=[],
-                story_time="17世紀末フランス・ルイ14世時代",
-                scene_time_of_day="朝",
-            )
-            stale_payload = dict(payload)
-            stale_payload["prompt"] = payload["prompt"] + " 壊れた追記"
-            manifest = {
-                "schema_version": "scene_event_v1",
-                "video_metadata": {
-                    "topic": "シンデレラ",
-                    "experience": "cinematic_story",
-                    "time": "17世紀末フランス・ルイ14世時代",
-                },
-                "scenes": [
-                    {
-                        "scene_id": 40,
-                        "time_of_day": "朝",
-                        "cuts": [
-                            {
-                                "cut_id": 2,
-                                "image_generation": {
-                                    "output": "assets/scenes/scene40_cut2.png",
-                                    "character_ids": ["cinderella"],
-                                    "object_ids": [],
-                                    "location_ids": ["ash_kitchen"],
-                                    "references": [],
-                                    "first_frame_visual_plan": plan,
-                                    "api_prompt_payload": stale_payload,
-                                },
-                            }
-                        ],
-                    }
-                ],
-            }
-            (run_dir / "video_manifest.md").write_text(
-                "# manifest\n\n```yaml\n"
-                + json.dumps(manifest, ensure_ascii=False, indent=2)
-                + "\n```\n",
-                encoding="utf-8",
-            )
-            (run_dir / "state.txt").write_text(
-                "topic=シンデレラ\n"
-                "immersive.experience=cinematic_story\n---\n",
-                encoding="utf-8",
-            )
-            module = self._resume_cli_module()
-            events: list[str] = []
-
-            def assert_payload_is_current(
-                event: str,
-                current: dict[str, object] | None = None,
-            ) -> None:
-                if current is None:
-                    _text, current = load_structured_document(
-                        run_dir / "video_manifest.md"
-                    )
-                current_payload = current["scenes"][0]["cuts"][0][
-                    "image_generation"
-                ]["api_prompt_payload"]
-                self.assertEqual(
-                    current_payload["sha256"],
-                    hashlib.sha256(
-                        current_payload["prompt"].encode("utf-8")
-                    ).hexdigest(),
-                )
-                self.assertNotIn("壊れた追記", current_payload["prompt"])
-                events.append(event)
-
-            def build_asset_artifacts_from_manifest(
-                **kwargs: object,
-            ) -> tuple[dict[str, object], dict[str, object]]:
-                assert_payload_is_current(
-                    "asset_build",
-                    kwargs["manifest"],
-                )
-                return {"asset_inventory": {"items": []}}, {"assets": []}
-
-            frontend = SimpleNamespace(
-                _now_iso=lambda: "2026-08-09T04:00:00+09:00",
-                append_state_snapshot=append_state_snapshot,
-                _build_asset_artifacts_from_manifest=(
-                    build_asset_artifacts_from_manifest
-                ),
-                _md_yaml=lambda _title, _payload: "fixture\n",
-                _prepare_authoring_grounding=lambda _run_dir: events.append(
-                    "authoring_grounding"
-                ),
-                _refresh_p400_review_artifacts=lambda _run_dir: events.append(
-                    "freeze_p400"
-                ),
-                _require_fresh_p400_readiness=lambda _run_dir: (
-                    assert_payload_is_current("p400_gate")
-                ),
-                _write_asset_request_files=lambda *_args: events.append(
-                    "asset_requests"
-                ),
-                _materialize_standard_request_files=lambda _run_dir: events.append(
-                    "scene_requests"
-                ),
-            )
-            identity = run_dir.stat().st_dev, run_dir.stat().st_ino
-            token = module._ACTIVE_RESUME_ROOT.set(
-                (os.path.abspath(os.fspath(run_dir)), identity, frontend)
-            )
-            try:
-                with (
-                    bind_run_root(run_dir, expected_identity=identity),
-                    patch.object(
-                        module,
-                        "_resume_profile",
-                        return_value=({"duration_plan": {}}, manifest),
-                    ),
-                    patch.object(
-                        module,
-                        "_resolve_resume_mode_contract",
-                        return_value={"experience": "cinematic_story"},
-                    ),
-                    patch.object(
-                        module,
-                        "_preflight_world_walk_reference_restore",
-                        return_value=([], {}, None),
-                    ),
-                    patch.object(
-                        module,
-                        "_restore_world_walk_source_references",
-                        return_value=[],
-                    ),
-                    patch.object(module, "_archive_p400_review_evidence"),
-                    patch.object(module, "_resume_state_updates", return_value={}),
-                ):
-                    module.materialize_from_p500(
-                        frontend,
-                        run_dir=run_dir,
-                        topic="シンデレラ",
-                        source="シンデレラ",
-                        stop_target="p650",
-                    )
-            finally:
-                module._ACTIVE_RESUME_ROOT.reset(token)
-
-            self.assertLess(
-                events.index("asset_build"), events.index("p400_gate")
-            )
-            self.assertLess(
-                events.index("p400_gate"), events.index("scene_requests")
-            )
-            state = parse_state_file(run_dir / "state.txt")
-            self.assertEqual(
-                state["runtime.resume.p500.image_prompt_recompile.status"],
-                "done",
-            )
-            self.assertEqual(
-                state["runtime.resume.p500.image_prompt_recompile.count"],
-                "1",
-            )
-            self.assertEqual(
-                state[
-                    "runtime.resume.p500.image_prompt_recompile.compiled_selectors"
-                ],
-                "scene40_cut2",
-            )
 
     def test_recompile_rejects_replaced_bound_run_before_server_delegate(
         self,
@@ -3230,6 +2811,7 @@ class P500ResumeTests(unittest.TestCase):
                     "_finalize_resume_orchestration",
                     return_value={},
                 ),
+                patch("server.image_gen_app._mark_asset_generation_handoff"),
             ):
                 module._continue_run(
                     run_dir=run_dir,
@@ -3240,9 +2822,9 @@ class P500ResumeTests(unittest.TestCase):
                     skip_validation=False,
                 )
 
-            self.assertEqual(observed["slot.p550.status"], "done")
-            self.assertEqual(observed["slot.p560.status"], "done")
-            self.assertEqual(observed["slot.p570.status"], "awaiting_approval")
+            self.assertEqual(observed["slot.p550.status"], "pending")
+            self.assertEqual(observed["slot.p560.status"], "pending")
+            self.assertEqual(observed["slot.p570.status"], "pending")
 
     def test_continue_run_keeps_downstream_grounding_after_request_materialization(
         self,
@@ -3286,13 +2868,6 @@ class P500ResumeTests(unittest.TestCase):
                 ),
                 patch.object(
                     module,
-                    "_mark_resume_dependency_sync_complete",
-                    side_effect=lambda *_args, **_kwargs: events.append(
-                        "dependency_sync_complete"
-                    ),
-                ),
-                patch.object(
-                    module,
                     "_finalize_resume_orchestration",
                     return_value={},
                 ),
@@ -3315,56 +2890,9 @@ class P500ResumeTests(unittest.TestCase):
             )
             self.assertLess(
                 events.index("downstream_grounding"),
-                events.index("downstream_reviews"),
-            )
-            self.assertLess(
-                events.index("downstream_reviews"),
-                events.index("dependency_sync_complete"),
-            )
-            self.assertLess(
-                events.index("dependency_sync_complete"),
                 events.index("generate_images"),
             )
 
-    def test_resume_rematerialization_supersedes_only_incomplete_dependency_sync(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            run_dir = Path(td)
-            (run_dir / "state.txt").write_text(
-                "\n".join(
-                    [
-                        "review.semantic.story.dependency_sync.status=failed",
-                        "review.semantic.story.dependency_sync.error=old p450 failure",
-                        "review.semantic.scene_set.dependency_sync.status=in_progress",
-                        "review.semantic.asset_plan.dependency_sync.status=done",
-                        "---",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            module = self._resume_cli_module()
-
-            module._mark_resume_dependency_sync_complete(run_dir)
-            state = parse_state_file(run_dir / "state.txt")
-
-        for stage in ("story", "scene_set"):
-            prefix = f"review.semantic.{stage}.dependency_sync"
-            self.assertEqual(state[f"{prefix}.status"], "done")
-            self.assertEqual(state[f"{prefix}.error"], "")
-            self.assertEqual(
-                state[f"{prefix}.completed_by"],
-                "p500_full_rematerialization",
-            )
-        self.assertEqual(
-            state["review.semantic.asset_plan.dependency_sync.status"],
-            "done",
-        )
-        self.assertNotIn(
-            "review.semantic.asset_plan.dependency_sync.completed_by",
-            state,
-        )
 
     def test_continue_run_rejects_reserved_root_replacement_before_work(
         self,
@@ -4135,48 +3663,6 @@ class P500ResumeTests(unittest.TestCase):
             self.assertFalse((run_dir / "asset_plan.md").exists())
             state = parse_state_file(run_dir / "state.txt")
             self.assertEqual(state["runtime.resume.p500.status"], "prepared")
-
-    @patch("toc.p500_resume._p400_readiness", return_value=("approved", ()))
-    def test_archives_p400_review_evidence_before_refresh(self, _readiness) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            run_dir = self._run_fixture(root)
-            (run_dir / "script_review.md").write_text(
-                "old p400 script review\n",
-                encoding="utf-8",
-            )
-            aggregate = (
-                run_dir
-                / "logs/eval/script/round_01/aggregated_review.md"
-            )
-            aggregate.parent.mkdir(parents=True)
-            aggregate.write_text("old aggregate\n", encoding="utf-8")
-            plan = build_resume_plan(
-                repo_root=root,
-                run_dir=run_dir,
-                checkpoint_id="p400-evidence",
-            )
-            checkpoint = apply_resume_plan(plan)
-
-            module = self._resume_cli_module()
-            module._archive_p400_review_evidence(run_dir)
-
-            self.assertEqual(
-                (
-                    checkpoint
-                    / "p400_evidence"
-                    / "script_review.md"
-                ).read_text(encoding="utf-8"),
-                "old p400 script review\n",
-            )
-            self.assertEqual(
-                (
-                    checkpoint
-                    / "p400_evidence"
-                    / "logs/eval/script/round_01/aggregated_review.md"
-                ).read_text(encoding="utf-8"),
-                "old aggregate\n",
-            )
 
 
 if __name__ == "__main__":

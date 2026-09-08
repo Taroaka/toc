@@ -1,6 +1,6 @@
 ---
 name: toc-p600-image-runner
-description: Use when this repository needs to execute the p600 image stage for story cuts, turning approved cut image requests into generated files by routing through $codex-parallel-image-batch. Defaults test runs to `asset/scene/` and keeps story-specific planning in p600 documents rather than inside the skill.
+description: Use when this repository needs to execute the p600 image stage for story cuts, turning current cut image requests into generated files by routing through $codex-parallel-image-batch. Defaults test runs to `asset/scene/` and keeps story-specific planning in p600 documents rather than inside the skill.
 ---
 
 # ToC P600 Image Runner
@@ -50,7 +50,7 @@ This skill is the planner and adapter.
 3. Treat `video_manifest.md` and `image_generation_requests.md` as the source of truth for what to generate.
 4. Use a single-writer pattern for shared manifest or request-file edits.
 5. Only batch-generate images that are ready for execution.
-6. Treat scene stills as later-video first-frame candidates during planning/review, but do not put `最初の1フレーム`, `1フレーム目`, or `first frame` in the image prompt sent to the image API.
+6. Treat scene stills as later-video first-frame candidates during planning, but do not put `最初の1フレーム`, `1フレーム目`, or `first frame` in the image prompt sent to the image API.
 
 ## Output Mode Rules
 
@@ -84,7 +84,7 @@ Do not silently mix test and production paths in the same batch.
    - target path
 4. Verify that each item has a unique output path.
 5. When using built-in image generation with local reference images, make those images visible in the conversation before generation and label their continuity role.
-6. Treat built-in reference-guided generation as candidate generation. Do not assume exact reproduction of face, costume, or prop identity from conversation-visible images alone.
+6. Treat built-in reference-guided generation as request-bound image generation. Do not assume exact reproduction of face, costume, or prop identity from conversation-visible images alone.
 7. When likeness matters, validate the main subject in an isolated continuity test before moving to full scene cuts.
 8. If the user explicitly wants parallel generation, invoke `$codex-parallel-image-batch` in parallel mode.
 9. If the user did not ask for parallel generation, you may still prepare the batch here, but do not force subagent fan-out.
@@ -113,6 +113,6 @@ For this repo, prefer the workspace helper script when available:
 
 ## Example Uses
 
-- "Use $toc-p600-image-runner to generate the approved cut images for this story in test mode under `asset/scene/`."
+- "Use $toc-p600-image-runner to generate the current cut images for this story in test mode under `asset/scene/`."
 - "Use $toc-p600-image-runner with parallel generation for all ready items in `image_generation_requests.md`."
 - "Use $toc-p600-image-runner for this run dir and write production outputs under `output/<topic>_<timestamp>/asset/scene/`."

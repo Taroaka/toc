@@ -8,6 +8,7 @@ from pathlib import Path
 
 from toc.harness import load_structured_document
 from toc.narration_arc import validate_audio_story_contract
+from toc.narration_prompt_projection_registry import NARRATION_PROMPT_PROJECTION_REGISTRY_VERSION
 from toc.runtime_locks import sync_file_lock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -549,7 +550,7 @@ scenes: []
             prompt = (run_dir / "scratch" / "narration" / "authoring_prompt.md").read_text(
                 encoding="utf-8"
             )
-            self.assertIn("narration_prompt_projection_registry_v1", prompt)
+            self.assertIn(NARRATION_PROMPT_PROJECTION_REGISTRY_VERSION, prompt)
             self.assertIn("背景文脈（自動的に読み上げない）", prompt)
             self.assertIn("17世紀末フランス・ルイ14世時代", prompt)
             self.assertIn("happy", prompt)

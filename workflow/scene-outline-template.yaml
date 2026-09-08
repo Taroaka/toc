@@ -1,14 +1,9 @@
 # Scene Outline / Cinematic Scene Contract Template
-#
-# 目的:
-# - story.md と generation prompt の間で、scene の劇的責務を固定する。
-# - p400 では完成 prompt を書かず、p600/p800 が迷わない scene/cut contract を作る。
-# - keys は ASCII のままにし、値とコメントは日本語で書く。
-# - 事実は research の fact_id / source_id に紐づけ、創作補完は creative_inventions に明示する。
 
+# scene.md は story と generation prompt の間の authoring artifact。
+# p400 では provider を呼ばず、p410/p420 の普通の構造検証後に p450 へ渡す。
 scene_outline_metadata:
   topic: "<topic>"
-  # story_metadata.scene_time_of_day_contract の read-only projection。
   scene_time_of_day_contract: "required_v1"
   source_research: "output/<topic>_<timestamp>/research.md"
   source_story: "output/<topic>_<timestamp>/story.md"
@@ -17,39 +12,25 @@ scene_outline_metadata:
   method_used: "cinematic_scene_contract"
   version: 3
   scene_count: 0
-  # 新規 artifact は script.md の凍結済み契約から exact projection する。
-  # 会話履歴や reviewer transcript は入力にしない。legacy markerなしは読み取り互換。
-  scene_acceptance_contract:
-    schema_version: "scene_set_authoring_contract_v1"
-    source_script: "output/<topic>_<timestamp>/script.md#/scene_set_authoring_contract"
-    generation_id: "scene-authoring-<id>"
-    contract_digest: "sha256:<hex>"
-    criterion_registry_version: "scene_acceptance_criteria_v1"
-    criterion_registry_sha256: "sha256:<hex>"
-    readset_digest: "sha256:<hex>"
 
 scene_design_rules:
   scene_count_strategy: "maximal_meaningful"
-  scene_count_goal: "承認済み story の主要 beat を落とさず、独立した production scene として成立する範囲で scene 数を最大化する"
-  scene_count_stop_condition: "これ以上 scene を増やしても独立した dramatic_question / value_shift / causal_turn を持てず、各 scene 内の cut 設計を厚くした方が品質が上がる"
-  scene_count_review_required: true
+  scene_count_goal: "source story の主要 beat を落とさず、独立した責務を持つ scene を作る"
+  scene_count_stop_condition: "独立した dramatic_question / value_shift / causal_turn がなく、既存 cut を厚くする方が適切な状態"
   scene_specificity_required_layers:
-    - "non_compressible_beat_inventory"
-    - "scene_promotion_rule"
-    - "unique_scene_responsibility"
-    - "actor_force_coverage"
-    - "object_meaning_ladder"
-    - "concrete_handoff_chain"
-    - "anti_template_language"
-    - "abstract_function"
-    - "concrete_event"
-    - "story_grounding"
-    - "non_replaceable_elements"
-    - "concrete_story_elements_with_story_function"
-    - "asset_story_function_usage"
-    - "specificity_budget"
+    - non_compressible_beat_inventory
+    - scene_promotion_rule
+    - unique_scene_responsibility
+    - actor_force_coverage
+    - object_meaning_ladder
+    - concrete_handoff_chain
+    - anti_template_language
+    - concrete_event
+    - story_grounding
+    - non_replaceable_elements
+    - asset_story_function_usage
   canonical_event_coverage_matrix_required: true
-  abstract_language_policy: "抽象表現は禁止しない。ただし abstract_function だけで終わらず、必ず source-grounded concrete_event / story_grounding を持つ"
+  abstract_language_policy: "abstract function だけで終わらず、source-grounded concrete event を持つ"
   banned_generic_scene_phrases:
     - "主人公は前進できるか"
     - "次へ進む理由が生まれる"
@@ -63,10 +44,10 @@ scene_design_rules:
   cut_must_have_single_intent: true
   prompt_language: "ja"
   no_on_screen_text: true
-  image_policy: "新規 still は continuity anchor が必要な cut に集中させ、既存 anchor を再利用できる場合は再利用する"
+  image_policy: "continuity anchor が必要な cut に still を作り、既存 anchor は再利用する"
 
 global_constraints:
-  aspect_ratio: "9:16"
+  aspect_ratio: "16:9"
   visual_style: "実写映画調、自然な映画照明、実物セット感"
   global_must_include:
     - "前景/中景/背景の空間設計"
@@ -82,14 +63,15 @@ global_constraints:
     style_images: []
     object_images: []
     location_images: []
-    notes: "参照画像 path は metadata に保持し、prompt 本文には path を書かない"
+    notes: "reference path は metadata に保持し、prompt 本文には書かない"
 
 story_truth:
   theme: "<story theme>"
   protagonist: "<protagonist>"
   reveal_order_summary: "<reveal order>"
+  source_references: []
   forbidden_changes:
-    - "story.md の事実関係/reveal順序/主人公/themeを無断変更しない"
+    - "story.md の事実関係、reveal順序、主人公、themeを無断変更しない"
 
 story_beat_coverage_matrix:
   - beat_id: "story_beat_01"
@@ -105,368 +87,168 @@ story_beat_coverage_matrix:
     risk_if_compressed: ""
 
 canonical_event_coverage_matrix:
-  policy_version: "canonical_event_coverage_matrix_v1"
-  source: ["research", "story", "user_input", "asset_bible"]
+  policy_version: canonical_event_coverage_matrix_v1
+  source: [research, story, user_input, asset_bible]
   source_story_events:
     - source_event_id: ""
       source_event_summary: ""
-      importance: "low|medium|high|critical"
+      importance: low|medium|high|critical
       required: true
-      must_appear_as: "scene|cut|narration|visual_motif|can_be_omitted"
+      must_appear_as: scene|cut|narration|visual_motif|can_be_omitted
       canonical_order_index: 0
       assigned_scene_ids: []
       assigned_event_beat_ids: []
       omission_reason: ""
       adaptation_change_reason: ""
-      human_approval_required: false
+      explicit_source_choice: false
 
-# scene_set_authoring_contract の全体を複製しない。各 scene は frozen contract の slice と
-# digestだけを参照し、scene prose / cut design が ownership や reveal state の別authoring rootにならない。
 scene_set_authoring_contract_ref:
-  schema_version: "scene_set_authoring_contract_ref_v1"
-  path: "script.md#/scene_set_authoring_contract"
-  generation_id: "scene-authoring-<id>"
-  contract_digest: "sha256:<hex>"
-  criterion_registry_sha256: "sha256:<hex>"
-  source_digest: "sha256:<hex>"
+  schema_version: scene_set_authoring_contract_ref_v1
+  path: script.md#/scene_set_authoring_contract
+  generation_id: scene-authoring-<id>
+  contract_digest: sha256:<hex>
+  source_digest: sha256:<hex>
 
 scene_decision_log:
-  - decision_id: "scene_decision_001"
-    action: "add_scene|merge_scene|split_scene|delete_scene|reorder_scene"
+  - decision_id: scene_decision_001
+    action: add_scene|merge_scene|split_scene|delete_scene|reorder_scene
     target_scene_ids: []
     source_story_beat_ids: []
     reason: ""
-    rejected_alternative: ""
     impact_on_reveal_order: ""
     impact_on_duration: ""
-    human_approval_required: false
 
 scenes:
   - scene_id: 1
-    # frozen scene_set_authoring_contract の read-only projection。agentはID/ownership/digestを変更しない。
     scene_contract_slice:
-      schema_version: "scene_contract_slice_v1"
+      schema_version: scene_contract_slice_v1
       scene_id: 1
-      generation_id: "scene-authoring-<id>"
-      contract_digest: "sha256:<hex>"
-      scene_slice_digest: "sha256:<hex>"
+      generation_id: scene-authoring-<id>
+      contract_digest: sha256:<hex>
+      scene_slice_digest: sha256:<hex>
       canonical_event_ids: []
-      required_beat_specs:
-        - beat_id: "scene1_beat_01"
-          source_event_ids: []
-          required_role_ids: []
-          required_character_ids: []
-          required_evidence_ids: []
-          required_non_replaceable_element_ids: []
+      required_beat_specs: []
       role_bindings: []
       reveal_state_before: {}
       allowed_reveal_transition_ids: []
       reveal_state_after: {}
       time_location_transition:
         time_of_day: ""
-        continuity_from_previous: ""
+        continuity_from_previous: opening
         transition_cue_required: false
         transition_cue_ids: []
         location_sequence: []
-      incoming_handoff_anchor_id: "story_opening"
-      outgoing_handoff_anchor_id: "handoff_1_2"
+      incoming_handoff_anchor_id: story_opening
+      outgoing_handoff_anchor_id: handoff_1_2
       causal_proof_contract:
-        cause_beat_id: "scene1_beat_01"
-        action_beat_id: "scene1_beat_01"
-        result_state_id: "state_after_scene1"
+        cause_beat_id: scene1_beat_01
+        action_beat_id: scene1_beat_01
+        result_state_id: state_after_scene1
         required_evidence_ids: []
       non_replaceable_elements: []
-    # validatorが計算するblock。scene author / reviewerは手入力でpassedにしない。
     authoring_preflight:
-      schema_version: "scene_authoring_preflight_v1"
-      status: "pending"
-      generation_id: "scene-authoring-<id>"
-      contract_digest: "sha256:<hex>"
-      scene_slice_digest: "sha256:<hex>"
-      source_digest: "sha256:<hex>"
-      preflight_digest: ""
+      schema_version: scene_authoring_preflight_v1
+      status: pending|passed|failed
+      generation_id: scene-authoring-<id>
+      contract_digest: sha256:<hex>
+      scene_slice_digest: sha256:<hex>
+      source_digest: sha256:<hex>
+      preflight_digest: sha256:<hex>
       checks: []
       blocking_reason_keys: []
-    # story.md の同一 scene からの read-only projection。open string で、新規 artifact では非空必須。
-    # contract marker がない Legacy の missing/empty だけ、読み込み時に "" として扱い、時間帯 prompt fragment を生成しない。
-    # 例: 朝、昼、夕方、夜、夜明け前、真夜中。ここで再 authoring せず、visual_world.setting へも重複保持しない。
     time_of_day: "朝"
-    location_mode: "single|sequence"
+    time_of_day_visual_basis: "光源、空の明るさ、影、色温度"
+    location_mode: single|sequence
     location_sequence: ["始まりの場所"]
-    # sequenceでは各場所を一度ずつ覆い、cutはprimary event beatに対応する1 itemだけを使う。
     location_segments:
       - location: "始まりの場所"
         responsibility: "この場所で成立させる出来事"
-        primary_subject: "主被写体の人物名"
-        # optional。setup|pressure|turn|payoff ごとに主被写体を切り替える場合だけ埋める。
-        primary_subject_by_function: {}
-        # optional。key は setup|pressure|turn|payoff。
-        # 各 function は beat 固有値を持て、さらに obligation_overrides.<obligation_id> で
-        # cut 責務だけを上書きできる。未使用時は空 map のままにする。
-        # obligation override の許可 key:
-        # primary_subject / visible_action / visible_reaction / required_visual_evidence /
-        # required_roles / visible_character_state / motion_brief / motion_end_state /
-        # motion_attention_target / environment_motion / emotional_change /
-        # retain_carried_character_subjects / allowed_new_reveal_elements /
-        # allowed_reveal_info_ids / use_next_cut_first_frame_as_last_frame
-        # 最後の3 keyは exact obligation entry 専用。segment / function rootへ置かない。
-        beat_overrides: {}
-        visible_action: "一枚で読める具体的状態"
-        visible_reaction: "別主体の具体的反応"
-        required_visual_evidence: ["具体物"]
-        required_roles: ["protagonist"]
+        primary_subject: "主被写体"
+        visible_action: "一枚で読める状態"
+        visible_reaction: ""
+        required_visual_evidence: []
+        required_roles: [protagonist]
         visible_character_state:
-          posture: "静止画で読める姿勢"
-          gaze: "一つに確定した視線先"
-          expression: "顔に見える反応"
-          hands: "手の具体的な位置"
-          feet: "足先と重心の具体的な位置"
+          posture: ""
+          gaze: ""
+          expression: ""
+          hands: ""
+          feet: ""
         motion_brief: "一つの観察可能な動作"
         motion_end_state: "物理的終了状態"
     scene_name: "<短いscene名>"
-    importance: "low|medium|high|critical"
+    importance: low|medium|high|critical
     target_duration_seconds: 24
     estimated_duration_seconds: 24
-    phase: "opening|development|ordeal|transformation|ending"
-
+    phase: opening|development|ordeal|transformation|ending
     scene_intent:
-      story_purpose: "この scene が物語全体で担う役割"
-      dramatic_question: "この scene の間、観客が追う問い"
-      scene_spine: "setup → pressure → turn → payoff → handoff の1文要約"
+      story_purpose: "scene が担う責務"
+      dramatic_question: "観客が追う問い"
+      scene_spine: "固有の event progression"
       value_shift:
-        from: "scene開始時の状態"
-        to: "scene終了時の状態"
-        visible_evidence:
-          - "画面だけで変化が読める証拠"
-      causal_turn: "次 scene を発生させる不可逆の出来事/決断/発見"
-      audience_information:
-        - "この scene で観客に渡す情報"
-      withheld_information:
-        - "この scene ではまだ見せない情報"
-      reveal_constraints:
-        - "早出し禁止の情報"
-      affect_transition: "観客感情の変化"
+        from: ""
+        to: ""
+        visible_evidence: []
+      causal_turn: "次 scene を発生させる不可逆変化"
+      audience_information: []
+      withheld_information: []
+      reveal_constraints: []
+      affect_transition: ""
       character_state:
-        start: "人物の心理/関係/身体状態"
-        end: "scene終了時の心理/関係/身体状態"
-        visible_behavior:
-          - "表情/姿勢/距離/手の動きなど"
-      visual_thesis: "この scene を代表する映画的な一枚絵の考え方"
-      handoff_to_next_scene: "次 scene へつなぐ視覚/音/因果アンカー。最終 scene は terminal_resolution"
+        start: ""
+        end: ""
+        visible_behavior: []
+      visual_thesis: "描画可能な一枚の意味"
+      handoff_to_next_scene: "次 scene へ渡す anchor"
       scene_conflict_engine:
-        desire: "この scene で主体が欲しているもの"
-        obstacle: "それを妨げる力"
-        stakes: "失敗すると何を失うか"
-        escalation: "scene内で圧力がどう上がるか"
-        no_return_point: "後戻りできなくなる瞬間"
-        visible_pressure:
-          - "画面で圧力として読めるもの"
+        desire: ""
+        obstacle: ""
+        stakes: ""
+        escalation: ""
+        no_return_point: ""
+        visible_pressure: []
       audience_knowledge_delta:
-        before_scene:
-          - "観客がすでに知っていること"
-        learned_during_scene:
-          - "このsceneで初めて知ること"
-        misdirected_or_reframed:
-          - "意味が反転・再解釈される情報"
-        still_unknown_after_scene:
-          - "まだ隠す情報"
-        forbidden_early_reveals:
-          - "ここで見せてはいけないもの"
+        before_scene: []
+        learned_during_scene: []
+        still_unknown_after_scene: []
+        forbidden_early_reveals: []
       handoff_chain:
-        incoming:
-          anchor_id: "opening_or_previous_anchor"
-          anchor_type: "object|sound|gaze|gesture|threat|question|none"
-          visible_or_audible_form: ""
-        outgoing:
-          anchor_id: "next_scene_anchor"
-          anchor_type: "object|sound|gaze|gesture|threat|question|terminal"
-          next_scene_selector: ""
-          required_next_scene_start_pressure: ""
-      object_arc:
-        - object_id: ""
-          first_meaning: ""
-          current_scene_meaning: ""
-          later_meaning: ""
-          visible_state_in_this_scene: ""
-          must_not_show_yet: []
+        incoming: {anchor_id: "", anchor_type: "object|sound|gaze|gesture|threat|question|none", visible_or_audible_form: ""}
+        outgoing: {anchor_id: "", anchor_type: "object|sound|gaze|gesture|threat|question|terminal", next_scene_selector: ""}
       story_specificity:
-        non_compressible_beat: "この scene を cut に圧縮してはいけない不可逆 beat"
-        scene_promotion_reason: "この beat を scene に昇格させる理由。独立した問い/価値変化/因果 turn を明記する"
-        unique_scene_responsibility: "物語全体でこの scene だけが担う責務"
-        actor_forces:
-          protagonist: "この scene で変化を受ける人物/主体"
-          opposing: []
-          helping: []
-          observing: []
-          pressure_method: "誰が、何によって、主人公や状況へ圧力をかけるか"
-        meaning_ladder:
-          protagonist_stage: "主人公の意味/関係/自己認識がどの段階にあるか"
-          relationship_stage: "関係性がどの段階にあるか"
-          object_or_setpiece_stage: "物語上の道具/舞台装置の意味がどの段階にあるか"
-        concrete_handoff:
-          incoming_trigger: "前 scene から来た具体的な圧力/物/音/視線/行為"
-          outgoing_anchor: "次 scene に渡す具体的な圧力/物/音/視線/行為"
-          outgoing_pressure: "なぜ次 scene が発生せざるを得ないか"
-        anti_template_language:
-          banned_generic_phrases_absent: false
-          story_specific_terms: []
-          specificity_note: "固有名詞、道具、関係、場所、行為のうち複数を入れて抽象語を避ける"
-
-    scene_generation:
-      schema_version: "scene_generation_v1"
-      scene_authoring_context:
-        schema_version: "scene_authoring_context_v1"
-        topic: "<topic>"
-        scene_id: 1
-        scene_index: 1
-        scene_title: ""
-        story_scope: {}
-        source_beats: []
-        canonical_event_policy:
-          source_story_events: "top-level canonical_event_coverage_matrix を参照"
-          scene_specificity: "source beat を scene_event の具体出来事へ接地する"
-        scene_count_policy:
-          maximize_meaningful_scene_count: true
-          do_not_fix_cut_count_in_prompt: true
-          cut_count_is_derived_by: "scene_cut_coverage_plan"
-      scene_prompt_payload:
-        schema_version: "scene_prompt_payload_v1"
-        prompt: "この scene が物語内で何を成立させるかを設計し、scene 正本を出力する。後段実行情報は含めない。"
-        input_refs: ["story.md", "research.md", "visual_value.md", "canonical_event_coverage_matrix", "asset_bible"]
-        required_outputs: ["scene_intent", "scene_event", "scene_character_state_timeline", "scene_film_coverage_plan", "scene_cut_coverage_plan", "forbidden_event_changes"]
-        constraints: ["scene 正本生成だけに使う", "後段の画像・音声・動画実行情報を含めない", "scene_event は物語事実に限定する"]
-      scene_debug_prompt_source:
-        schema_version: "scene_debug_prompt_source_v1"
-        not_sent_to_agent: true
-        source_story_beat_ids: []
-        source_beats: []
-        source_origin: "user_input|script|canonical_reference|asset_bible|inferred|adaptation_choice"
-        adaptation_choices: []
-        excluded_from_payload: []
-        forbidden_event_changes_source: "scene_event.forbidden_event_changes"
-      scene_generation_contract:
-        schema_version: "scene_generation_contract_v1"
-        required_outputs: ["scene_intent", "scene_event", "scene_character_state_timeline", "scene_film_coverage_plan", "scene_cut_coverage_plan", "forbidden_event_changes"]
-        scene_event_schema_version: "scene_event_v1"
-        payload_boundary: "scene_prompt_payload は scene 正本生成だけに使う"
-
+        non_compressible_beat: ""
+        scene_promotion_reason: ""
+        unique_scene_responsibility: ""
+        actor_forces: {protagonist: "", opposing: [], helping: [], observing: [], pressure_method: ""}
+        meaning_ladder: {protagonist_stage: "", relationship_stage: "", object_or_setpiece_stage: ""}
+        concrete_handoff: {incoming_trigger: "", outgoing_anchor: "", outgoing_pressure: ""}
+        anti_template_language: {story_specific_terms: [], specificity_note: ""}
     scene_event:
-      schema_version: "scene_event_v1"
-      event_logline: "sceneで実際に起きる出来事。演出語ではなく物語事実を書く"
-      start_situation: "scene開始時の人物・場所・物・関係の状態"
+      schema_version: scene_event_v1
+      event_logline: ""
+      start_situation: ""
       source_story_beat_ids: []
-      story_specificity:
-        canonical_specificity:
-          description: "原典・既知筋・ユーザー入力に由来する、この物語で欠かせない出来事や設定"
-          required_elements: []
-        character_specificity:
-          description: "この物語の人物名、役割、欲望、弱点、関係性に固有の要素"
-          required_elements: []
-        relationship_specificity:
-          description: "人物同士の支配、敵対、助力、誤解、約束、秘密などの関係性"
-          required_elements: []
-        object_specificity:
-          description: "物語上の小道具、証拠、呪い、鍵、手紙、靴などの機能"
-          required_elements: []
-        location_specificity:
-          description: "その場所が物語上どんな制約・圧力・誘惑・境界として働くか"
-          required_elements: []
-        rule_specificity:
-          description: "魔法の制約、時間制限、社会制度、約束、禁忌など、その物語固有のルール"
-          required_elements: []
-        visual_specificity:
-          description: "その物語でしか成立しない画面上の証拠、身体状態、痕跡、配置"
-          required_elements: []
       event_sequence:
-        - beat_id: "scene1_event_setup"
-          beat_function: "setup"
+        - beat_id: scene1_beat_01
+          beat_function: custom
           source_story_beat_ids: []
-          abstract_function:
-            dramatic_job: ""
-            value_shift_role: ""
-            emotional_pressure_role: ""
-            causal_role: ""
           concrete_event:
             who: []
             where: ""
             what_happens: ""
             conflict_or_constraint: ""
-            object_or_trace: []
             visible_action: ""
             visible_reaction: ""
             immediate_consequence: ""
             required_visual_evidence: []
           story_grounding:
-            source_origin: "user_input|script|canonical_reference|asset_bible|inferred|adaptation_choice|invented_candidate"
+            source_origin: user_input|script|canonical_reference|asset_bible|inferred|adaptation_choice|invented_candidate
             source_story_beat_ids: []
-            source_confidence: "high|medium|low"
+            source_confidence: high|medium|low
             source_text_or_summary: ""
-            adaptation_reason: ""
-            human_approval_required: false
-            non_replaceable_elements:
-              - element_id: ""
-                type: "character|object|location|relationship|rule|event|visual_evidence"
-                value: ""
-                why_non_replaceable: ""
-            replaceability_check:
-              would_survive_character_swap: false
-              would_survive_object_swap: false
-              would_survive_location_swap: false
-              note: ""
-            concrete_story_elements:
-              - element_id: ""
-                element_type: "character|object|location|gesture|trace|rule|relationship|sound|light"
-                concrete_description: ""
-                story_function: "obstacle|proof|temptation|deadline|status_marker|secret_holder|memory_trigger|threshold|handoff|contrast|pressure|reward|loss"
-                appears_in_event_beat_ids: []
-                visible_form: ""
-                must_not_be_generic: true
-            asset_story_function_usage:
-              - asset_id: ""
-                asset_type: "character|object|location"
-                used_in_scene: true
-                used_in_event_beat_ids: []
-                story_function_in_scene: "obstacle|proof|helper|pressure|threshold|deadline|status_marker|secret|handoff"
-                visible_or_hidden: "visible|hidden|hinted|offscreen"
-                reason_if_unused: ""
-            confidence: "high|medium|low"
-          specificity_budget:
-            max_primary_story_elements: 3
-            max_secondary_story_elements: 3
-            required_element_types: ["character", "location", "conflict_or_constraint", "visual_evidence"]
-            optional_element_types: ["object", "sound", "weather"]
-            reject_if: ["decorative_detail_without_story_function", "too_many_unrelated_objects", "concrete_but_not_source_grounded"]
-            reject_decorative_detail_without_story_function: true
-          what_happens: ""
-          visible_action: ""
-          visible_reaction: ""
-          immediate_consequence: ""
-          emotional_pressure: ""
-          required_visual_evidence: []
-          story_information_revealed_ids: []
-        - beat_id: "scene1_event_pressure"
-          beat_function: "pressure"
-          source_story_beat_ids: []
-          what_happens: ""
-          visible_action: ""
-          visible_reaction: ""
-          immediate_consequence: ""
-          emotional_pressure: ""
-          required_visual_evidence: []
-          story_information_revealed_ids: []
-        - beat_id: "scene1_event_turn"
-          beat_function: "turn"
-          source_story_beat_ids: []
-          what_happens: ""
-          visible_action: ""
-          visible_reaction: ""
-          immediate_consequence: ""
-          emotional_pressure: ""
-          required_visual_evidence: []
-          story_information_revealed_ids: []
-        - beat_id: "scene1_event_payoff"
-          beat_function: "payoff"
-          source_story_beat_ids: []
+            non_replaceable_elements: []
+            concrete_story_elements: []
+            asset_story_function_usage: []
           what_happens: ""
           visible_action: ""
           visible_reaction: ""
@@ -475,90 +257,78 @@ scenes:
           required_visual_evidence: []
           story_information_revealed_ids: []
       turning_event:
-        source_event_beat_id: "scene1_event_turn"
-        causal_turn_ref: "scene_intent.causal_turn"
+        source_event_beat_id: scene1_beat_01
+        causal_turn_ref: scene_intent.causal_turn
         irreversible_change: ""
       end_situation:
-        value_shift_to_ref: "scene_intent.value_shift.to"
+        value_shift_to_ref: scene_intent.value_shift.to
         outcome: ""
-        character_position: ""
-        object_state: ""
-        relationship_state: ""
-        new_pressure: ""
-        visible_evidence_refs: ["scene1_event_payoff"]
+        visible_evidence_refs: []
       offscreen_context: []
       forbidden_event_changes: []
-
-    grounding:
-      research_refs:
-        fact_ids: []
-        source_ids: []
-        notes: "事実根拠。創作補完は creative_inventions に分ける"
-      creative_inventions:
-        - invention: "創作補完の内容"
-          purpose: "映像化/感情設計上の目的"
-          must_not_conflict_with: []
-
     visual_world:
       setting:
-        location: "具体的な場所またはセット"
-        # 時間帯は scenes[].time_of_day を参照する。この setting 内では独立 authoring しない。
-        weather: "天候/空気"
-        environment: "場所の質感、音、密度"
+        location: ""
+        weather: ""
+        environment: ""
       spatial_plan:
-        screen_geography: "前景/中景/背景、入口/出口、進行方向"
-        continuity_anchors:
-          - "前後sceneで一致させる光/方向/物/人物状態"
+        screen_geography: ""
+        continuity_anchors: []
       characters_present: []
       props_set_pieces: []
       object_ids: []
       location_ids: []
-
     handoff_notes:
-      p500_asset:
-        - "asset 化すべき人物/場所/道具/状態"
-      p600_image:
-        - "still prompt で守るべき visual proof / 初期状態"
-      p700_narration:
-        - "ナレーションで補うこと / 補わないこと"
-      p800_video:
-        - "motion で守ること"
-
-    coverage_review:
+      p500_asset: []
+      p600_image: []
+      p700_narration: []
+      p800_video: []
+    coverage_checks:
       audience_information_covered: false
       visualizable_action_covered: false
       value_shift_visible: false
       causal_turn_visible: false
-      scene_specificity_gate_passed: false
       next_scene_connection_checked: false
-      notes: "未達なら cut 追加または scene 再設計"
-
     cuts:
-      - cut_id: 1
-        cut_role: "main|sub|transition|reaction|visual_payoff"
-        cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
-        duration_intent: "short|standard|hold"
+      - cut_id: scene_01_cut_01
+        cut_role: main|sub|transition|reaction|visual_payoff
+        cut_function: custom
+        duration_intent: short|standard|hold
         target_duration_seconds: 8
-        target_beat: "この cut で伝える1つのこと"
-        screen_question: "この cut の間、観客が画面から読む問い"
-        dramatic_job: "scene全体のpressure/turn/payoffのどこを担当するか"
-        visual_beat: "画として何が見えるか"
-        must_show:
-          - "画・音・動きのどこかで必ず見せるもの"
-        must_avoid:
-          - "drift / reveal破り / 説明過多など"
-        done_when:
-          - "reviewer が完了判断できる条件"
-        first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
-        motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
-        narrative_position: "opening|middle|ending"
-        voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
-        visual_distance_policy: "stay_close|contextual|meaning_first|silent"
-        pronunciation_targets: []
-        narration_role: "setup|fact|emotion|contrast|aftertaste|silent"
-        narration_text: "<必要ならナレーション。silent cut は空文字>"
+        target_beat: ""
+        screen_question: ""
+        dramatic_job: ""
+        audience_knowledge_delta: ""
+        causal_proof: ""
+        visual_evidence: []
+        required_roles: []
+        source_event_contract:
+          primary_event_beat_id: scene1_beat_01
+          source_event_beat_ids: [scene1_beat_01]
+          event_beat_function: custom
+          event_time_position: before_trigger
+          event_facts_to_preserve: []
+          event_facts_not_to_invent: []
+          allowed_reveal_info_ids: []
+          forbidden_reveal_info_ids: []
+        must_show: []
+        must_avoid: []
+        done_when: []
+        first_frame_brief: ""
+        motion_brief: ""
+        narration_role: setup|fact|emotion|contrast|aftertaste|silent
         asset_dependency_hint:
           character_ids: []
           object_ids: []
           location_ids: []
           reusable_still_candidates: []
+
+validation:
+  source_refs_resolved: false
+  ids_unique: false
+  event_order_valid: false
+  scene_handoffs_valid: false
+  first_frame_imageable: false
+  motion_boundary_valid: false
+  narration_boundary_valid: false
+

@@ -15,7 +15,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from toc.grounding import detect_flow  # noqa: E402
 from toc.harness import append_state_snapshot, load_structured_document, now_iso, parse_state_file  # noqa: E402
 from toc.story_duration import (  # noqa: E402
     MINIMUM_EFFECTIVE_RATIO,
@@ -207,14 +206,11 @@ def main() -> int:
         minimum_seconds=minimum_seconds,
         ratio=ratio,
     )
-    flow = args.flow or detect_flow(run_dir.resolve())
-
     if target_seconds <= 0:
         if measurement.complete:
             append_state_snapshot(
                 run_dir / "state.txt",
                 {
-                    **measurement_state,
                     **measurement_state,
                     "runtime.duration_fit.status": "skipped",
                     "runtime.duration_fit.note": "no minimum runtime target configured",
@@ -243,9 +239,9 @@ def main() -> int:
             run_dir / "state.txt",
             {
                 **measurement_state,
-                "review.duration_fit.status": "passed",
-                "review.duration_fit.note": "actual audio-driven runtime satisfies the minimum target",
-                "review.duration_fit.at": now_iso(),
+                "runtime.duration_fit.status": "passed",
+                "runtime.duration_fit.note": "actual audio-driven runtime satisfies the minimum target",
+                "runtime.duration_fit.at": now_iso(),
                 "slot.p740.status": "done",
                 "slot.p740.requirement": "required",
                 "slot.p750.status": "pending",

@@ -23,7 +23,7 @@ def test_video_prompt_materializer_posts_target_review_items_without_replacing_o
 
     assert "'/api/image-gen/video-prompts/create'" in source
     assert "run_id: runId" in source
-    assert "items: buildReviewItems(targetItems)" in source
+    assert "items: buildItemPayload(targetItems)" in source
     assert "replace_all: false" in source
     assert "approve_for_generation: true" in source
 
@@ -56,10 +56,10 @@ def test_bulk_video_generation_materializes_target_set_once_before_workers_start
 
 
 def test_video_workspace_save_uses_video_targets_not_source_cut_items() -> None:
-    source = _callback_source("saveCurrentReview")
+    source = _callback_source("saveDraft")
 
     assert "workspaceMode === 'video' ? videoTargetItems : visibleItems" in source
-    assert "items: buildReviewItems(reviewItems)" in source
+    assert "items: buildItemPayload(draftItems)" in source
 
 
 def test_video_target_reload_preserves_candidates_and_only_dirty_draft_fields() -> None:
@@ -81,5 +81,5 @@ def test_generation_payload_keeps_frontend_prompt_as_authoring_source() -> None:
 def test_reference_image_mode_does_not_recreate_a_first_frame_from_references() -> None:
     assert "videoInputMode?: string" in FRONTEND_SOURCE
     assert "item.videoInputMode === 'reference_images'" in FRONTEND_SOURCE
-    materialize_source = _callback_source("buildReviewItems")
+    materialize_source = _callback_source("buildItemPayload")
     assert "item.videoInputMode === 'reference_images' ? ''" in materialize_source

@@ -708,7 +708,9 @@ def main() -> None:
             ),
             force=args.force,
         )
-        maybe_run_stage_grounding(scene_dir, "narration", flow="scene-series")
+        # Per-scene manifests are intentionally skeletons during scaffolding.
+        # Narration grounding requires a production manifest and is performed
+        # by the generation path after the authored manifest is promoted.
 
         if args.placeholder_e2e and not args.dry_run:
             manifest_path = scene_dir / "video_manifest.md"

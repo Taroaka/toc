@@ -54,7 +54,7 @@ class FrontendDurationGateTests(unittest.TestCase):
         run_dir.mkdir()
         _write_manifest(run_dir, video_seconds=video_seconds or actual_seconds)
         with patch("server.image_gen_app._probe_media_duration_seconds", return_value=actual_seconds):
-            result = image_gen_app._append_narration_review_approved_if_ready(run_dir)
+            result = image_gen_app._append_narration_ready_state(run_dir)
         return run_dir, result
 
     def test_frontend_p740_rejects_seventy_nine_point_nine_percent(self) -> None:
@@ -64,9 +64,9 @@ class FrontendDurationGateTests(unittest.TestCase):
         self.assertTrue(result["audioReady"])
         self.assertFalse(result["durationPassed"])
         self.assertFalse(result["ready"])
-        self.assertEqual(state["review.duration_fit.status"], "changes_requested")
+        self.assertEqual(state["duration_fit.status"], "failed")
         self.assertEqual(state["slot.p740.status"], "failed")
-        self.assertEqual(state["slot.p750.status"], "blocked")
+        self.assertNotIn("slot.p750.status", state)
 
     def test_frontend_p740_accepts_eighty_percent(self) -> None:
         run_dir, result = self._audit(actual_seconds=240.0)
@@ -74,31 +74,28 @@ class FrontendDurationGateTests(unittest.TestCase):
 
         self.assertTrue(result["durationPassed"])
         self.assertTrue(result["ready"])
-        self.assertEqual(state["review.duration_fit.status"], "passed")
+        self.assertEqual(state["duration_fit.status"], "passed")
         self.assertEqual(state["slot.p740.status"], "done")
-        self.assertEqual(state["slot.p750.status"], "awaiting_approval")
-        self.assertEqual(state["stage.narration.status"], "awaiting_approval")
-        self.assertEqual(state["review.narration.status"], "pending")
-        self.assertEqual(state["gate.narration_review"], "required")
-        self.assertEqual(state["review.duration_fit.measurement_complete"], "true")
-        self.assertNotIn("review.duration_fit.complete", state)
-        self.assertEqual(json.loads(state["review.duration_fit.missing_items"]), [])
-        self.assertEqual(json.loads(state["review.duration_fit.invalid_items"]), [])
+        self.assertEqual(state["stage.narration.status"], "done")
+        self.assertEqual(state["duration_fit.measurement_complete"], "true")
+        self.assertNotIn("duration_fit.complete", state)
+        self.assertEqual(json.loads(state["duration_fit.missing_items"]), [])
+        self.assertEqual(json.loads(state["duration_fit.invalid_items"]), [])
 
     def test_frontend_p740_has_no_upper_duration_failure(self) -> None:
         run_dir, result = self._audit(actual_seconds=450.0)
         state = parse_state_file(run_dir / "state.txt")
 
         self.assertTrue(result["ready"])
-        self.assertEqual(state["review.duration_fit.actual_seconds"], "450")
-        self.assertEqual(state["review.duration_fit.minimum_seconds"], "240")
+        self.assertEqual(state["duration_fit.actual_seconds"], "450")
+        self.assertEqual(state["duration_fit.minimum_seconds"], "240")
 
     def test_frontend_p740_requires_every_audio_item(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_frontend_duration_") as td:
             run_dir = Path(td) / "run"
             run_dir.mkdir()
             _write_manifest(run_dir, video_seconds=300, with_audio=False)
-            result = image_gen_app._append_narration_review_approved_if_ready(run_dir)
+            result = image_gen_app._append_narration_ready_state(run_dir)
             state = parse_state_file(run_dir / "state.txt")
 
         self.assertFalse(result["audioReady"])

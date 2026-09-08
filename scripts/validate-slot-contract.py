@@ -13,10 +13,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from toc.production_contract import RETIRED_REVIEW_SLOTS
 from toc.run_index import SLOT_BY_CODE
 
 
-SLOT_CODE_PATTERN = re.compile(r"`(p\d{3})`")
+SLOT_CODE_PATTERN = re.compile(r"(?<![A-Za-z0-9])(p\d{3})(?![A-Za-z0-9])")
 REQUIRED_GENERIC_KEYS = (
     "slot.pXXX.status",
     "slot.pXXX.requirement",
@@ -40,7 +41,15 @@ def sorted_slot_codes(codes: set[str]) -> list[str]:
 
 def validate_slot_doc(label: str, codes: set[str], expected: set[str], errors: list[str]) -> None:
     missing = sorted_slot_codes(expected - codes)
-    unexpected = sorted_slot_codes({code for code in codes if code not in expected and code not in ALLOWED_TOP_LEVEL_CODES})
+    unexpected = sorted_slot_codes(
+        {
+            code
+            for code in codes
+            if code not in expected
+            and code not in ALLOWED_TOP_LEVEL_CODES
+            and code not in RETIRED_REVIEW_SLOTS
+        }
+    )
     if missing:
         errors.append(f"{label} is missing fixed slot codes: " + ", ".join(missing))
     if unexpected:
@@ -77,8 +86,8 @@ def validate(root: Path) -> list[str]:
                 errors.append(f"{label} is missing generic slot key: {key}")
 
     root_pointer_text = root_pointer.read_text(encoding="utf-8")
-    if "fixed slot workflow" not in root_pointer_text:
-        errors.append("docs/root-pointer-guide.md should mention the fixed slot workflow")
+    if "fixed slot workflow" not in root_pointer_text and "fixed slot contract" not in root_pointer_text:
+        errors.append("docs/root-pointer-guide.md should mention the fixed slot contract")
 
     return errors
 

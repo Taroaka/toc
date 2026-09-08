@@ -28,11 +28,11 @@ def test_storyboard_frontend_does_not_claim_one_scene_always_equals_one_board() 
     assert "scene単位ストーリーボード式（尺に応じて分割）" in source
 
 
-def test_frontend_exposes_and_posts_preapproved_review_mode() -> None:
+def test_frontend_uses_one_production_path_without_review_mode() -> None:
     source = MAIN_TSX.read_text(encoding="utf-8")
     create_source = _create_run_source()
 
-    assert "type CreateReviewMode = 'standard' | 'preapproved';" in source
-    assert "<MenuItem value=\"preapproved\">全レビュー済み" in source
-    assert "review_mode: createRunReviewMode" in create_source
-    assert "progress.reviewMode === 'preapproved'" in source
+    assert "CreateReviewMode" not in source
+    assert "レビューモード" not in source
+    assert "review_mode:" not in create_source
+    assert "progress.reviewMode" not in source

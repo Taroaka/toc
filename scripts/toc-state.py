@@ -206,7 +206,7 @@ def main() -> int:
     p_show.add_argument("--run-dir", required=True)
     p_show.set_defaults(fn=cmd_show)
 
-    p_sync = sub.add_parser("sync", help="Regenerate run_status.json from state.txt (+ eval report if present).")
+    p_sync = sub.add_parser("sync", help="Regenerate run_status.json from state.txt.")
     p_sync.add_argument("--run-dir", required=True)
     p_sync.set_defaults(fn=cmd_sync)
 

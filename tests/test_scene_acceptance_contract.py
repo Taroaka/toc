@@ -15,9 +15,11 @@ from toc.scene_acceptance_contract import (
     SCENE_ACCEPTANCE_CONTRACT_VERSION,
     SCENE_DRAFT_VERSION,
     criterion_registry_digest,
+    criterion_registry_payload,
     digest_contract,
     digest_scene_slice,
     domain_separated_digest,
+    resolve_criterion,
     validate_scene_draft,
     validate_scene_set_authoring_contract,
     validate_scene_set_preflight,
@@ -247,6 +249,27 @@ def test_registry_and_domain_separated_digests_are_stable() -> None:
     assert domain_separated_digest("toc.test.a", {"x": "é"}) == domain_separated_digest(
         "toc.test.a", {"x": "é"}
     )
+
+
+def test_criterion_registry_contains_only_deterministic_authoring_rules() -> None:
+    criteria = criterion_registry_payload()
+
+    assert criteria
+    assert all(item["owner"] == "deterministic" for item in criteria)
+    assert all(
+        not any(
+            key in item
+            for key in (
+                "first_enforced_stage",
+                "semantic_recheck_stages",
+                "provider_repair_allowed",
+                "reviewer_instruction",
+            )
+        )
+        for item in criteria
+    )
+    assert resolve_criterion("scene.causal_proof_visually_unconvincing") is None
+    assert resolve_criterion("scene_event_concrete_but_not_story_specific") is None
 
 
 def test_valid_contract_passes_and_digest_excludes_derived_preflight() -> None:

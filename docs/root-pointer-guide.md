@@ -117,9 +117,7 @@ For a production stage:
 5. Generate or materialize the next artifact only after those checks pass.
 
 The stage resolver may report missing documents or inputs, but production never waits for a
-separate audit certificate. `scripts/resolve-stage-grounding.py` and
-`scripts/audit-stage-grounding.py` are compatibility utilities only; the latter is not a stage
-start or completion requirement. Run `python scripts/validate-slot-contract.py` after changing
+separate certificate. Run `python scripts/validate-slot-contract.py` after changing
 the fixed slot contract.
 
 ```bash

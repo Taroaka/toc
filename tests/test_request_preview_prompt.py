@@ -20,26 +20,6 @@ MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
-from toc.review_loop import REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE
-
-
-def _approve_video_request_entries(
-    request_path: Path,
-    entries: list[dict],
-) -> None:
-    pending = MODULE._video_prompt_pending_state_updates(
-        request_path=request_path,
-        entries=entries,
-    )
-    approved = dict(pending)
-    for entry in entries:
-        prefix = MODULE._video_prompt_approval_state_prefix(entry["selector"])
-        approved[f"{prefix}.status"] = "approved"
-        approved[f"{prefix}.approved_by"] = "test_reviewer"
-        approved[f"{prefix}.approved_at"] = "2026-07-18T00:00:00+09:00"
-    MODULE.append_state_snapshot(request_path.parent / "state.txt", approved)
-
-
 def _scene_intent_dict(scene_id: int | str, *, topic: str = "request preview") -> dict:
     next_selector = f"scene{scene_id}_next"
     return {
@@ -109,12 +89,12 @@ def _scene_intent_dict(scene_id: int | str, *, topic: str = "request preview") -
                 "protagonist": topic,
                 "opposing": ["情報不足"],
                 "helping": ["画面上の道具"],
-                "observing": ["reviewer"],
+                "observing": ["観客"],
                 "pressure_method": "情報不足が画面上の証拠を要求する",
             },
             "meaning_ladder": {
                 "protagonist_stage": "未確定から生成可能へ",
-                "relationship_stage": "reviewer と生成対象の関係が明確になる",
+                "relationship_stage": "観客と生成対象の関係が明確になる",
                 "object_or_setpiece_stage": "道具が visual proof になる",
             },
             "concrete_handoff": {
@@ -203,7 +183,7 @@ def _scene_event_dict(scene_id: int | str, *, topic: str = "request preview") ->
             "outcome": f"{topic} が次の生成へ渡せる状態になる",
             "character_position": "前方へ向く",
             "object_state": "道具が手元に残る",
-            "relationship_state": "reviewer と生成対象の関係が明確になる",
+            "relationship_state": "観客と生成対象の関係が明確になる",
             "new_pressure": "足跡が次の cut を要求する",
             "visible_evidence_refs": [f"scene{scene_id}_event_payoff"],
         },
@@ -217,7 +197,7 @@ def _with_story_specific_grounding(event: dict, scene_id: int | str, *, topic: s
     event["story_specificity"] = {
         "canonical_specificity": {"description": "preview source", "required_elements": [topic]},
         "character_specificity": {"description": "preview subject", "required_elements": [topic]},
-        "relationship_specificity": {"description": "preview relation", "required_elements": ["reviewer と生成対象"]},
+        "relationship_specificity": {"description": "preview relation", "required_elements": ["観客と生成対象"]},
         "object_specificity": {"description": "preview object", "required_elements": ["道具"]},
         "location_specificity": {"description": "preview location", "required_elements": ["画面中央"]},
         "rule_specificity": {"description": "preview rule", "required_elements": ["後続 cut の結末を先に見せない"]},
@@ -567,19 +547,6 @@ def _scene_emotion_film_dicts(
         },
     }
     return timeline, coverage
-
-
-def _preview_triangulation_review() -> dict:
-    return {
-        "status": "passed",
-        "same_target_beat": True,
-        "image_supports_motion_start": True,
-        "motion_reaches_declared_end_state": True,
-        "narration_not_captioning_image": True,
-        "reveal_constraints_preserved": True,
-        "continuity_preserved": True,
-        "handoff_visible_or_audible": True,
-    }
 
 
 def _preview_cut_contract(
@@ -1046,8 +1013,6 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
         data = {}
     initial_metadata = data.get("video_metadata") if isinstance(data.get("video_metadata"), dict) else {}
     if str(initial_metadata.get("experience") or "").strip().lower().startswith("asset_stage"):
-        with (run_dir / "state.txt").open("a", encoding="utf-8") as f:
-            f.write("eval.p400_readiness.status=approved\n---\n")
         return
     existing_script = {}
     existing_script_path = run_dir / "script.md"
@@ -1103,7 +1068,6 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                         "character_ids": [],
                         "object_ids": [],
                         "output": f"assets/scenes/scene{scene_id}_p400_filler_{filler_cut_id}.png",
-                        "review": {"triangulation_review": _preview_triangulation_review()},
                     },
                     "video_generation": {
                         "tool": "kling_3_0",
@@ -1112,7 +1076,6 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                         "output": f"assets/videos/scene{scene_id}_p400_filler_{filler_cut_id}.mp4",
                     },
                     "audio": {"narration": {"tool": "elevenlabs", "text": "場面が続く。", "output": f"assets/audio/scene{scene_id}_p400_filler_{filler_cut_id}.mp3"}},
-                    "review": {"triangulation_review": _preview_triangulation_review()},
                 }
             )
         render_units = scene.get("render_units")
@@ -1196,7 +1159,6 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                 previous_selector=previous_selector,
                 next_selector=next_selector,
             )
-            cut.setdefault("review", {})["triangulation_review"] = _preview_triangulation_review()
             contract = cut.get("scene_contract") if isinstance(cut.get("scene_contract"), dict) else {}
             prompt_terms = [str(contract.get("target_beat") or "request preview")]
             prompt_terms.extend(str(item) for item in contract.get("must_show", []) if str(item).strip())
@@ -1208,7 +1170,6 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                     + "、".join(prompt_terms)
                     + "、人物、場所、道具、背景、光、足元、空気感、衣装の布目、地面の質感、前景の小物、中景の人物、背景の奥行き、自然な影、実写映画のレンズ感が具体的に見える。"
                 )
-                image_generation.setdefault("review", {})["triangulation_review"] = _preview_triangulation_review()
             cut.setdefault("audio", {"narration": {"tool": "elevenlabs", "text": "場面が続く。"}})
             narration = cut.get("audio", {}).get("narration") if isinstance(cut.get("audio"), dict) else None
             request_ids = []
@@ -1283,7 +1244,6 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                     selectors=[str(item) for item in active_selectors],
                     cut_ids=[cut["cut_id"] for cut in script_cuts],
                 ),
-                "agent_review": {"status": "passed"},
                 "cuts": script_cuts,
             }
         )
@@ -1301,7 +1261,6 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
             selectors=[str(item) for item in active_selectors],
             cut_ids=[cut["cut_id"] for cut in script_cuts],
         )
-        scene["scene_composite_review"] = {"status": "passed", "scene_obligation_covered_by_cut_group": True, "no_duplicate_story_fact_without_new_evidence": True, "scene_meaning_visualized_across_cuts": True, "blocking_reason_keys": []}
 
     filler_scene_id = 900
     while total_duration < 300:
@@ -1320,11 +1279,9 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                         "character_ids": [],
                         "object_ids": [],
                         "output": f"assets/scenes/scene{filler_scene_id}_cut{cut_id}.png",
-                        "review": {"triangulation_review": _preview_triangulation_review()},
                     },
                     "video_generation": {"tool": "kling_3_0", "duration_seconds": 15, "motion_prompt": "人物が進む。", "output": f"assets/videos/scene{filler_scene_id}_cut{cut_id}.mp4"},
                     "audio": {"narration": {"tool": "elevenlabs", "text": "場面が続く。", "output": f"assets/audio/scene{filler_scene_id}_cut{cut_id}.mp3"}},
-                    "review": {"triangulation_review": _preview_triangulation_review()},
                 }
             )
             filler_cuts.append(
@@ -1377,7 +1334,6 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
                 "scene_character_state_timeline": filler_timeline,
                 "scene_film_coverage_plan": filler_film_coverage,
                 "scene_cut_coverage_plan": _preview_scene_cut_coverage_plan(filler_scene_id, len(filler_cuts), label="filler preview"),
-                "agent_review": {"status": "passed"},
                 "cuts": filler_cuts,
             }
         )
@@ -1390,7 +1346,6 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
         scenes[-1]["scene_character_state_timeline"] = filler_timeline
         scenes[-1]["scene_film_coverage_plan"] = filler_film_coverage
         scenes[-1]["scene_cut_coverage_plan"] = _preview_scene_cut_coverage_plan(filler_scene_id, len(manifest_cuts), label="filler preview")
-        scenes[-1]["scene_composite_review"] = {"status": "passed", "scene_obligation_covered_by_cut_group": True, "no_duplicate_story_fact_without_new_evidence": True, "scene_meaning_visualized_across_cuts": True, "blocking_reason_keys": []}
         filler_scene_id += 1
 
     canonical_event_coverage_matrix = _preview_canonical_event_coverage_matrix(
@@ -1415,9 +1370,6 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
             {
                 "evaluation_contract": {"target_arc": "development", "must_cover": ["request preview"], "must_avoid": []},
                 "canonical_event_coverage_matrix": canonical_event_coverage_matrix,
-                "scene_set_review": {"status": "approved"},
-                "scene_detail_review": {"status": "approved"},
-                "cut_blueprint_review": {"status": "approved"},
                 "scenes": script_scenes,
                 "script": {
                     "canonical_event_coverage_matrix": canonical_event_coverage_matrix,
@@ -1430,257 +1382,8 @@ def _make_p400_ready_for_request_preview(run_dir: Path) -> None:
         + "```\n",
         encoding="utf-8",
     )
-    for name in ("scene_set_review.md", "scene_detail_review.md", "cut_blueprint_review.md", "script_review.md"):
-        (run_dir / name).write_text("status: passed\n\nreview passed\n", encoding="utf-8")
-    (run_dir / "production_readiness_review.md").write_text("status: passed\n\nStructure: ok\nDuration: ok\nQuality: ok\nDesign Owner Patch Brief: ok\n", encoding="utf-8")
-    for stage in ("scene_set", "scene_detail", "cut_blueprint", "script", "production_readiness"):
-        round_dir = run_dir / "logs" / "eval" / stage / "round_01"
-        round_dir.mkdir(parents=True, exist_ok=True)
-        prompt_dir = round_dir / "prompts"
-        prompt_dir.mkdir(parents=True, exist_ok=True)
-        stage_focus = REVIEW_LOOP_CRITIC_FOCUS_BY_STAGE.get(stage, {})
-        for index in range(1, 6):
-            focus_name = stage_focus.get(index, ("", ""))[0]
-            focus_line = f"critic_focus: {focus_name}\n" if focus_name else ""
-            (round_dir / f"critic_{index}.md").write_text(f"{focus_line}status: passed\n\ncritic passed\n", encoding="utf-8")
-            (prompt_dir / f"critic_{index}.prompt.md").write_text(
-                f"Critic focus for this prompt:\n- role: {focus_name}\n" if focus_name else "generic critic\n",
-                encoding="utf-8",
-            )
-        patch = "## Design Owner Patch Brief" if stage == "production_readiness" else "## Generator Patch Brief"
-        scene_count_gate = ""
-        if stage == "scene_set":
-            scene_count_gate = (
-                "## Scene Count Gate\n"
-                "- maximal_meaningful_stop_condition: no additional independent scene remains\n"
-                "- next_scene_candidate: no additional independent scene candidate remains\n"
-                "- cut_thickening_reason: additional material repeats the same scene turn\n"
-                "- critic_1_scene_count_coverage_resolution: scene_count_coverage passed\n"
-                "## Scene Specificity Gate\n"
-                "- non_compressible_beat_inventory: approved story beats are inventoried\n"
-                "- scene_promotion_rule: every promoted scene has its own question, value shift, and causal turn\n"
-                "- unique_scene_responsibility: each scene owns a distinct story obligation\n"
-                "- actor_force_coverage: protagonist, opposing/helper, and witness forces are covered where story-relevant\n"
-                "- object_meaning_ladder: story objects and setpieces have staged meaning\n"
-                "- concrete_handoff_chain: handoff is visible or audible, not narration-only\n"
-                "- anti_template_language: banned generic placeholders are absent\n"
-                "## Reveal Order Gate\n"
-                "- reveal_order_preserved: approved reveal order is preserved\n"
-                "- withheld_information_preserved: future-only information remains withheld\n"
-                "- early_reveal_risk_resolved: no payoff evidence leaks early\n"
-                "## Handoff Chain Gate\n"
-                "- handoff_chain_coverage: each scene ending causes the next scene\n"
-                "- incoming_outgoing_anchor_ids: concrete anchor ids are present\n"
-                "- terminal_resolution_checked: final scene uses terminal_resolution\n"
-            )
-        elif stage == "scene_detail":
-            scene_count_gate = (
-                "## Scene Detail Gate\n"
-                "- scene_necessity: each scene owns a non-compressible beat\n"
-                "- internal_pressure: pressure escalates before the turn\n"
-                "- value_shift_visibility: value shift is visible\n"
-                "- causal_turn_visibility: causal turn is visible\n"
-                "- scene_event_sequence: authored event beats are present and assigned\n"
-                "- scene_generation_prompt_separation: scene prompt payload excludes downstream execution details\n"
-                "- scene_generation_debug_source: source beats and adaptation choices are recorded\n"
-                "- scene_generation_contract: required scene outputs are declared\n"
-                "- scene_character_state_timeline: start/mid/end visible behavior is present\n"
-                "- scene_film_coverage_plan: shot/action-reaction/missing coverage and required_when rules are present\n"
-                "- turning_event_alignment: turning_event matches scene_intent.causal_turn\n"
-                "- end_situation_alignment: end_situation matches scene_intent.value_shift.to\n"
-                "- neighbor_handoff: neighboring handoffs are checked\n"
-            )
-        elif stage_focus:
-            scene_count_gate = (
-                "## Cut Blueprint Gate\n"
-                "- cut_intent_isolation: passed\n"
-                "- scene_event_coverage: passed\n"
-                "- event_beat_reference_integrity: passed\n"
-                "- first_frame_motion_readiness: passed\n"
-                "- event_first_frame_alignment: passed\n"
-                "- multimodal_event_boundary_coverage: passed\n"
-                "- source_event_preservation: passed\n"
-                "- no_unapproved_event_invention: passed\n"
-                "- event_motion_boundary: passed\n"
-                "- event_narration_boundary: passed\n"
-                "- event_context_for_cut_ready: passed\n"
-                "- causal_proof_coverage: passed\n"
-                "- role_coverage: passed\n"
-                "- audience_knowledge_delta_coverage: passed\n"
-                "- anti_redundancy_gate: passed\n"
-                "- duration_density_and_handoff: passed\n"
-                "- coverage_plan_complete: passed\n"
-                "- continuity_contract_complete: passed\n"
-                "- character_emotion_continuity_complete: passed\n"
-                "- film_grammar_contract_complete: passed\n"
-                "- action_reaction_and_eyeline_complete: passed\n"
-                "- narration_contract_complete: passed\n"
-                "- downstream_handoff_complete: passed\n"
-                "- triangulation_review_ready: passed\n"
-            )
-        (round_dir / "aggregated_review.md").write_text(
-            "status: passed\n\n## Blocking Findings\nnone\n## Recommended Changes\nnone\n## Rejected Suggestions\nnone\n"
-            + scene_count_gate
-            + patch
-            + "\nnone\n## Round Summary\npassed\n",
-            encoding="utf-8",
-        )
-    with (run_dir / "state.txt").open("a", encoding="utf-8") as f:
-        f.write("eval.p400_readiness.status=approved\n---\n")
-
 
 class TestRequestPreviewPrompt(unittest.TestCase):
-    def test_cli_provider_dispatch_gate_rejects_blocking_video_quality_issues(self) -> None:
-        payload = {
-            "quality_issues": [
-                {
-                    "code": "video_motion_generated_fallback",
-                    "blocking": True,
-                }
-            ],
-            "video_prompt_ir": {
-                "quality_issues": [
-                    {
-                        "code": "video_motion_generated_fallback",
-                        "blocking": True,
-                    },
-                    {
-                        "code": "video_motion_unresolved_alternative",
-                        "blocking": True,
-                    },
-                    {
-                        "code": "   ",
-                        "blocking": True,
-                    },
-                ]
-            },
-        }
-
-        self.assertEqual(
-            MODULE._blocking_video_prompt_quality_issue_codes(payload),
-            [
-                "video_motion_generated_fallback",
-                "video_motion_unresolved_alternative",
-                "video_motion_blocking_quality_issue",
-            ],
-        )
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            r"scene2_unit1.*video_motion_generated_fallback.*video_motion_unresolved_alternative.*video_motion_blocking_quality_issue",
-        ):
-            MODULE._assert_video_prompt_quality_allows_provider_execution(
-                selector="scene2_unit1",
-                payload=payload,
-            )
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            r"scene2_unit1.*video_motion_generated_fallback.*video_motion_unresolved_alternative.*video_motion_blocking_quality_issue",
-        ):
-            MODULE._dispatch_reviewed_video_provider_call(
-                selector="scene2_unit1",
-                tool="kling_3_0",
-                api_prompt_payload=payload,
-                prompt="",
-                negative_prompt="",
-                input_image=None,
-                last_frame_image=None,
-                reference_images=[],
-                out_path=Path("unused.mp4"),
-                log_dir=Path("unused-logs"),
-                poll_every=0.1,
-                timeout_seconds=1.0,
-                force=False,
-                dry_run=True,
-                gemini_client=None,
-                kling_client=None,
-                evolink_client=None,
-                seedance_client=None,
-            )
-
-    def test_cli_materialization_keeps_blocking_video_quality_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            run_dir = Path(tmp)
-            manifest_path = run_dir / "video_manifest.md"
-            manifest_path.write_text(
-                """# Manifest
-
-```yaml
-video_metadata:
-  topic: blocking quality evidence
-scenes:
-  - scene_id: 1
-    cuts:
-      - cut_id: 1
-        video_generation:
-          tool: kling_3_0
-          motion_prompt: sceneの変化点を見せる
-          output: assets/videos/scene1_cut1.mp4
-```
-""",
-                encoding="utf-8",
-            )
-            _make_p400_ready_for_request_preview(run_dir)
-            ready_text = manifest_path.read_text(encoding="utf-8")
-            ready_manifest = MODULE.yaml.safe_load(
-                MODULE.extract_yaml_block(ready_text)
-            )
-            ready_manifest["scenes"][0]["cuts"][0]["cut_contract"][
-                "motion_contract"
-            ]["motion_brief"] = "sceneの変化点を見せる"
-            MODULE._write_manifest_yaml_atomic(
-                manifest_path=manifest_path,
-                original_text=ready_text,
-                manifest=ready_manifest,
-            )
-            common_argv = [
-                str(SCRIPT_PATH),
-                "--manifest",
-                str(manifest_path),
-                "--skip-images",
-                "--skip-audio",
-                "--skip-image-prompt-review",
-                "--dry-run",
-                "--kling-api-key",
-                "test-api-key",
-            ]
-
-            with patch.object(MODULE, "load_env_files"), patch.object(
-                sys,
-                "argv",
-                [*common_argv, "--materialize-request-files-only"],
-            ):
-                MODULE.main()
-
-            manifest = MODULE.yaml.safe_load(
-                MODULE.extract_yaml_block(manifest_path.read_text(encoding="utf-8"))
-            )
-            payload = manifest["scenes"][0]["cuts"][0]["video_generation"][
-                "api_prompt_payload"
-            ]
-            self.assertIn(
-                "video_motion_abstract_primary",
-                MODULE._blocking_video_prompt_quality_issue_codes(payload),
-            )
-            request_path = run_dir / "video_generation_requests.md"
-            _approve_video_request_entries(
-                request_path,
-                [{"selector": "scene1_cut1", "api_prompt_payload": payload}],
-            )
-
-            with patch.object(MODULE, "load_env_files"), patch.object(
-                MODULE,
-                "_dispatch_reviewed_video_provider_call",
-            ) as dispatch, patch.object(sys, "argv", common_argv):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    r"scene1_cut1.*video_motion_abstract_primary",
-                ):
-                    MODULE.main()
-
-            dispatch.assert_not_called()
-
     def test_image_tool_aliases_normalize_to_codex_builtin_image(self) -> None:
         for tool in [
             "google_nanobanana_2",
@@ -1693,159 +1396,6 @@ scenes:
         ]:
             with self.subTest(tool=tool):
                 self.assertEqual(MODULE.normalize_tool_name(tool), "codex_builtin_image")
-
-    def test_generation_requires_p400_readiness_by_default(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            manifest_path = tmp_path / "video_manifest.md"
-            manifest_path.write_text(
-                """# Manifest
-
-```yaml
-manifest_phase: production
-video_metadata:
-  topic: "かぐや姫"
-scenes:
-  - scene_id: 1
-    cuts:
-      - cut_id: 1
-        image_generation:
-          tool: "codex_builtin_image"
-          prompt: "画面内テキストなし。竹林の朝、光る竹、人物、足元の霧が見える。"
-          output: "assets/scenes/scene01_1.png"
-        video_generation:
-          tool: "kling_3_0"
-          duration_seconds: 4
-          output: "assets/videos/scene01_1.mp4"
-        audio:
-          narration:
-            tool: "silent"
-            text: ""
-            tts_text: ""
-            silence_contract:
-              intentional: true
-              kind: "visual_value_hold"
-              confirmed_by_human: true
-              reason: "draft"
-            output: "assets/audio/scene01_1.mp3"
-```
-""",
-                encoding="utf-8",
-            )
-
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(SCRIPT_PATH),
-                    "--manifest",
-                    str(manifest_path),
-                    "--materialize-request-files-only",
-                    "--skip-image-prompt-review",
-                    "--skip-narration-review",
-                ],
-                cwd=REPO_ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("p400 readiness gate is not approved", result.stderr)
-            self.assertFalse((tmp_path / "image_generation_requests.md").exists())
-            self.assertFalse((tmp_path / "video_generation_requests.md").exists())
-
-    def test_p400_readiness_override_is_read_only_diagnostic_only(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            manifest_path = tmp_path / "video_manifest.md"
-            manifest_path.write_text(
-                """# Manifest
-
-```yaml
-manifest_phase: production
-video_metadata:
-  topic: "かぐや姫"
-scenes:
-  - scene_id: 1
-    cuts:
-      - cut_id: 1
-        image_generation:
-          tool: "codex_builtin_image"
-          prompt: "画面内テキストなし。竹林の朝、光る竹、人物、足元の霧が見える。"
-          output: "assets/scenes/scene01_1.png"
-        video_generation:
-          tool: "kling_3_0"
-          duration_seconds: 4
-          output: "assets/videos/scene01_1.mp4"
-        audio:
-          narration:
-            tool: "silent"
-            text: ""
-            tts_text: ""
-            silence_contract:
-              intentional: true
-              kind: "visual_value_hold"
-              confirmed_by_human: true
-              reason: "draft"
-            output: "assets/audio/scene01_1.mp3"
-```
-""",
-                encoding="utf-8",
-            )
-
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    str(SCRIPT_PATH),
-                    "--manifest",
-                    str(manifest_path),
-                    "--ignore-p400-readiness-gate",
-                    "--dry-run",
-                    "--skip-images",
-                    "--skip-videos",
-                    "--skip-audio",
-                    "--skip-image-prompt-review",
-                    "--skip-narration-review",
-                ],
-                cwd=REPO_ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-            self.assertIn("readiness override diagnostic only", result.stdout)
-            self.assertFalse((tmp_path / "image_generation_requests.md").exists())
-            self.assertFalse((tmp_path / "asset_generation_requests.md").exists())
-            self.assertFalse((tmp_path / "video_generation_requests.md").exists())
-            self.assertFalse((tmp_path / "generation_exclusion_report.md").exists())
-
-            materialize_result = subprocess.run(
-                [
-                    sys.executable,
-                    str(SCRIPT_PATH),
-                    "--manifest",
-                    str(manifest_path),
-                    "--ignore-p400-readiness-gate",
-                    "--dry-run",
-                    "--skip-images",
-                    "--skip-videos",
-                    "--skip-audio",
-                    "--materialize-request-files-only",
-                    "--skip-image-prompt-review",
-                    "--skip-narration-review",
-                ],
-                cwd=REPO_ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-
-            self.assertNotEqual(materialize_result.returncode, 0)
-            self.assertIn("read-only diagnostics", materialize_result.stderr)
-            self.assertFalse((tmp_path / "image_generation_requests.md").exists())
-            self.assertFalse((tmp_path / "video_generation_requests.md").exists())
-            self.assertFalse((tmp_path / "generation_exclusion_report.md").exists())
 
     def test_skeleton_manifest_does_not_materialize_scene_or_video_request_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1898,8 +1448,6 @@ scenes:
                     "--skip-images",
                     "--skip-videos",
                     "--dry-run",
-                    "--skip-image-prompt-review",
-                    "--skip-narration-review",
                 ],
                 check=False,
                 cwd=REPO_ROOT,
@@ -1907,13 +1455,12 @@ scenes:
                 text=True,
             )
 
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("p400 readiness gate is not approved", result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse((tmp_path / "image_generation_requests.md").exists())
             self.assertFalse((tmp_path / "video_generation_requests.md").exists())
             self.assertFalse((tmp_path / "generation_exclusion_report.md").exists())
 
-    def test_skeleton_manifest_fails_before_scene_review_can_mutate_manifest(self) -> None:
+    def test_skeleton_manifest_fails_before_materialization_can_mutate_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             manifest_path = tmp_path / "video_manifest.md"
@@ -1956,8 +1503,6 @@ scenes:
                     str(manifest_path),
                     "--skip-videos",
                     "--dry-run",
-                    "--image-prompt-review-fix-character-ids",
-                    "--skip-narration-review",
                 ],
                 cwd=REPO_ROOT,
                 capture_output=True,
@@ -1966,7 +1511,7 @@ scenes:
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("p400 readiness gate is not approved", result.stderr + result.stdout)
+            self.assertIn("Manifest is still in skeleton phase", result.stderr + result.stdout)
             self.assertEqual(manifest_path.read_text(encoding="utf-8"), original_manifest)
 
     def test_rewrites_stateful_character_asset_wording(self) -> None:
@@ -1979,7 +1524,7 @@ scenes:
 [連続性]
 後続sceneでも顔立ち、髪型、衣装の形、体格比率を変えないための基準画像にする。
 """
-        rewritten = MODULE._rewrite_request_prompt_for_review(
+        rewritten = MODULE._rewrite_request_prompt(
             prompt=prompt,
             output="assets/characters/urashima.png",
             references=[],
@@ -2000,7 +1545,7 @@ scenes:
 [小道具 / 舞台装置]
 連続性アンカー: 海亀の甲羅の模様、朝の光の方向、波の質感。
 """
-        rewritten = MODULE._rewrite_request_prompt_for_review(
+        rewritten = MODULE._rewrite_request_prompt(
             prompt=prompt,
             output="assets/scenes/scene01_cut01.png",
             references=["assets/characters/urashima.png", "assets/characters/turtle.png"],
@@ -2023,7 +1568,7 @@ scenes:
 [連続性]
 scene10 の灰の台所と同じ床。
 """
-        rewritten = MODULE._rewrite_request_prompt_for_review(
+        rewritten = MODULE._rewrite_request_prompt(
             prompt=prompt,
             output="assets/scenes/scene10_ash_kitchen.png",
             references=[],
@@ -2042,7 +1587,7 @@ scene10 の灰の台所と同じ床。
 [シーン]
 灰の残る古い台所で、シンデレラが暖炉の灰を掃いている。
 """
-        rewritten = MODULE._rewrite_request_prompt_for_review(
+        rewritten = MODULE._rewrite_request_prompt(
             prompt=prompt,
             output="assets/scenes/scene10_ash_kitchen.png",
             references=[],
@@ -2056,7 +1601,7 @@ scene10 の灰の台所と同じ床。
         prompt = """[シーン]
 この画像は動画の最初の1フレームとして使う。王宮階段の手前にガラスの靴があり、奥で王子が手を伸ばす直前。
 """
-        rewritten = MODULE._rewrite_request_prompt_for_review(
+        rewritten = MODULE._rewrite_request_prompt(
             prompt=prompt,
             output="assets/scenes/scene50_cut01.png",
             references=[],
@@ -2070,7 +1615,7 @@ scene10 の灰の台所と同じ床。
         prompt = """[連続性]
 この cut 単体で、太郎が宴の最中に故郷を思い出しはじめたと分かるようにする。次の cut で太郎が帰りたいと言い出しても不自然にならない感情の橋渡しにする。
 """
-        rewritten = MODULE._rewrite_request_prompt_for_review(
+        rewritten = MODULE._rewrite_request_prompt(
             prompt=prompt,
             output="assets/scenes/scene08_cut01.png",
             references=["assets/characters/urashima.png"],
@@ -2090,7 +1635,7 @@ scene10 の灰の台所と同じ床。
 [禁止]
 文字なし。
 """
-        rewritten = MODULE._rewrite_request_prompt_for_review(
+        rewritten = MODULE._rewrite_request_prompt(
             prompt=prompt,
             output="assets/scenes/scene03_7_cut01.png",
             references=[],
@@ -2103,7 +1648,7 @@ scene10 の灰の台所と同じ床。
         prompt = """[参照画像の使い方]
 `assets/characters/urashima.png` は顔立ちの基準として使う。`assets/characters/urashima_refstrip.png` は側面確認に使う。`assets/locations/banquet_hall_main.png` は空間構成の基準として使う。
 """
-        rewritten = MODULE._rewrite_request_prompt_for_review(
+        rewritten = MODULE._rewrite_request_prompt(
             prompt=prompt,
             output="assets/scenes/scene07_cut01.png",
             references=[
@@ -2172,7 +1717,6 @@ scenes:
                     str(manifest_path),
                     "--materialize-request-files-only",
                     "--skip-audio",
-                    "--skip-image-prompt-review",
                 ],
                 check=True,
                 cwd=REPO_ROOT,
@@ -2269,10 +1813,6 @@ scenes:
         self.assertNotIn("[小道具 / 舞台装置]", api_prompt)
         self.assertNotIn("shot_role:", api_prompt)
         self.assertNotIn("shot_scale:", api_prompt)
-        self.assertTrue(api_payload["shot_design_contract"]["shot_role"])
-        self.assertTrue(api_payload["shot_design_contract"]["shot_scale"])
-        if api_payload["shot_design_contract"]["shot_role"] in {"insert", "object_proof"}:
-            self.assertTrue(api_payload["shot_design_contract"]["should_show_object_detail"])
         self.assertNotIn("should_show_object_detail:", api_prompt)
         self.assertNotIn("location_zone:", api_prompt)
         self.assertNotIn("this_cut_delta:", api_prompt)
@@ -2316,14 +1856,12 @@ scenes:
             video_payload["video_prompt_ir"]["schema_version"],
             "video_prompt_ir_v2",
         )
-        review_only_sources = {
+        excluded_sources = {
             item["source_key"]: item["value"]
-            for item in video_payload["projection_review_contract"][
-                "review_only_sources"
-            ]
+            for item in video_payload["projection_contract"]["excluded_sources"]
         }
         self.assertEqual(
-            review_only_sources["scene.visualizable_action"],
+            excluded_sources["scene.visualizable_action"],
             "scene全体で王子が落とし主を探して宮殿へ向かう",
         )
         self.assertNotIn(
@@ -2538,7 +2076,6 @@ scenes:
                     str(manifest_path),
                     "--materialize-request-files-only",
                     "--skip-audio",
-                    "--skip-image-prompt-review",
                 ],
                 check=True,
                 cwd=REPO_ROOT,
@@ -2571,8 +2108,6 @@ scenes:
         creation_status: "planned"
         generation_plan:
           required_views: ["front", "side", "back"]
-        review:
-          status: "pending"
         image_generation:
           tool: "codex_builtin_image"
           execution_lane: "bootstrap_builtin"
@@ -2596,7 +2131,6 @@ scenes:
                     str(manifest_path),
                     "--materialize-request-files-only",
                     "--skip-audio",
-                    "--skip-image-prompt-review",
                 ],
                 check=True,
                 cwd=REPO_ROOT,
@@ -2609,7 +2143,6 @@ scenes:
             self.assertIn("- asset_type: `character_reference`", request_text)
             self.assertIn("- execution_lane: `bootstrap_builtin`", request_text)
             self.assertIn("- reference_count: `0`", request_text)
-            self.assertIn("- review_status: `pending`", request_text)
             self.assertIn("- creation_status: `planned`", request_text)
             self.assertIn("- authoring_role: `reusable_asset_candidate`", request_text)
             self.assertIn("prompt本文には物語タイトルやscene idを書かず", request_text)
@@ -2672,7 +2205,6 @@ scenes:
                     "--materialize-request-files-only",
                     "--skip-videos",
                     "--skip-audio",
-                    "--skip-image-prompt-review",
                 ],
                 check=True,
                 cwd=REPO_ROOT,
@@ -3032,7 +2564,6 @@ scenes:
                     str(manifest_path),
                     "--materialize-request-files-only",
                     "--skip-audio",
-                    "--skip-image-prompt-review",
                 ],
                 check=True,
                 cwd=REPO_ROOT,
@@ -3085,7 +2616,6 @@ scenes:
                     "--dry-run",
                     "--skip-audio",
                     "--skip-videos",
-                    "--skip-image-prompt-review",
                 ],
                 cwd=REPO_ROOT,
                 capture_output=True,
@@ -3145,7 +2675,6 @@ scenes:
                     str(manifest_path),
                     "--materialize-request-files-only",
                     "--skip-audio",
-                    "--skip-image-prompt-review",
                 ],
                 check=True,
                 cwd=REPO_ROOT,
@@ -3306,7 +2835,6 @@ scenes:
                     str(manifest_path),
                     "--materialize-request-files-only",
                     "--skip-audio",
-                    "--skip-image-prompt-review",
                 ],
                 check=True,
                 cwd=REPO_ROOT,
@@ -3375,7 +2903,6 @@ scenes:
                     str(manifest_path),
                     "--materialize-request-files-only",
                     "--skip-audio",
-                    "--skip-image-prompt-review",
                 ],
                 check=True,
                 cwd=REPO_ROOT,
@@ -3477,7 +3004,6 @@ scenes:
                     str(manifest_path),
                     "--materialize-request-files-only",
                     "--skip-audio",
-                    "--skip-image-prompt-review",
                 ],
                 check=True,
                 cwd=REPO_ROOT,
@@ -3551,7 +3077,6 @@ scenes:
                     str(manifest_path),
                     "--materialize-request-files-only",
                     "--skip-audio",
-                    "--skip-image-prompt-review",
                     "--dry-run",
                     "--enable-last-frame",
                     "--video-negative-prompt",
@@ -3564,21 +3089,13 @@ scenes:
             request_text = (tmp_path / "video_generation_requests.md").read_text(
                 encoding="utf-8"
             )
-            reviewed = MODULE._parse_video_request_artifact(request_text)
-            state = MODULE.parse_state_file(tmp_path / "state.txt")
+            materialized = MODULE._parse_video_request_artifact(request_text)
             persisted_manifest = MODULE.yaml.safe_load(
                 MODULE.extract_yaml_block(manifest_path.read_text(encoding="utf-8"))
             )
             persisted_payload = persisted_manifest["scenes"][0]["cuts"][0][
                 "video_generation"
             ]["api_prompt_payload"]
-            MODULE.append_state_snapshot(
-                tmp_path / "state.txt",
-                {
-                    f"{MODULE._video_prompt_approval_state_prefix(selector)}.status": "approved"
-                    for selector in reviewed
-                },
-            )
             runtime_completed = subprocess.run(
                 [
                     sys.executable,
@@ -3588,7 +3105,6 @@ scenes:
                     "--dry-run",
                     "--skip-images",
                     "--skip-audio",
-                    "--skip-image-prompt-review",
                     "--enable-last-frame",
                     "--video-negative-prompt",
                     "霧を追加しない",
@@ -3600,24 +3116,24 @@ scenes:
             )
 
         self.assertEqual(
-            reviewed["scene1_cut2"]["first_frame"],
+            materialized["scene1_cut2"]["first_frame"],
             "assets/scenes/scene01_cut02.png",
         )
         self.assertEqual(
-            reviewed["scene1_cut2"]["last_frame"],
+            materialized["scene1_cut2"]["last_frame"],
             "assets/scenes/scene01_cut02_end.png",
         )
-        self.assertNotIn("旧コンパイル済み本文", reviewed["scene1_cut1"]["prompt"])
-        self.assertIn("霧を追加しない", reviewed["scene1_cut1"]["prompt"])
-        self.assertEqual(reviewed["scene1_cut1"]["negative_prompt"], "")
-        self.assertIn("霧を追加しない", reviewed["scene1_cut2"]["negative_prompt"])
+        self.assertNotIn("旧コンパイル済み本文", materialized["scene1_cut1"]["prompt"])
+        self.assertIn("霧を追加しない", materialized["scene1_cut1"]["prompt"])
+        self.assertEqual(materialized["scene1_cut1"]["negative_prompt"], "")
+        self.assertIn("霧を追加しない", materialized["scene1_cut2"]["negative_prompt"])
         self.assertIn("assets/characters/hero_refstrip.png", request_text)
         self.assertIn("assets/locations/home.png", request_text)
         self.assertNotIn("- `人物参照画像1`: `assets/characters/hero.png`", request_text)
-        self.assertEqual(reviewed["scene1_cut1"]["quality"], "720p")
-        self.assertEqual(reviewed["scene1_cut1"]["resolution"], "720p")
-        self.assertEqual(reviewed["scene1_cut1"]["aspect_ratio"], "4:3")
-        self.assertEqual(persisted_payload["prompt"], reviewed["scene1_cut1"]["prompt"])
+        self.assertEqual(materialized["scene1_cut1"]["quality"], "720p")
+        self.assertEqual(materialized["scene1_cut1"]["resolution"], "720p")
+        self.assertEqual(materialized["scene1_cut1"]["aspect_ratio"], "4:3")
+        self.assertEqual(persisted_payload["prompt"], materialized["scene1_cut1"]["prompt"])
         content_hashes = persisted_payload["provider_request_binding"][
             "execution_options"
         ]["reference_content_sha256"]
@@ -3625,13 +3141,6 @@ scenes:
             content_hashes["assets/characters/hero_refstrip.png"],
             hashlib.sha256(b"hero-strip-v1").hexdigest(),
         )
-        prefix = MODULE._video_prompt_approval_state_prefix("scene1_cut1")
-        self.assertEqual(state[f"{prefix}.status"], "pending")
-        self.assertEqual(
-            state[f"{prefix}.request_section_sha256"],
-            reviewed["scene1_cut1"]["request_section_sha256"],
-        )
-        self.assertEqual(state[f"{prefix}.prompt_sha256"], persisted_payload["sha256"])
         self.assertEqual(
             runtime_completed.returncode,
             0,
@@ -3645,7 +3154,7 @@ scenes:
                 "load_env_files",
             ), patch.object(
                 MODULE,
-                "_dispatch_reviewed_video_provider_call",
+                "_dispatch_video_provider_call",
             ) as dispatch, patch.object(
                 sys,
                 "argv",
@@ -3659,7 +3168,7 @@ scenes:
             ):
                 with self.assertRaisesRegex(
                     SystemExit,
-                    "deprecated and unsupported.*rematerialize and approve",
+                    "deprecated and unsupported.*rematerialize the next video request",
                 ):
                     MODULE.main()
                 dispatch.assert_not_called()
@@ -3700,26 +3209,25 @@ scenes:
                     str(manifest_path),
                     "--materialize-request-files-only",
                     "--skip-audio",
-                    "--skip-image-prompt-review",
                 ],
                 check=True,
                 cwd=REPO_ROOT,
             )
-            reviewed = MODULE._parse_video_request_artifact(
+            materialized = MODULE._parse_video_request_artifact(
                 (tmp_path / "video_generation_requests.md").read_text(
                     encoding="utf-8"
                 )
             )
 
-        self.assertEqual(reviewed["scene1_cut1"]["last_frame"], "")
+        self.assertEqual(materialized["scene1_cut1"]["last_frame"], "")
 
-    def test_evolink_extra_payload_cannot_override_reviewed_video_fields(self) -> None:
-        with self.assertRaisesRegex(ValueError, "protected reviewed fields"):
+    def test_evolink_extra_payload_cannot_override_bound_video_fields(self) -> None:
+        with self.assertRaisesRegex(ValueError, "protected (?:reviewed )?fields"):
             MODULE._validate_evolink_video_extra_payload(
-                {"prompt": "unreviewed", "sound": True}
+                {"prompt": "override", "sound": True}
             )
 
-    def test_video_request_artifact_round_trips_the_exact_reviewed_provider_prompt(self) -> None:
+    def test_video_request_artifact_round_trips_the_exact_materialized_provider_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             request_path = Path(tmp) / "video_generation_requests.md"
             prompt = "[主動作]\n主人公が扉へ一歩進む。\n\n[禁止]\n単一の連続ショット。"
@@ -3749,32 +3257,19 @@ scenes:
                 title="Video Generation Requests",
                 entries=[entry],
             )
-            MODULE.append_state_snapshot(
-                request_path.parent / "state.txt",
-                MODULE._video_prompt_pending_state_updates(
-                    request_path=request_path,
-                    entries=[entry],
-                ),
-            )
-            with self.assertRaisesRegex(SystemExit, "approval_status"):
-                MODULE._validated_video_prompts_from_review_artifact(
-                    request_path=request_path,
-                    entries=[entry],
-                )
-            _approve_video_request_entries(request_path, [entry])
-            reviewed = MODULE._validated_video_prompts_from_review_artifact(
+            materialized = MODULE._validated_video_prompts_from_request_artifact(
                 request_path=request_path,
                 entries=[entry],
             )
             request_text = request_path.read_text(encoding="utf-8")
 
-        self.assertEqual(reviewed, {"scene3_cut1": prompt})
+        self.assertEqual(materialized, {"scene3_cut1": prompt})
         self.assertIn("```video_prompt", request_text)
         self.assertIn("- compiler_version: `conditional_video_prompt_compiler_v1`", request_text)
         self.assertIn("- source_digest: `" + "a" * 64 + "`", request_text)
         self.assertIn(f"- prompt_sha256: `{prompt_sha256}`", request_text)
 
-    def test_video_request_artifact_rejects_source_drift_without_rewriting_reviewed_file(self) -> None:
+    def test_video_request_artifact_rejects_source_drift_without_rewriting_materialized_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             request_path = Path(tmp) / "video_generation_requests.md"
             prompt = "[主動作]\n主人公が扉へ一歩進む。"
@@ -3803,19 +3298,18 @@ scenes:
                 title="Video Generation Requests",
                 entries=[entry],
             )
-            _approve_video_request_entries(request_path, [entry])
-            reviewed_text = request_path.read_text(encoding="utf-8")
+            materialized_text = request_path.read_text(encoding="utf-8")
             stale_entry = json.loads(json.dumps(entry, ensure_ascii=False))
             stale_entry["api_prompt_payload"]["source_digest"] = "b" * 64
 
             with self.assertRaises(SystemExit) as ctx:
-                MODULE._validated_video_prompts_from_review_artifact(
+                MODULE._validated_video_prompts_from_request_artifact(
                     request_path=request_path,
                     entries=[stale_entry],
                 )
 
             self.assertIn("stale", str(ctx.exception))
-            self.assertEqual(request_path.read_text(encoding="utf-8"), reviewed_text)
+            self.assertEqual(request_path.read_text(encoding="utf-8"), materialized_text)
 
     def test_video_request_artifact_rejects_reference_or_negative_prompt_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3848,23 +3342,22 @@ scenes:
                 title="Video Generation Requests",
                 entries=[entry],
             )
-            _approve_video_request_entries(request_path, [entry])
-            reviewed_text = request_path.read_text(encoding="utf-8")
+            materialized_text = request_path.read_text(encoding="utf-8")
 
             stale_references = json.loads(json.dumps(entry, ensure_ascii=False))
             stale_references["references"] = ["assets/characters/hero_alt.png"]
             with self.assertRaises(SystemExit):
-                MODULE._validated_video_prompts_from_review_artifact(
+                MODULE._validated_video_prompts_from_request_artifact(
                     request_path=request_path,
                     entries=[stale_references],
                 )
 
             request_path.write_text(
-                reviewed_text.replace(negative_prompt, "別のnegative prompt。"),
+                materialized_text.replace(negative_prompt, "別のnegative prompt。"),
                 encoding="utf-8",
             )
             with self.assertRaises(SystemExit):
-                MODULE._validated_video_prompts_from_review_artifact(
+                MODULE._validated_video_prompts_from_request_artifact(
                     request_path=request_path,
                     entries=[entry],
                 )
@@ -3896,7 +3389,7 @@ scenes:
                     materializing=False,
                 )
 
-    def test_video_provider_input_snapshot_freezes_approved_bytes_and_rejects_pre_copy_swap(self) -> None:
+    def test_video_provider_input_snapshot_freezes_bound_bytes_and_rejects_pre_copy_swap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base_dir = Path(tmp)
             binding = "assets/characters/hero.png"
@@ -3918,7 +3411,7 @@ scenes:
             }
 
             snapshot_dir, input_image, last_image, references = (
-                MODULE._snapshot_reviewed_video_reference_inputs(
+                MODULE._snapshot_video_reference_inputs(
                     base_dir=base_dir,
                     selector="scene1_cut1",
                     api_prompt_payload=payload,
@@ -3941,7 +3434,7 @@ scenes:
                 SystemExit,
                 "reference content changed before provider submission",
             ):
-                MODULE._snapshot_reviewed_video_reference_inputs(
+                MODULE._snapshot_video_reference_inputs(
                     base_dir=base_dir,
                     selector="scene1_cut1",
                     api_prompt_payload=payload,
@@ -3950,7 +3443,7 @@ scenes:
                     reference_images=[reference],
                 )
 
-    def test_main_dispatch_receives_private_approved_reference_bytes_and_cleans_snapshot(self) -> None:
+    def test_main_dispatch_receives_private_bound_reference_bytes_and_cleans_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
             manifest_path = run_dir / "video_manifest.md"
@@ -3987,7 +3480,6 @@ scenes:
                 "scene1_cut1",
                 "--skip-images",
                 "--skip-audio",
-                "--skip-image-prompt-review",
                 "--ark-seedance-i2v-model",
                 "seedance-1-0-lite-i2v-250428",
             ]
@@ -4009,11 +3501,6 @@ scenes:
             payload = persisted_manifest["scenes"][0]["cuts"][0][
                 "video_generation"
             ]["api_prompt_payload"]
-            _approve_video_request_entries(
-                request_path,
-                [{"selector": "scene1_cut1", "api_prompt_payload": payload}],
-            )
-
             captured_paths: list[Path] = []
 
             def fake_dispatch(**kwargs) -> None:
@@ -4028,7 +3515,7 @@ scenes:
 
             with patch.object(MODULE, "load_env_files"), patch.object(
                 MODULE,
-                "_dispatch_reviewed_video_provider_call",
+                "_dispatch_video_provider_call",
                 side_effect=fake_dispatch,
             ) as dispatch, patch.object(
                 sys,
@@ -4177,14 +3664,12 @@ scenes:
         )
 
         self.assertIn("新しく現れてよいものは、銀の鍵", payload["prompt"])
-        review_only_sources = {
+        excluded_sources = {
             item["source_key"]: item["value"]
-            for item in payload["projection_review_contract"][
-                "review_only_sources"
-            ]
+            for item in payload["projection_contract"]["excluded_sources"]
         }
         self.assertEqual(
-            review_only_sources["scene.visualizable_action"],
+            excluded_sources["scene.visualizable_action"],
             "scene全体で主人公が銀の鍵を得て屋敷を出る",
         )
         self.assertNotIn(
@@ -4330,7 +3815,7 @@ scenes:
         ):
             MODULE._video_contract_for_target(target)
 
-    def test_cut_video_duration_prefers_approved_render_then_generation_then_legacy(self) -> None:
+    def test_cut_video_duration_prefers_configured_render_then_generation_then_legacy(self) -> None:
         yaml_text = """
 video_metadata:
   topic: test
@@ -4369,7 +3854,7 @@ scenes:
         self.assertEqual([scene.duration_seconds for scene in scenes], [12, 9, 6])
         self.assertEqual([target.duration_seconds for target in targets], [12, 9, 6])
 
-    def test_render_unit_duration_is_inferred_from_approved_source_cut_total(self) -> None:
+    def test_render_unit_duration_is_inferred_from_source_cut_total(self) -> None:
         yaml_text = """
 video_metadata:
   topic: test
@@ -4892,7 +4377,7 @@ scenes:
                         scenes=invalid_scenes,
                     )
 
-    def test_reviewed_video_provider_dispatch_uses_bound_per_item_settings(self) -> None:
+    def test_video_provider_dispatch_uses_bound_per_item_settings(self) -> None:
         common = {
             "prompt": "承認済みの動画プロンプト",
             "negative_prompt": "新しい人物を追加しない",
@@ -4937,12 +4422,12 @@ scenes:
             }
 
         with patch.object(MODULE, "generate_kling_video") as generate:
-            MODULE._dispatch_reviewed_video_provider_call(
+            MODULE._dispatch_video_provider_call(
                 selector="scene1_cut1",
                 tool="kling_3_0",
                 api_prompt_payload=payload(
                     backend="kling",
-                    model="reviewed-kling-model",
+                        model="bound-kling-model",
                     extra_payload={"cfg_scale": 0.4},
                 ),
                 **common,
@@ -4951,16 +4436,16 @@ scenes:
             self.assertEqual(kwargs["duration_seconds"], 8)
             self.assertEqual(kwargs["aspect_ratio"], "4:3")
             self.assertEqual(kwargs["resolution"], "720p")
-            self.assertEqual(kwargs["model"], "reviewed-kling-model")
+            self.assertEqual(kwargs["model"], "bound-kling-model")
             self.assertEqual(kwargs["extra_payload"], {"cfg_scale": 0.4})
 
         with patch.object(MODULE, "generate_evolink_video") as generate:
-            MODULE._dispatch_reviewed_video_provider_call(
+            MODULE._dispatch_video_provider_call(
                 selector="scene2_cut1",
                 tool="kling_3_0_omni",
                 api_prompt_payload=payload(
                     backend="evolink",
-                    model="reviewed-evolink-model",
+                        model="bound-evolink-model",
                     extra_payload={"sound": False},
                 ),
                 **common,
@@ -4968,16 +4453,16 @@ scenes:
             kwargs = generate.call_args.kwargs
             self.assertEqual(kwargs["aspect_ratio"], "4:3")
             self.assertEqual(kwargs["resolution"], "720p")
-            self.assertEqual(kwargs["model"], "reviewed-evolink-model")
+            self.assertEqual(kwargs["model"], "bound-evolink-model")
             self.assertEqual(kwargs["extra_payload"], {"sound": False})
 
         with patch.object(MODULE, "generate_seedance_video") as generate:
-            MODULE._dispatch_reviewed_video_provider_call(
+            MODULE._dispatch_video_provider_call(
                 selector="scene3_cut1",
                 tool="seedance",
                 api_prompt_payload=payload(
                     backend="ark",
-                    model="reviewed-seedance-model",
+                        model="bound-seedance-model",
                     extra_payload={"camera_fixed": True},
                     generate_audio=True,
                 ),
@@ -4986,27 +4471,27 @@ scenes:
             kwargs = generate.call_args.kwargs
             self.assertEqual(kwargs["aspect_ratio"], "4:3")
             self.assertEqual(kwargs["resolution"], "720p")
-            self.assertEqual(kwargs["model"], "reviewed-seedance-model")
+            self.assertEqual(kwargs["model"], "bound-seedance-model")
             self.assertEqual(kwargs["extra_payload"], {"camera_fixed": True})
             self.assertTrue(kwargs["generate_audio"])
             self.assertFalse(kwargs["watermark"])
 
         with patch.object(MODULE, "generate_veo_video") as generate:
-            MODULE._dispatch_reviewed_video_provider_call(
+            MODULE._dispatch_video_provider_call(
                 selector="scene4_cut1",
                 tool="google_veo_3_1",
                 api_prompt_payload=payload(
                     backend="gemini",
-                    model="reviewed-veo-model",
+                    model="bound-veo-model",
                 ),
                 **common,
             )
             kwargs = generate.call_args.kwargs
             self.assertEqual(kwargs["aspect_ratio"], "4:3")
             self.assertEqual(kwargs["resolution"], "720p")
-            self.assertEqual(kwargs["model"], "reviewed-veo-model")
+            self.assertEqual(kwargs["model"], "bound-veo-model")
 
-    def test_reviewed_kling_video_reuse_requires_exact_request_and_output_provenance(self) -> None:
+    def test_kling_video_reuse_requires_exact_request_and_output_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
             out_path = run_dir / "assets/videos/scene1_cut1.mp4"
@@ -5016,7 +4501,7 @@ scenes:
             def generate(**kwargs) -> None:
                 calls.append(kwargs)
                 kwargs["out_path"].parent.mkdir(parents=True, exist_ok=True)
-                kwargs["out_path"].write_bytes(b"approved-kling-video")
+                kwargs["out_path"].write_bytes(b"bound-kling-video")
                 kwargs["log_path"].parent.mkdir(parents=True, exist_ok=True)
                 kwargs["log_path"].write_text(
                     json.dumps(
@@ -5068,23 +4553,23 @@ scenes:
             }
 
             with patch.object(MODULE, "generate_kling_video", side_effect=generate):
-                MODULE._dispatch_reviewed_video_provider_call(**common)
-                MODULE._dispatch_reviewed_video_provider_call(**common)
+                MODULE._dispatch_video_provider_call(**common)
+                MODULE._dispatch_video_provider_call(**common)
                 sidecar_path = out_path.with_name(out_path.name + ".provenance.json")
                 sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
                 with self.assertRaisesRegex(
                     SystemExit,
-                    "existing video output provenance does not match the approved request",
+                    "existing video output provenance does not match (?:the )?(?:approved )?request",
                 ):
-                    MODULE._dispatch_reviewed_video_provider_call(
+                    MODULE._dispatch_video_provider_call(
                         **{**common, "prompt": "承認済みプロンプトB"}
                     )
                 sidecar_path.unlink()
                 with self.assertRaisesRegex(
                     SystemExit,
-                    "existing video output provenance does not match the approved request",
+                    "existing video output provenance does not match (?:the )?(?:approved )?request",
                 ):
-                    MODULE._dispatch_reviewed_video_provider_call(**common)
+                    MODULE._dispatch_video_provider_call(**common)
 
             self.assertEqual(len(calls), 1)
             self.assertEqual(sidecar["schema_version"], "video_output_provenance_v1")
@@ -5093,7 +4578,7 @@ scenes:
             )
             self.assertEqual(sidecar["provider_job"]["job_id"], "kling-task-1")
 
-    def test_reviewed_seedance_video_reuse_rejects_changed_output_bytes(self) -> None:
+    def test_seedance_video_reuse_rejects_changed_output_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
             out_path = run_dir / "assets/videos/scene2_cut1.mp4"
@@ -5103,7 +4588,7 @@ scenes:
             def generate(**kwargs) -> None:
                 calls.append(kwargs)
                 kwargs["out_path"].parent.mkdir(parents=True, exist_ok=True)
-                kwargs["out_path"].write_bytes(b"approved-seedance-video")
+                kwargs["out_path"].write_bytes(b"bound-seedance-video")
                 kwargs["log_path"].parent.mkdir(parents=True, exist_ok=True)
                 kwargs["log_path"].write_text(
                     json.dumps(
@@ -5157,14 +4642,14 @@ scenes:
             }
 
             with patch.object(MODULE, "generate_seedance_video", side_effect=generate):
-                MODULE._dispatch_reviewed_video_provider_call(**common)
-                MODULE._dispatch_reviewed_video_provider_call(**common)
+                MODULE._dispatch_video_provider_call(**common)
+                MODULE._dispatch_video_provider_call(**common)
                 out_path.write_bytes(b"tampered-video")
                 with self.assertRaisesRegex(
                     SystemExit,
-                    "existing video output provenance does not match the approved request",
+                    "existing video output provenance does not match (?:the )?(?:approved )?request",
                 ):
-                    MODULE._dispatch_reviewed_video_provider_call(**common)
+                    MODULE._dispatch_video_provider_call(**common)
 
             self.assertEqual(len(calls), 1)
 
@@ -5223,7 +4708,7 @@ scenes:
                 SystemExit,
                 "must be a run-relative path confined to the manifest directory",
             ):
-                MODULE._snapshot_reviewed_video_reference_inputs(
+                MODULE._snapshot_video_reference_inputs(
                     base_dir=run_dir,
                     selector="scene1_cut1",
                     api_prompt_payload=payload,
@@ -5273,7 +4758,7 @@ scenes:
             MODULE.generate_seedance_video(
                 client=FakeSeedanceClient(),
                 model="seedance-test",
-                prompt="reviewed prompt",
+                prompt="materialized prompt",
                 duration_seconds=4,
                 aspect_ratio="16:9",
                 resolution="720p",
@@ -5376,14 +4861,14 @@ scenes:
             video_references=["assets/characters/hero.png"],
         )
         args = MODULE.argparse.Namespace(
-            ark_seedance_i2v_model="reviewed-reference-model",
+            ark_seedance_i2v_model="bound-reference-model",
             ark_seedance_t2v_model="text-only-model",
             ark_generate_audio=False,
         )
         with patch.object(image_gen_app, "load_env_files"), patch.dict(
             os.environ,
             {
-                "ARK_SEEDANCE_I2V_MODEL": "reviewed-reference-model",
+                "ARK_SEEDANCE_I2V_MODEL": "bound-reference-model",
                 "ARK_SEEDANCE_T2V_MODEL": "text-only-model",
             },
             clear=True,
@@ -5405,7 +4890,7 @@ scenes:
             )
 
         self.assertEqual(actual, expected)
-        self.assertEqual(actual["model"], "reviewed-reference-model")
+        self.assertEqual(actual["model"], "bound-reference-model")
 
     def test_cli_materializes_server_reference_only_render_unit_without_frame_fallback(self) -> None:
         yaml_text = """
@@ -5624,7 +5109,7 @@ scenes:
         self.assertIn("original prompt", merged)
         self.assertIn("replacement prompt", merged)
 
-    def test_filtered_render_unit_migration_removes_obsolete_cut_sections_and_revokes_state(self) -> None:
+    def test_filtered_render_unit_migration_removes_obsolete_cut_sections(self) -> None:
         yaml_text = """
 video_metadata: {topic: test}
 scenes:
@@ -5683,21 +5168,6 @@ scenes:
                 title="Video Generation Requests",
                 entries=old_entries,
             )
-            approved_state = {}
-            for selector in ("scene1_cut1", "scene1_cut2", "scene2_cut1"):
-                prefix = MODULE._video_prompt_approval_state_prefix(selector)
-                approved_state.update(
-                    {
-                        f"{prefix}.status": "approved",
-                        f"{prefix}.request_section_sha256": "old-section",
-                        f"{prefix}.prompt_sha256": "old-prompt",
-                        f"{prefix}.source_digest": "old-source",
-                        f"{prefix}.approved_by": "reviewer",
-                        f"{prefix}.approved_at": "2026-07-18T00:00:00+09:00",
-                    }
-                )
-            MODULE.append_state_snapshot(run_dir / "state.txt", approved_state)
-
             obsolete = MODULE._obsolete_video_request_selectors_for_selected_scenes(
                 existing_text=request_path.read_text(encoding="utf-8"),
                 targets=targets,
@@ -5718,26 +5188,13 @@ scenes:
                 merge_existing_sections=True,
                 drop_existing_sections=obsolete,
             )
-            MODULE.append_state_snapshot(
-                run_dir / "state.txt",
-                MODULE._obsolete_video_prompt_state_updates(obsolete),
-            )
             merged = request_path.read_text(encoding="utf-8")
-            state = MODULE.parse_state_file(run_dir / "state.txt")
 
         self.assertEqual(obsolete, {"scene1_cut1", "scene1_cut2"})
         self.assertNotIn("## scene1_cut1", merged)
         self.assertNotIn("## scene1_cut2", merged)
         self.assertIn("## scene1_unit1", merged)
         self.assertIn("## scene2_cut1", merged)
-        for selector in obsolete:
-            prefix = MODULE._video_prompt_approval_state_prefix(selector)
-            self.assertEqual(state[f"{prefix}.status"], "revoked")
-            self.assertEqual(state[f"{prefix}.request_section_sha256"], "")
-            self.assertEqual(state[f"{prefix}.prompt_sha256"], "")
-            self.assertEqual(state[f"{prefix}.source_digest"], "")
-        scene2_prefix = MODULE._video_prompt_approval_state_prefix("scene2_cut1")
-        self.assertEqual(state[f"{scene2_prefix}.status"], "approved")
 
     def test_validate_human_change_requests_rejects_unknown_applied_request_ids(self) -> None:
         manifest = {
@@ -5863,7 +5320,6 @@ scenes:
                     str(manifest_path),
                     "--materialize-request-files-only",
                     "--skip-audio",
-                    "--skip-image-prompt-review",
                 ],
                 check=True,
                 cwd=REPO_ROOT,
@@ -5932,7 +5388,6 @@ scenes:
                     str(manifest_path),
                     "--materialize-request-files-only",
                     "--skip-audio",
-                    "--skip-image-prompt-review",
                 ],
                 check=True,
                 cwd=REPO_ROOT,

@@ -654,14 +654,10 @@ scenes:
         self.assertNotIn("主人公の制限", payload["prompt"])
         self.assertNotIn("場所の圧力", payload["prompt"])
 
-    def test_compilation_is_stable_and_preserves_review_metadata_outside_prompt(self) -> None:
+    def test_compilation_is_stable_and_contains_only_provider_contract_fields(self) -> None:
         kwargs = {
             "first_frame_visual_plan": _environment_plan(),
             "location_ids": ["location_opaque_id"],
-            "review_metadata": {
-                "shot_design_contract": {"shot_role": "establishing"},
-                "cut_location_frame_plan": {"location_zone_id": "corridor"},
-            },
         }
 
         first = compile_image_api_prompt_v2(**kwargs)
@@ -671,14 +667,14 @@ scenes:
         self.assertEqual(first["sha256"], second["sha256"])
         self.assertRegex(first["source_digest"], r"^[0-9a-f]{64}$")
         self.assertEqual(first["source_digest"], second["source_digest"])
-        self.assertEqual(first["shot_design_contract"], {"shot_role": "establishing"})
-        self.assertNotIn("shot_design_contract", first["prompt"])
+        self.assertNotIn("review_metadata", first)
+        self.assertNotIn("shot_design_contract", first)
+        self.assertNotIn("cut_location_frame_plan", first)
 
         reordered_plan = dict(reversed(tuple(_environment_plan().items())))
         reordered = compile_image_api_prompt_v2(
             first_frame_visual_plan=reordered_plan,
             location_ids=["location_opaque_id"],
-            review_metadata={"shot_design_contract": {"shot_role": "closeup"}},
         )
         changed_dependency = compile_image_api_prompt_v2(
             first_frame_visual_plan=_environment_plan(),

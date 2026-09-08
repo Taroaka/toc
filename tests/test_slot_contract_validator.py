@@ -23,6 +23,10 @@ class TestSlotContractValidator(unittest.TestCase):
             for rel in (
                 "scripts/validate-slot-contract.py",
                 "toc/run_index.py",
+                "toc/production_contract.py",
+                "toc/state_store.py",
+                "toc/run_root_binding.py",
+                "toc/atomic_exchange.py",
                 "docs/system-architecture.md",
                 "docs/how-to-run.md",
                 "docs/data-contracts.md",

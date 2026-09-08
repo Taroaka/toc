@@ -1,101 +1,68 @@
-# Minimal script output template (from docs/script-creation.md)
+# Script output template
+# Canonical order: authoring → structural validation → manifest materialization.
 script_metadata:
   topic: "string"
-  # 既存物語 adaptation の場合のみ、次のコメントを外し、story / visual_value の markerを一方向projectionする。
-  # original_story では key 自体を出力しない。
+  # Existing-story runs uncomment this marker and project the value lineage one way.
   # adaptation_value_contract: "required_v1"
-  # story_metadata.scene_time_of_day_contract の exact one-way projection。
   scene_time_of_day_contract: "required_v1"
-  # story_metadata.scene_time_of_day_visual_basis_contract の exact one-way projection。
   scene_time_of_day_visual_basis_contract: "required_v1"
-  # story_metadata.time の一方向 projection。歴史的時代であり、scene の時間帯ではない。
   time: "string"
   source_story: "output/<topic>_<timestamp>/story.md"
   source_visual_value: "output/<topic>_<timestamp>/visual_value.md"
   created_at: "ISO8601"
-  target_duration: 300
   target_duration_seconds: 300
   duration_plan:
     target_seconds: 300
-    minimum_scene_count: 8
-    minimum_narration_seconds: 210
-    minimum_effective_seconds: 240
-  aspect_ratio: "9:16"
+    minimum_scene_count: 1
+    minimum_narration_seconds: 0
+    minimum_effective_seconds: 0
+  aspect_ratio: "16:9"
   affect_design_reference: "docs/affect-design.md"
   narration_source_of_truth: "script.md"
   visual_intent_source_of_truth: "script.md"
   generation_execution_source_of_truth: "video_manifest.md"
-  tts_text_usage_boundary: "tts_text is the final ElevenLabs text for TTS only; image/video generators must not use it as their primary source"
-  elevenlabs:
-    provider: "elevenlabs"
-    model_id: "eleven_v3"
-    prompt_contract_version: "v3_tagged_context_v1"
-    default_stability_profile: "creative"
-    text_policy: "hiragana_plus_audio_tags"
+  tts_text_usage_boundary: "tts_text is for TTS only"
 
-# === Scene acceptance contract（p400 planner が先に freeze する） ===
-# 会話履歴ではなく stage grounding readset と upstream artifact だけで作成する。
-# scene / cut authoring の自由文から後付け推定しない。scene/cutは契約の read-only projection とする。
-# legacy artifact は markerなしでも読み取り互換。
+# p400 authoring contract. It is input for ordinary preflight and does not contain provider prompts.
 scene_set_authoring_contract:
   schema_version: "scene_set_authoring_contract_v1"
   generation_id: "scene-authoring-<id>"
-  criterion_registry_version: "scene_acceptance_criteria_v1"
-  criterion_registry_sha256: "sha256:<hex>"
   source_bindings:
-    # source_refs が指す構造化台帳。JSON Pointer と expected_id をfreeze時に実検証する。
-    authoring_source_ledger:
-      path: "logs/authoring/staging/<generation_id>/source_ledger.json"
-      sha256: "sha256:<canonical-json-hex>"
-    story:
-      path: "story.md"
-      sha256: "sha256:<raw-file-hex>"
-    visual_value:
-      path: "visual_value.md"
-      sha256: "sha256:<raw-file-hex>"
+    story: {path: "story.md", sha256: "sha256:<raw-file-hex>"}
+    visual_value: {path: "visual_value.md", sha256: "sha256:<raw-file-hex>"}
   source_refs:
     - source_ref_id: "source-event-01"
-      artifact: "authoring_source_ledger"
-      artifact_sha256: "sha256:<canonical-json-hex>"
-      pointer: "/events/0"
-      expected_id: "source_event_01"
+      artifact: "story"
+      pointer: "/script/scenes/0"
+      expected_id: "event_01"
   canonical_events:
-    - event_id: "E01"
+    - event_id: "event_01"
       canonical_order_index: 1
       owner_scene_id: 1
-      required_beat_ids: ["scene1_beat_01"]
+      required_beat_ids: ["scene_01_beat_01"]
       source_ref_ids: ["source-event-01"]
   evidence_catalog:
-    - evidence_id: "evidence_E01"
+    - evidence_id: "evidence_01"
       owner_scene_id: 1
-      element_id: "element_E01"
+      element_id: "element_01"
       source_ref_ids: ["source-event-01"]
-      visible_form: "原作固有の人物・物・行動で読める画面上の証拠"
+      visible_form: "具体的な人物・物・行為"
   reveal_ledger:
-    - information_id: "artifact_example"
-      initial_state: "withheld"
-      allowed_states: ["withheld", "revealed", "carried", "known"]
+    - information_id: "info_01"
+      initial_state: withheld
+      allowed_states: [withheld, revealed, carried, known]
       transitions: []
   handoff_chain:
-    - anchor_id: "handoff_1_2"
+    - anchor_id: "handoff_01_02"
       owner_scene_id: 1
       consumer_scene_id: 2
-      state_id: "state_after_scene1"
-      producer_beat_id: "scene1_beat_01"
-      consumer_beat_id: "scene2_beat_01"
-      evidence_ids: ["evidence_E01"]
-  transition_cues:
-    - transition_cue_id: "cue_1_2"
-      owner_scene_id: 2
-      from_time_of_day: ""
-      to_time_of_day: ""
-      from_location_ids: []
-      to_location_ids: []
-      owner_beat_id: "scene2_beat_01"
-      evidence_ids: []
+      producer_beat_id: "scene_01_beat_01"
+      consumer_beat_id: "scene_02_beat_01"
+      state_id: "scene_01_end"
+  transition_cues: []
   scenes:
     - scene_id: 1
-      owned_event_ids: ["E01"]
+      owned_event_ids: ["event_01"]
       required_beat_specs: []
       role_bindings: []
       reveal_state_before: {}
@@ -103,301 +70,68 @@ scene_set_authoring_contract:
       reveal_state_after: {}
       time_location_transition:
         time_of_day: ""
-        continuity_from_previous: "opening"
-        transition_cue_required: false
-        transition_cue_ids: []
         location_sequence: []
+        transition_cue_ids: []
       incoming_handoff_anchor_id: "story_opening"
-      outgoing_handoff_anchor_id: "handoff_1_2"
+      outgoing_handoff_anchor_id: "handoff_01_02"
       causal_proof_contract:
-        cause_beat_id: "scene1_beat_01"
-        action_beat_id: "scene1_beat_01"
-        result_state_id: "state_after_scene1"
+        cause_beat_id: "scene_01_beat_01"
+        action_beat_id: "scene_01_beat_01"
+        result_state_id: "scene_01_end"
         required_evidence_ids: []
       non_replaceable_elements: []
-# planner が freeze 後に計算する script top-level derived block。agentが passed を手入力しない。
+
+# Derived by the ordinary authoring preflight; workers do not hand-write a synthetic pass value.
 authoring_preflight:
-  status: "pending"
+  status: pending|passed|failed
   generation_id: "scene-authoring-<id>"
-  contract_digest: ""
-  criterion_registry_digest: ""
-  source_digest: ""
-  preflight_digest: ""
+  contract_digest: "sha256:<hex>"
+  source_digest: "sha256:<hex>"
+  preflight_digest: "sha256:<hex>"
   checks: []
   blocking_reason_keys: []
 
 audio_story_plan:
   schema_version: "audio_story_plan_v1"
-  authoring_provenance: "audio_story_director|derived_legacy_cut_projection"
-  authoring_status: "draft|authored|approved|changes_requested"
+  authoring_status: draft|authored
   audience_promise: ""
   narrator_bible:
-    relationship_to_story: "witness|companion|historian|limited_observer|omniscient"
+    relationship_to_story: witness|companion|historian|limited_observer|omniscient
     knowledge_boundary: []
     emotional_permission: []
     forbidden_attitudes: []
-  open_loops:
-    - loop_id: ""
-      viewer_question: ""
-      why_it_matters: ""
-      opened_at: ""
-      payoff_at: ""
-      payoff_type: "answer|reframe|partial|intentional_unresolved"
-  scene_arcs:
-    - scene_id: ""
-      attention_state: "orient|build|hot|recovery|release"
-      audience_state_before: ""
-      audience_state_after: ""
-      semantic_load: "low|medium|high"
-      incoming_causal_question: ""
-      outgoing_causal_pressure: ""
+  open_loops: []
+  scene_arcs: []
   silence_budget:
-    purpose: "視覚報酬、反応、緊張、余韻のために、言葉で埋めない区間を先に確保する"
+    purpose: ""
     protected_moments: []
   continuous_full_draft: ""
 
 narration_spans:
   - span_id: "ns_001"
     source_cut_ids: []
-    story_job: "first_question|causal_bridge|payoff|reaction|aftertaste"
+    story_job: first_question|causal_bridge|payoff|reaction|aftertaste
     opened_loop_ids: []
     closed_loop_ids: []
     text: ""
     tts_text: ""
-    audio_visual_relation: "orientation_overlap|causal_alignment|complement|counterpoint|voice_silence"
+    audio_visual_relation: orientation_overlap|causal_alignment|complement|counterpoint|voice_silence
     prosody:
-      pace: "ease|steady|press|hold|release"
-      pause_function: "parse|anticipate|absorb|reaction|handoff|none"
-    # 同一groupのvoiced cutはcanonical順のprevious_text/next_textをproviderへ渡す。1 cut = 1 group。
+      pace: ease|steady|press|hold|release
+      pause_function: parse|anticipate|absorb|reaction|handoff|none
     tts_generation_group_id: ""
 
-subagent_trace:
-  - subagent_id: "scene-draft-001"
-    role: "scene_draft|scene_set_review|scene_count_coverage|dramatic_structure|reveal_order|duration_density|visual_production|handoff_integrity|scene_detail_review|cut_draft|cut_review|cut_merge|narration_draft|script_review|production_readiness"
-    input_artifact: "output/<topic>_<timestamp>/story.md"
-    output_artifact: "output/<topic>_<timestamp>/scratch/script_scene01.md"
-    accepted_by_main: false
-    reason: "string"
-
 human_change_requests:
-  - request_id: "hr-001"
-    source: "human_script_review"
+  - request_id: "change_001"
+    source: user
     created_at: "ISO8601"
-    raw_request: "string"
-    original_selectors: ["scene3_cut2"]
-    current_selectors: ["scene3.1_cut2.1"]
-    normalized_actions:
-      - action: "update_visual_beat"
-        target:
-          scene_id: "3.1"
-          cut_id: "2.1"
-        payload:
-          visual_beat: "string"
-      - action: "update_scene_contract"
-        target:
-          scene_id: "3.1"
-          cut_id: "2.1"
-        payload:
-          target_beat: "string"
-          must_show: ["string"]
-          must_avoid: []
-          done_when: ["string"]
-    status: "pending|normalized|applied|verified|waived"
-    requires_user_approval: true
-    approval_reason: "changes_facts|changes_reveal|changes_scope|changes_asset_plan|other"
-    approval_status: "not_needed|pending|approved|rejected"
+    raw_request: ""
+    original_selectors: ["scene_01_cut_01"]
+    current_selectors: ["scene_01_cut_01"]
+    normalized_actions: []
+    status: pending|normalized|applied|deferred
     resolution_notes: ""
-    applied_manifest_targets: ["scene3.1_cut2.1:image_generation"]
-
-human_review_criteria:
-  narration:
-    - "昔話/作品文脈として自然か"
-    - "reveal 順序を壊していないか"
-    - "ひらがな寄せ + audio tag で違和感がないか"
-    - "映像より先走っていないか"
-    - "説明過多になっていないか"
-
-scene_set_review:
-  status: "pending|approved|changes_requested|skipped"
-  scene_count_strategy:
-    mode: "maximal_meaningful"
-    expansion_goal: "承認済み story の主要 beat を落とさず、独立した劇的変化を持つ production scene として成立する範囲で最大化する"
-    stop_condition: "次に追加する scene が既存 scene と同じ dramatic_question / value_shift / causal_turn しか持てず、scene 数を増やすより cut 設計を厚くした方が品質が上がる"
-    approval_questions:
-      - "独立 scene 化すべき願望の発生、拒絶、選択、変身、対決、証拠 reveal、照合、帰結が既存 scene に埋もれていないか"
-      - "次に追加できる scene は何か"
-      - "その候補を scene 追加ではなく cut 増厚へ回す理由は何か"
-  scene_specificity_gate:
-    non_compressible_beat_inventory: "pending|passed|changes_requested"
-    scene_promotion_rule: "pending|passed|changes_requested"
-    unique_scene_responsibility: "pending|passed|changes_requested"
-    actor_force_coverage: "pending|passed|changes_requested"
-    object_meaning_ladder: "pending|passed|changes_requested"
-    concrete_handoff_chain: "pending|passed|changes_requested"
-    anti_template_language: "pending|passed|changes_requested"
-    banned_generic_scene_phrases:
-      - "主人公は前進できるか"
-      - "次へ進む理由が生まれる"
-      - "光が次の場面へ運ぶ"
-      - "価値変化の兆し"
-      - "場所の圧力"
-      - "主人公の姿勢と視線"
-  critic_assignment:
-    critic_1: "scene_count_coverage"
-    critic_2: "dramatic_structure + reveal_order"
-    critic_3: "duration_density"
-    critic_4: "visual_production"
-    critic_5: "handoff_integrity"
-  reviewer_roles:
-    - role: "scene_count_coverage"
-      responsibility: "承認済み story の主要 beat が scene として最大限展開され、非圧縮 beat と scene 昇格理由が明示されているかを評価する"
-      blocking_if: "独立 scene 化すべき beat が既存 scene 内に埋もれている"
-    - role: "dramatic_structure"
-      responsibility: "各 scene が独立した dramatic_question / value_shift / causal_turn を持つかを評価する"
-      blocking_if: "追加/既存 scene が同じ問い・同じ価値変化・同じ因果 turn を重複している"
-    - role: "reveal_order"
-      responsibility: "scene 追加/分割が reveal の早出し、欠落、順序破壊を起こしていないかを評価する"
-      blocking_if: "後半で見せるべき情報が早出しされる、または重要 reveal が消える"
-    - role: "duration_density"
-      responsibility: "目標尺と authored semantic obligation / event beat の密度から、scene 構成の見直しと意味のある cut の増厚のどちらが品質に効くかを評価する。importance や尺だけから cut floor を増やさない"
-      blocking_if: "scene を増やすべき範囲で cut 増厚に逃げている、またはその逆"
-    - role: "visual_production"
-      responsibility: "追加 scene が p500/p600/p800 へ渡せる visible evidence、actor forces、道具/舞台装置の意味段階、visual thesis を持つかを評価する"
-      blocking_if: "scene が説明だけで、画面上の人物・場所・道具・行為に翻訳できない"
-    - role: "handoff_integrity"
-      responsibility: "scene 間の因果、問い、視線・音・道具などの concrete handoff が途切れていないかを評価する"
-      blocking_if: "scene 間の接続が narration 依存で、次 scene を発生させる因果が弱い"
-  review_policy:
-    agent_review: "required"
-    human_review: "required|optional|skipped"
-  review_loop:
-    status: "pending|running|passed|changes_requested|failed"
-    current_round: 0
-    max_rounds: 5
-    final_report: "scene_set_review.md"
-  agent_review:
-    status: "pending|passed|changes_requested"
-    reason_keys: []
-    reason_messages: []
-  auto_apply_policy:
-    enabled: true
-    allowed_actions: ["add_scene", "delete_scene", "merge_scene", "split_scene", "reorder_scene", "update_scene_intent", "strengthen_transition"]
-
-scene_detail_review:
-  status: "pending|approved|changes_requested|skipped"
-  criteria:
-    target_total_video_duration_minutes: "5-20"
-    cut_duration_assumption_seconds: "4-15"
-    required_checks:
-      - "全体 scene 数と scene 重要度から、この scene に必要な尺を見積もる"
-      - "distinct semantic obligation / required event beat が提案 cut に全て割り当てられているか判断する"
-      - "cut が少ないこと自体を blocking にせず、長い hold / silence / spectacle は duration_exception.reason と実効尺で評価する"
-      - "この scene で見せるべき内容が cut に全て載っているか確認する"
-      - "次 scene の内容も読み、最終 cut が次 scene につながるか判断する"
-      - "つながらない場合は、独立した handoff obligation があるときだけ cut 追加を提案し、それ以外は最終 cut の増厚または scene 構成の修正を要求する"
-      - "この scene が最大化された scene set の中で独立した問い・価値変化・因果 turn を持つか確認する"
-      - "この scene をさらに分割すべきか、または cut 設計を厚くすべきか判断する"
-      - "この scene の非圧縮 beat、scene 昇格理由、固有責務、actor forces、道具/舞台装置の意味段階、concrete handoff、anti-template language を確認する"
-  reviewer_roles:
-    - role: "scene_detail_structure"
-      responsibility: "単一 scene の必要性、内部整合、独立した劇的変化を評価する"
-    - role: "scene_detail_density"
-      responsibility: "scene 内の authored semantic obligation / event beat が cut に割り当てられ、尺不足が cut 数とは別に解消されているかを評価する"
-    - role: "scene_detail_handoff"
-      responsibility: "前後 scene との因果接続と handoff が足りるかを評価する"
-  review_policy:
-    agent_review: "required"
-    human_review: "required|optional|skipped"
-  review_loop:
-    status: "pending|running|passed|changes_requested|failed"
-    current_round: 0
-    max_rounds: 5
-    final_report: "scene_detail_review.md"
-  agent_review:
-    status: "pending|passed|changes_requested"
-    reason_keys: []
-    reason_messages: []
-
-cut_blueprint_review:
-  status: "pending|approved|changes_requested|skipped"
-  critic_assignment:
-    critic_1: "cut_intent_isolation"
-    critic_2: "scene_event_coverage"
-    critic_3: "first_frame_motion_readiness"
-    critic_4: "multimodal_event_boundary_coverage"
-    critic_5: "duration_density_and_handoff"
-  cut_blueprint_gate:
-    cut_intent_isolation: "pending|passed|changes_requested"
-    scene_event_coverage: "pending|passed|changes_requested"
-    event_beat_reference_integrity: "pending|passed|changes_requested"
-    first_frame_motion_readiness: "pending|passed|changes_requested"
-    event_first_frame_alignment: "pending|passed|changes_requested"
-    multimodal_event_boundary_coverage: "pending|passed|changes_requested"
-    source_event_preservation: "pending|passed|changes_requested"
-    no_unapproved_event_invention: "pending|passed|changes_requested"
-    event_motion_boundary: "pending|passed|changes_requested"
-    event_narration_boundary: "pending|passed|changes_requested"
-    event_context_for_cut_ready: "pending|passed|changes_requested"
-    causal_proof_coverage: "pending|passed|changes_requested"
-    role_coverage: "pending|passed|changes_requested"
-    audience_knowledge_delta_coverage: "pending|passed|changes_requested"
-    anti_redundancy_gate: "pending|passed|changes_requested"
-    duration_density_and_handoff: "pending|passed|changes_requested"
-  reviewer_roles:
-    - role: "cut_intent_isolation"
-      responsibility: "1 cut が 1 intent に限定され、場所移動/reveal/感情反転/説明/反応を同時に背負っていないかを評価する"
-    - role: "scene_event_coverage"
-      responsibility: "固定順ではなく scene_event.event_sequence[] から逆算され、cut_contract.source_event_contract が event beat を網羅しているかを評価する"
-    - role: "first_frame_motion_readiness"
-      responsibility: "first_frame_brief が p600 still の入力として完結し、motion_brief は p800 専用入力として分離されているかを評価する"
-    - role: "multimodal_event_boundary_coverage"
-      responsibility: "event_context_for_cut と各 contract だけで p600/p700/p800 へ渡せるか、motion_brief や scene_event 全体が p600 に漏れていないかを評価する"
-    - role: "duration_density_and_handoff"
-      responsibility: "authored semantic obligation / event beat の coverage、独立した duration plan、最終 cut の handoff が十分かを評価する"
-  review_policy:
-    agent_review: "required"
-    human_review: "required|optional|skipped"
-  review_loop:
-    status: "pending|running|passed|changes_requested|failed"
-    current_round: 0
-    max_rounds: 5
-    final_report: "cut_blueprint_review.md"
-  agent_review:
-    status: "pending|passed|changes_requested"
-    reason_keys: []
-    reason_messages: []
-
-production_readiness_review:
-  status: "pending|approved|changes_requested|skipped"
-  review_policy:
-    agent_review: "required"
-    human_review: "required|optional|skipped"
-  review_loop:
-    status: "pending|running|passed|changes_requested|failed"
-    current_round: 0
-    max_rounds: 5
-    final_report: "production_readiness_review.md"
-  council:
-    design_owner:
-      role: "only_editor"
-      may_edit_downstream_design_artifacts: true
-    advisory_agents:
-      - role: "structure_auditor"
-        responsibility: "script の骨格、因果、scene/cut 接続、破綻を評価する"
-        may_edit_downstream_design_artifacts: false
-      - role: "duration_auditor"
-        responsibility: "選択された 5-20 分の目標尺に対し、意味のある cut の duration、narration / silence、scene 構成から実効尺の不足を特定する。目標尺だけから最低 cut 数を作らない"
-        may_edit_downstream_design_artifacts: false
-      - role: "quality_auditor"
-        responsibility: "尺/骨格の弱点から scene 構成、意味のある cut の増厚、narration / silence、映像品質改善を提案する。cut 追加は独立した semantic obligation / event beat を伴う場合に限る"
-        may_edit_downstream_design_artifacts: false
-      - role: "orchestrator"
-        responsibility: "各 auditor の意見を統合し、Design Owner 向け patch brief にする"
-        may_edit_downstream_design_artifacts: false
-  agent_review:
-    status: "pending|passed|changes_requested"
-    reason_keys: []
-    reason_messages: []
+    applied_manifest_targets: []
 
 characters:
   - character_id: "protagonist"
@@ -406,325 +140,141 @@ characters:
 
 style_guide:
   visual_style: "string"
+  forbidden: ["text_overlay", "watermark"]
 
 timeline:
-  total_duration: 60
+  total_duration_seconds: 300
 
 scenes:
-  - scene_id: 1   # dotted numeric string も可: 3.1
-    # frozen contract の該当 slice。scene authorはcanonical ownership / reveal / role / digestを変更しない。
-    scene_contract_slice:
-      schema_version: "scene_contract_slice_v1"
-      scene_id: 1
-      generation_id: "scene-authoring-<id>"
-      contract_digest: "sha256:<hex>"
-      scene_slice_digest: "sha256:<hex>"
-      canonical_event_ids: []
-      required_beat_specs: []
-      role_bindings: []
-      reveal_state_before: {}
-      allowed_reveal_transition_ids: []
-      reveal_state_after: {}
-      time_location_transition:
-        time_of_day: ""
-        continuity_from_previous: "opening"
-        transition_cue_required: false
-        transition_cue_ids: []
-        location_sequence: []
-      incoming_handoff_anchor_id: "story_opening"
-      outgoing_handoff_anchor_id: "handoff_1_2"
-      causal_proof_contract:
-        cause_beat_id: "scene1_beat_01"
-        action_beat_id: "scene1_beat_01"
-        result_state_id: "state_after_scene1"
-        required_evidence_ids: []
-      non_replaceable_elements: []
-    # validatorのderived block。agentが手入力でpassedにしない。
-    authoring_preflight:
-      schema_version: "scene_authoring_preflight_v1"
-      status: "pending"
-      generation_id: "scene-authoring-<id>"
-      contract_digest: "sha256:<hex>"
-      scene_slice_digest: "sha256:<hex>"
-      source_digest: "sha256:<hex>"
-      preflight_digest: ""
-      checks: []
-      blocking_reason_keys: []
-    # story.md の同一 scene から一方向 projection する open string。新規 artifact では非空必須。
-    # contract marker がない Legacy の missing/empty だけ、読み込み時に "" として扱い、時間帯 prompt fragment を生成しない。
+  - scene_id: 1
     time_of_day: "朝"
-    # story.md の同一 scene から exact projection する derived review evidence。
-    time_of_day_visual_basis: "光源、空/窓外の明るさ、影、色温度を朝に整合させる根拠"
-    location_mode: "single|sequence"
-    location_sequence: ["始まりの部屋"]
-    # story.md location.segments の exact one-way projection。review用routeとprovider用cut locationを分離する。
-    location_segments:
-      - location: "始まりの部屋"
-        responsibility: "この場所で成立させる出来事"
-        primary_subject: "主被写体の人物名"
-        visible_action: "一枚で読める具体的状態"
-        visible_reaction: "別主体の具体的反応"
-        required_visual_evidence: ["具体物"]
-        required_roles: ["protagonist"]
-        motion_brief: "一つの観察可能な動作"
-        motion_end_state: "物理的終了状態"
-    importance: "low|medium|high|critical"
-    target_duration_seconds: 0
-    estimated_duration_seconds: 0
-    handoff_to_next_scene: "次 scene へ接続する最終状態。最終 scene では terminal_resolution を使ってよい"
-    terminal_resolution: ""
-    coverage_review:
+    time_of_day_visual_basis: "光源、明るさ、影、色温度"
+    location:
+      location_id: "location_01"
+      name: "始まりの場所"
+      mode: single|sequence
+      sequence: ["始まりの場所"]
+      segments:
+        - location: "始まりの場所"
+          responsibility: "この場所で成立させる出来事"
+          primary_subject: "主被写体"
+          visible_action: "一枚で読める行為"
+          visible_reaction: ""
+          required_visual_evidence: []
+          required_roles: [protagonist]
+          motion_brief: "一つの観察可能な動作"
+          motion_end_state: "物理的な終了状態"
+    phase: opening|development|ordeal|transformation|ending
+    purpose: "この scene が担う責務"
+    conflict: ""
+    turn: ""
+    affect:
+      label_hint: curiosity|awe|dread|grief|panic|relief|aftertaste
+      audience_job: hook|bond|strain|release|aftertaste
+    visualizable_action: "画面化できる人物行動・状態変化"
+    grounding_note: "source confidence/uncertainty と創作境界"
+    narration: ""
+    visual: ""
+    research_refs: []
+    creative_inventions: []
+    source_basis:
+      event_ids: ["event_01"]
+      passage_ids: []
+      fact_ids: []
+      character_ids: ["character_01"]
+      place_ids: ["place_01"]
+      world_rule_ids: []
+      symbol_ids: []
+      variant_ids: []
+      conflict_ids: []
+      confidence: 0.9
+    scene_intent:
+      story_purpose: "この scene だけが成立させる責務"
+      dramatic_question: "観客が追う問い"
+      value_shift:
+        from: ""
+        to: ""
+        visible_evidence: []
+      causal_turn: "次 scene を発生させる不可逆な出来事"
+    start_state:
+      state_id: "scene_01_start"
+      characters: []
+      relationships: []
+      locations: []
+      objects: []
+      active_world_rules: []
+      audience_knowledge: []
+    scene_event:
+      schema_version: "scene_event_v1"
+      event_logline: "sceneで起きる出来事"
+      start_situation: ""
+      source_story_beat_ids: ["event_01"]
+      event_sequence:
+        - beat_id: "scene_01_beat_01"
+          beat_function: source_event
+          source_story_beat_ids: ["event_01"]
+          source_refs: []
+          participants: ["character_01"]
+          location_id: "place_01"
+          trigger: ""
+          what_happens: ""
+          conflict_or_constraint: ""
+          required_visual_evidence: []
+          audience_knowledge_delta: ""
+          immediate_consequence: ""
+      turning_event:
+        beat_id: "scene_01_beat_01"
+        irreversible_change: ""
+      end_state:
+        state_id: "scene_01_end"
+        characters: []
+        relationships: []
+        locations: []
+        objects: []
+        active_world_rules: []
+        audience_knowledge: []
+        unresolved_threads: []
+      reveal_contract:
+        state_before: {}
+        transitions: []
+        state_after: {}
+      handoff_chain:
+        incoming: {producer_scene_id: null, state_id: "scene_01_start"}
+        outgoing: {consumer_scene_id: "scene_02", state_id: "scene_01_end", required_next_scene_start_conditions: []}
+      preservation:
+        must_preserve: []
+        must_not_change: []
+        must_not_show: []
+    coverage_checks:
       audience_information_covered: false
       visualizable_action_covered: false
       value_shift_visible: false
       causal_turn_visible: false
-      scene_specificity_gate_passed: false
       next_scene_connection_checked: false
-      cut_coverage_plan_complete: false
-    scene_cut_coverage_plan:
-      coverage_strategy: "reverse_from_scene_event"
-      source_schema_version: "scene_event_v1"
-      # duration / importance は cut floor に使わない。同じ意味の obligation は既存 cut へまとめる。
-      min_cut_count: {by_distinct_semantic_obligations: 1, by_event_beats: 1, selected: 1}
-      candidate_function_labels: ["setup", "pressure", "threshold", "turn", "payoff", "reaction", "handoff", "custom"]
-      event_beat_inventory:
-        - beat_id: "scene1_event_turn"
-          beat_function: "turn"
-          must_be_seen: true
-          assigned_cut_ids: ["scene1_cut1"]
-      scene_obligations:
-        - obligation_id: "scene1_turn_proof_01"
-          source: causal_turn
-          evidence: "この scene の不可逆な turn を示す可視証拠"
-          assigned_cut_ids: ["scene1_cut1"]
-      cut_assignments:
-        - cut_index: 1
-          cut_selector: "scene1_cut1"
-          obligation_ids: ["scene1_turn_proof_01"]
-          cut_function: "turn"
-          event_assignment:
-            source_event_contract:
-              primary_event_beat_id: "scene1_event_turn"
-              source_event_beat_ids: ["scene1_event_turn"]
-          target_beat: "不可逆な turn が画面上で成立する"
-          visual_proof: ""
-          audience_knowledge_delta: ""
-          causal_proof: ""
-          required_roles: []
-          anti_redundancy_key: ""
-      unassigned_obligations: []
-      overloaded_cuts: []
-      duplicate_meaning_risks: []
-    timing:
-      duration_seconds: 6
-      timestamp: "00:00-00:06"
-    human_review:
-      status: "pending|approved|changes_requested"
-      notes: ""
-      approved_scene_summary: ""
-      approved_story_visual: ""
-      change_request_ids: []
-    review_policy:
-      agent_review: "required"
-      human_review: "required|optional|skipped"
-      human_required_reason: ""
-    review_loop:
-      status: "pending|running|passed|changes_requested|failed"
-      current_round: 0
-      max_rounds: 5
-      final_report: "scene_detail_review.md"
-    agent_review:
-      status: "pending|passed|changes_requested"
-      reason_keys: []
-      reason_messages: []
-    narrative:
-      phase: "ordinary_world"
-      purpose: "string"
-    source_grounding:
-      factual_refs: ["story.script.scenes[0].research_refs[0]"]
-      inherited_story_refs: ["source_story:scene_id=1"]
-      creative_invention_notes: []
-      uncertainty_notes: []
-    affect:
-      intended:
-        valence: 0.0
-        arousal: 0.5
-        label_hint: "string"
-        audience_job: "hook|bond|strain|release|aftertaste"
-        contrast_from_previous: "lift|drop|spike|settle|invert"
-    visual_value:
-      source_part_id: ""
-      role: "none|visual_payoff"
-      narration_policy: "spoken|silent"
-    scene_intent:
-      story_purpose: "string"
-      # visual_value.md の同scene契約を具体scene eventへ接地した正本。provider proseへ内部IDを直接送らない。
-      scene_value_amplification:
-        schema_version: "scene_value_amplification_v1"
-        source_value_refs: ["REPLACE_ME_STORY_VALUE_ID"]
-        why_this_scene_matters: "原作全体に対してこのsceneが不可欠な理由"
-        audience_state_before: "scene開始時の観客状態"
-        audience_state_after: "scene終了時の観客状態"
-        emotional_contradiction: "同時に存在する相反感情や圧力"
-        cinematic_gain:
-          performance: "呼吸、視線、抑制、身体反応の具体差"
-          blocking_and_space: "距離、遮蔽、孤立、接近、退路の変化"
-          camera_and_composition: "認識、見せる順序、構図の変化"
-          edit_and_rhythm: "hold、reaction、reveal、余韻"
-          sound: "環境音、沈黙、音の先行・残響"
-        iconic_moment_target: "再体験・再発見させる一瞬"
-        must_preserve_story_facts: ["このsceneで変えてはいけない原作事実"]
-        must_not_reduce_to: ["説明絵や美麗な壁紙への縮退"]
-        success_evidence: ["映像だけでも価値増幅が成立したと分かる証拠"]
-      dramatic_question: "この scene の間、観客が追う問い"
-      scene_spine: "scene 固有の authored event progression の1文要約。候補ラベルを固定順で埋めない"
-      value_shift:
-        from: "scene開始時の状態"
-        to: "scene終了時の状態"
-        visible_evidence: []
-      causal_turn: "次 scene を発生させる不可逆の出来事/決断/発見"
-      audience_information: []
-      withheld_information: []
-      reveal_constraints: []
-      affect_transition: "string"
-      character_state:
-        start: "scene開始時の人物/関係/身体状態"
-        end: "scene終了時の人物/関係/身体状態"
-        visible_behavior: []
-      visual_value_source: ""
-      visual_thesis: "この scene を代表する映画的な一枚絵"
-      story_event_obligations:
-        - event_id: ""
-          source_events: []
-          audience_knowledge_delta: ""
-          causal_proof: ""
-          visual_evidence: []
-          required_roles: []
-      role_coverage:
-        required_roles: []
-        must_not_collapse_to_protagonist_only: true
-      visual_proof_obligations: []
-      anti_redundancy_policy: "同じ story fact を別 cut で繰り返すだけなら cut 追加ではなく既存 cut を補強する"
-      static_first_frame_rules:
-        - "motion を説明せず、動画開始前後の静止状態で cut の証拠を見せる"
-      production_risks: []
-      story_beat_coverage:
-        beat_ids: []
-        promotion_decision: "scene|cut|narration|omitted"
-        risk_if_compressed: ""
-      scene_conflict_engine:
-        desire: "この scene で主体が欲しているもの"
-        obstacle: "それを妨げる力"
-        stakes: "失敗すると何を失うか"
-        escalation: "scene内で圧力がどう上がるか"
-        no_return_point: "後戻りできなくなる瞬間"
-        visible_pressure: []
-      audience_knowledge_delta:
-        before_scene: []
-        learned_during_scene: []
-        misdirected_or_reframed: []
-        still_unknown_after_scene: []
-        forbidden_early_reveals: []
-      handoff_chain:
-        incoming:
-          anchor_id: ""
-          anchor_type: "object|sound|gaze|gesture|threat|question|none"
-          visible_or_audible_form: ""
-        outgoing:
-          anchor_id: ""
-          anchor_type: "object|sound|gaze|gesture|threat|question|terminal"
-          next_scene_selector: ""
-          required_next_scene_start_pressure: ""
-      object_arc:
-        - object_id: ""
-          first_meaning: ""
-          current_scene_meaning: ""
-          later_meaning: ""
-          visible_state_in_this_scene: ""
-          must_not_show_yet: []
-      story_specificity:
-        non_compressible_beat: "この scene を cut に圧縮してはいけない不可逆 beat"
-        scene_promotion_reason: "独立した問い/価値変化/因果 turn を持つため scene に昇格させる理由"
-        unique_scene_responsibility: "物語全体でこの scene だけが担う責務"
-        actor_forces:
-          protagonist: ""
-          opposing: []
-          helping: []
-          observing: []
-          pressure_method: ""
-        meaning_ladder:
-          protagonist_stage: ""
-          relationship_stage: ""
-          object_or_setpiece_stage: ""
-        concrete_handoff:
-          incoming_trigger: ""
-          outgoing_anchor: ""
-          outgoing_pressure: ""
-        anti_template_language:
-          banned_generic_phrases_absent: false
-          story_specific_terms: []
-          specificity_note: ""
-      handoff_notes:
-        p500_asset: []
-        p600_image: []
-        p700_narration: []
-        p800_video: []
-    scene_event:
-      schema_version: "scene_event_v1"
-      event_logline: "sceneで実際に起きる出来事の1文要約。演出語を入れない"
-      start_situation: "scene開始時に人物・場所・物・関係がどうなっているか"
-      source_story_beat_ids: []
-      event_sequence:
-        - beat_id: "scene1_event_turn"
-          beat_function: "turn"
-          source_story_beat_ids: []
-          what_happens: "何が起きるか。camera/shot/lens/framing/prompt/cut_id を書かない"
-          visible_action: "画面で確認できる行為"
-          visible_reaction: "行為に対する人物/場/物の反応"
-          immediate_consequence: "直後に何が変わるか"
-          emotional_pressure: "出来事としての圧力"
-          required_visual_evidence: []
-          story_information_revealed_ids: []
-      turning_event:
-        source_event_beat_id: "scene1_event_turn"
-        causal_turn_ref: "scene_intent.causal_turn"
-        irreversible_change: ""
-      end_situation:
-        value_shift_to_ref: "scene_intent.value_shift.to"
-        outcome: ""
-        character_position: ""
-        object_state: ""
-        relationship_state: ""
-        new_pressure: ""
-        visible_evidence_refs: ["scene1_event_turn"]
-      offscreen_context: []
-      forbidden_event_changes: []
-    visual:
-      generation_prompt: "string"
+    handoff_notes:
+      p500_asset: []
+      p600_image: []
+      p700_narration: []
+      p800_video: []
     cuts:
-      - cut_id: 1  # dotted numeric string も可: 2.1
+      - cut_id: "scene_01_cut_01"
         cut_contract:
           schema_version: "3.0"
-          # sceneの価値増幅をこのcutが一つだけどう担当するか。review/compile sourceでありprovider直送禁止。
           expressive_contract:
-            schema_version: "cut_expressive_contract_v1"
-            source_value_refs: ["REPLACE_ME_STORY_VALUE_ID"]
-            scene_amplification_ref: "scene1.scene_intent.scene_value_amplification"
-            audience_experience_delta: "このcut前後の観客体験差"
-            expressive_function: "recognition|withhold|pressure|release|contrast|reaction|reframe|afterimage|spectacle|transition"
-            performance_beat: "表情ラベルではなく観察可能な演技beat"
-            visual_pressure: "画面内で圧力を作る距離・遮蔽・運動・光"
-            attention_shift: "観客の注意を何から何へ移すか"
-            edit_trigger: "このcutへ入り、次へ切る観察可能な契機"
-            sound_function: "環境音、沈黙、音の先行・残響の役割"
-            emotional_afterimage: "cut後に残す感覚"
-            must_not_reduce_to: ["genericな説明ショットへの縮退"]
+            source_value_refs: []
+            expressive_function: recognition|withhold|pressure|release|contrast|reaction|reframe|afterimage|spectacle|transition
+            audience_experience_delta: ""
+            performance_beat: ""
+            visual_pressure: ""
+            attention_shift: ""
+            edit_trigger: ""
+            sound_function: ""
+            emotional_afterimage: ""
           source_event_contract:
-            primary_event_beat_id: "scene1_event_turn"
-            source_event_beat_ids: ["scene1_event_turn"]
-            event_beat_function: "turn"
-            event_time_position: "at_trigger"
-            source_event_summary: ""
+            primary_event_beat_id: "scene_01_beat_01"
+            source_event_beat_ids: ["scene_01_beat_01"]
+            event_beat_function: source_event
+            event_time_position: before_trigger
             source_visible_action: ""
             source_visible_reaction: ""
             source_required_visual_evidence: []
@@ -732,109 +282,71 @@ scenes:
             event_facts_not_to_invent: []
             allowed_reveal_info_ids: []
             forbidden_reveal_info_ids: []
-          cut_role: "main|sub|transition|reaction|visual_payoff"
-          cut_function: "turn"
-          duration_intent: "standard"
+          cut_role: main|sub|transition|reaction|visual_payoff
+          cut_function: source_event
+          duration_intent: short|standard|hold
           target_duration_seconds: 8
           viewer_contract:
-            target_beat: "この cut で観客に体験させる1つのこと"
-            screen_question: "この cut の間、観客が画面から読む問い"
-            dramatic_job: "scene全体のどこを担当するか"
-            audience_knowledge_delta: "この cut を見た観客が scene 内で新しく理解すること"
-            causal_proof: "この cut が因果や不可逆イベントを画面で証明する方法"
+            target_beat: ""
+            screen_question: ""
+            dramatic_job: ""
+            audience_knowledge_delta: ""
+            causal_proof: ""
             visual_evidence: []
             required_roles: []
-            anti_redundancy_key: "同 scene 内でこの cut だけが担当する意味"
-            emotional_micro_shift:
-              from: ""
-              to: ""
-            mixed_affect_design:
-              mode: "none|single|mixed|tension_release|bittersweet|aftertaste"
-              optional: true
-              apply_when: []
-              positive_valence_thread: ""
-              negative_valence_thread: ""
-              arousal_strategy: "hold|rise|drop|spike|release"
-              audience_rollercoaster_job: "none|bond|strain|release|reframe|aftertaste"
-              design_intent: ""
-              visible_support: []
-              narration_support: []
-              sound_or_rhythm_support: []
-              handoff_effect: ""
-              avoid_if:
-                - "1 cut = 1 intent を壊す"
-                - "scene_event にない事実を足す"
-            visual_proof: "映像だけで target_beat が成立したと分かる証拠"
             must_show: []
             must_avoid: []
             done_when: []
           first_frame_contract:
             imageable: true
-            source_event_beat_id: "scene1_event_turn"
-            event_time_position: "at_trigger"
+            source_event_beat_id: "scene_01_beat_01"
+            event_time_position: before_trigger
             event_fact_visible_in_still: ""
             not_yet_happened_in_still: []
-            first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
-            action_completion_state: "pre_action|early_action|mid_action|aftermath|hold"
-            static_first_frame_rule: "motion の説明ではなく、静止画として読める証拠で cut の意味を開始する"
-            must_be_static_evidence_not_motion: true
+            first_frame_brief: ""
+            action_completion_state: pre_action|early_action|mid_action|aftermath|hold
+            static_first_frame_rule: ""
           motion_contract:
             movable: true
-            source_event_beat_id: "scene1_event_turn"
+            source_event_beat_id: "scene_01_beat_01"
             starts_from_first_frame: true
             must_not_advance_to_event_beat_ids: []
-            motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
-            end_state: "次 cut へ渡す最後の状態"
+            motion_brief: ""
+            end_state: ""
             must_not_add: []
           narration_contract:
             schema_version: "narration_contract_v2"
             speakable_or_silent: true
-            source_event_beat_ids: ["scene1_event_turn"]
+            source_event_beat_ids: ["scene_01_beat_01"]
             allowed_info_ids: []
             forbidden_info_ids: []
             must_not_advance_to_event_beat_ids: []
             must_not_explain_visible_action_as_caption: true
-            narration_event_boundary: "same_event_only"
+            narration_event_boundary: same_event_only
             story_role:
-              narrative_position: "opening|middle|ending"
-              cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
-              voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
+              narrative_position: opening|middle|ending
+              cut_function: source_event
+              voice_function: information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence
               audience_state_before: ""
               audience_state_after: ""
               must_cover: []
               must_not_reveal: []
-              done_when: []
             visual_distance:
-              distance_policy: "stay_close|contextual|meaning_first|silent"
+              distance_policy: stay_close|contextual|meaning_first|silent
               visible_facts_in_frame: []
               narration_should_add: []
               must_not_caption_visible_action: true
-              visual_overlap_allowed: false
-              visual_overlap_reason: ""
             rhythm_and_timing:
               target_speech_seconds: 0
               min_speech_seconds: 0
               max_speech_seconds: 0
-              start_timing: "immediate|after_visual_read|mid_cut|late_cut|none"
-              end_timing: "before_cut_end|on_cut_end|after_visual_resolution|none"
+              start_timing: immediate|after_visual_read|mid_cut|late_cut|none
+              end_timing: before_cut_end|on_cut_end|after_visual_resolution|none
               pause_intent: []
-              audio_visual_sync_point: ""
             tts_readiness:
-              normalization_policy: "kanji_public_hiragana_tts|mixed|dictionary_first"
+              normalization_policy: kanji_public_hiragana_tts|mixed|dictionary_first
               pronunciation_targets: []
               max_sentence_chars: 42
-              tts_text_must_differ_from_text_when_needed: true
-            # compatibility aliases for older readers
-            role: "setup|fact|emotion|contrast|aftertaste|silent"
-            target_function: "derive_from_story_role_voice_function"
-            must_cover:
-              - "derive_from_story_role_must_cover"
-            must_avoid:
-              - "映像のキャプション化"
-            done_when:
-              - "derive_from_story_role_done_when"
-            timing_intent: ""
-            silence_reason: ""
           downstream_handoff:
             p500_asset: []
             p600_image: []
@@ -842,157 +354,72 @@ scenes:
             p800_video: []
             carries_to_next_cut: []
             carries_to_next_scene: []
-        legacy_scene_contract_alias:
-          target_beat: "<cut_contract.viewer_contract.target_beat>"
-          audience_knowledge_delta: "<cut_contract.viewer_contract.audience_knowledge_delta>"
-          causal_proof: "<cut_contract.viewer_contract.causal_proof>"
-          visual_evidence: "<cut_contract.viewer_contract.visual_evidence>"
-          required_roles: "<cut_contract.viewer_contract.required_roles>"
-          source_event_contract: "<cut_contract.source_event_contract>"
-          anti_redundancy_key: "<cut_contract.viewer_contract.anti_redundancy_key>"
-          must_show: "<cut_contract.viewer_contract.must_show>"
-          must_avoid: "<cut_contract.viewer_contract.must_avoid>"
-          done_when: "<cut_contract.viewer_contract.done_when>"
         cut_blueprint:
-          legacy_note: "互換用。cut_contract が cut-level の正本。"
-          cut_role: "main|sub|transition|reaction|visual_payoff"
-          cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
-          duration_intent: "short|standard|hold"
+          cut_role: main
+          cut_function: source_event
+          duration_intent: standard
           target_duration_seconds: 8
-          target_beat: "この cut で観客に体験させる1つのこと"
-          screen_question: "この cut の間、観客が画面から読む問い"
-          dramatic_job: "scene全体のどこを担当するか"
-          audience_knowledge_delta: "この cut を見た観客が scene 内で新しく理解すること"
-          causal_proof: "この cut が因果や不可逆イベントを画面で証明する方法"
+          target_beat: ""
+          screen_question: ""
+          dramatic_job: ""
+          audience_knowledge_delta: ""
+          causal_proof: ""
           visual_evidence: []
           required_roles: []
-          source_event_contract: "<cut_contract.source_event_contract>"
-          anti_redundancy_key: "同 scene 内でこの cut だけが担当する意味"
-          visual_proof: "映像だけで target_beat が成立したと分かる証拠"
-          visual_beat: "画として何が見えるか"
-          first_frame_brief: "動画が動き出す直前に見えている初期状態。prompt本文に制作メタは入れない"
-          static_first_frame_rule: "motion の説明ではなく、静止画として読める証拠で cut の意味を開始する"
-          action_completion_state: "pre_action|early_action|mid_action|aftermath|hold"
-          motion_brief: "p800 motion prompt 専用。p600 image prompt authoring では参照しない"
-          motion_end_state: "次 cut へ渡す最後の状態"
-          narration_role: "setup|fact|emotion|contrast|aftertaste|silent"
-          silence_reason: "silent cut の場合は必須"
+          source_event_contract: "cut_contract.source_event_contract"
           must_show: []
           must_avoid: []
           done_when: []
-          cinematic_contract:
-            shot_size: "wide|medium|closeup|insert"
-            camera_intent: ""
-            foreground: ""
-            midground: ""
-            background: ""
-            screen_direction: ""
-          continuity_contract:
-            start_state: ""
-            end_state: ""
-            carry_forward_to_next_cut: []
-          downstream_handoff:
-            p500_asset: []
-            p600_image: []
-            p700_narration: []
-            p800_video: []
+          visual_beat: ""
+          first_frame_brief: ""
+          motion_brief: ""
+          narration_role: setup|fact|emotion|contrast|aftertaste|silent
+          silence_reason: ""
           asset_dependency_hint:
             character_ids: []
             object_ids: []
             location_ids: []
             reusable_still_candidates: []
-        narration_contract:
-          schema_version: "narration_contract_v2"
-          story_role:
-            narrative_position: "opening|middle|ending"
-            cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
-            voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
-            audience_state_before: ""
-            audience_state_after: ""
-            must_cover: []
-            must_not_reveal: []
-            done_when: []
-          visual_distance:
-            distance_policy: "stay_close|contextual|meaning_first|silent"
-            visible_facts_in_frame: []
-            narration_should_add: []
-            must_not_caption_visible_action: true
-            visual_overlap_allowed: false
-            visual_overlap_reason: ""
-          rhythm_and_timing:
-            target_speech_seconds: 0
-            min_speech_seconds: 0
-            max_speech_seconds: 0
-            start_timing: "immediate|after_visual_read|mid_cut|late_cut|none"
-            end_timing: "before_cut_end|on_cut_end|after_visual_resolution|none"
-            pause_intent: []
-            audio_visual_sync_point: ""
-          tts_readiness:
-            normalization_policy: "kanji_public_hiragana_tts|mixed|dictionary_first"
-            pronunciation_targets: []
-            max_sentence_chars: 42
-            tts_text_must_differ_from_text_when_needed: true
-          # compatibility aliases for older readers
-          role: "setup|fact|emotion|contrast|aftertaste|silent"
-          target_function: "derive_from_story_role_voice_function"
-          must_cover:
-            - "derive_from_story_role_must_cover"
-          must_avoid:
-            - "映像のキャプション化"
-          done_when:
-            - "derive_from_story_role_done_when"
-          timing_intent: ""
-          silence_reason: ""
         narration_draft:
           text: ""
-          status: "optional_draft|approved_by_human|superseded_by_p700"
-        narration: "legacy_optional_draft"
-        tts_text: "legacy_optional_draft"
+          status: optional_draft|superseded_by_p700
+        narration: ""
+        tts_text: ""
         narration_authoring:
-          schema_version: "narration_authoring_v1"
-          status: "missing|draft|human_locked|reviewed|silent"
-          semantic_revision: 0
-          semantic_hash: ""
-          tts_revision: 0
-          tts_request_hash: ""
-          source: "agent|frontend"
+          schema_version: narration_authoring_v1
+          status: missing|draft|human_locked|silent
+          revision: 0
+          text_hash: ""
+          tts_hash: ""
+          source: author|user
           updated_at: ""
           updated_by: ""
         elevenlabs_prompt:
-          spoken_context: "string"
-          voice_tags: ["excited", "laughs harder"]
-          spoken_body: "string"
-          stability_profile: "creative|natural|robust|\"\""
-        visual_beat: "string"
+          spoken_context: ""
+          voice_tags: []
+          spoken_body: ""
+          stability_profile: creative|natural|robust|""
+        visual_beat: ""
         source_grounding:
-          factual_refs: ["story.script.scenes[0].research_refs[0]"]
-          inherited_story_refs: ["source_story:scene_id=1"]
+          factual_refs: []
+          inherited_story_refs: []
           creative_invention_notes: []
           uncertainty_notes: []
-        human_review:
-          status: "pending|approved|changes_requested"
-          notes: ""
-          approved_narration: ""
-          approved_tts_text: ""
-          approved_visual_beat: ""
-          approved_image_notes: []
-          approved_video_notes: []
-          change_request_ids: []
-        review_policy:
-          agent_review: "required"
-          human_review: "required|optional|skipped"
-          human_required_reason: ""
-        review_loop:
-          status: "pending|running|passed|changes_requested|failed"
-          current_round: 0
-          max_rounds: 5
-          final_report: "cut_blueprint_review.md"
-        agent_review:
-          status: "pending|passed|changes_requested"
-          reason_keys: []
-          reason_messages: []
-        image_output: "assets/scenes/scene01_cut01.png"
+        image_output: "assets/scenes/scene_01_cut_01.png"
 
-quality_check:
+validation:
   timing:
     narration_fits: true
+    duration_measured: false
+  references:
+    source_ids_resolved: false
+    selectors_unique: false
+    handoffs_valid: false
+  media:
+    files_exist: false
+    decodable: false
+    streams_compatible: false
+  provenance:
+    request_hashes_current: false
+    output_bindings_match: false
+

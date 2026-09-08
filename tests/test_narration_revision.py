@@ -12,7 +12,7 @@ from toc.narration_revision import (
     NarrationRevisionConflict,
     apply_authoring_update,
     approve_audio_candidate,
-    current_audio_is_human_approved,
+    current_audio_is_ready,
     prepare_audio_candidate,
     record_audio_candidate_result,
 )
@@ -73,8 +73,8 @@ def test_authoring_update_creates_hash_bound_revision_without_collapsing_public_
     assert narration["revision"]["text_hash"].startswith("sha256:")
     assert len(narration["revision"]["text_hash"]) == 71
     assert narration["revision"]["tts_hash"].startswith("sha256:")
-    assert narration["review"]["status"] == "pending"
-    assert narration["review"]["human_review_ok"] is False
+    assert "review" not in narration
+    assert narration["audio_selection"]["status"] == "unselected"
 
 
 def test_idempotent_save_does_not_bump_revision() -> None:
@@ -153,10 +153,10 @@ def test_matching_generation_result_is_candidate_and_never_human_review_override
 
     assert status == "candidate"
     assert narration["generation"]["status"] == "candidate"
-    assert narration["status"] == "candidate"
-    assert narration.get("output", "") == ""
-    assert narration["review"]["human_review_ok"] is False
-    assert current_audio_is_human_approved(narration) is False
+    assert narration["status"] == "audio_ready"
+    assert narration.get("output", "")
+    assert narration["audio_selection"]["status"] == "selected"
+    assert current_audio_is_ready(narration) is True
 
 
 def test_completion_from_old_hash_is_retained_as_stale_without_replacing_current_state() -> None:
@@ -194,7 +194,7 @@ def test_completion_from_old_hash_is_retained_as_stale_without_replacing_current
     assert old["status"] == "stale"
     assert narration.get("output", "") == ""
     assert narration["revision"]["number"] == 2
-    assert current_audio_is_human_approved(narration) is False
+    assert current_audio_is_ready(narration) is False
 
 
 def test_only_current_locked_candidate_can_be_human_approved() -> None:
@@ -226,10 +226,9 @@ def test_only_current_locked_candidate_can_be_human_approved() -> None:
 
     assert approved["output"] == "assets/audio/candidates/candidate-current.mp3"
     assert narration["status"] == "audio_ready"
-    assert narration["generation"]["status"] == "human_approved"
-    assert narration["audio_review"]["status"] == "approved"
-    assert narration["review"]["human_review_ok"] is False
-    assert current_audio_is_human_approved(narration) is True
+    assert narration["generation"]["status"] == "selected"
+    assert narration["audio_selection"]["status"] == "selected"
+    assert current_audio_is_ready(narration) is True
 
 
 def test_preview_candidate_remains_approvable_when_same_text_is_later_locked() -> None:
@@ -279,8 +278,8 @@ def test_preview_candidate_remains_approvable_when_same_text_is_later_locked() -
         now="2026-07-11T10:06:40+09:00",
     )
 
-    assert approved["status"] == "human_approved"
-    assert current_audio_is_human_approved(narration) is True
+    assert approved["status"] == "selected"
+    assert current_audio_is_ready(narration) is True
 
 
 def test_text_edit_after_audio_approval_reopens_workflow_and_keeps_old_file_as_stale_candidate() -> None:
@@ -324,9 +323,9 @@ def test_text_edit_after_audio_approval_reopens_workflow_and_keeps_old_file_as_s
     assert candidate["status"] == "stale"
     assert narration["status"] == "stale"
     assert narration["generation"]["status"] == "stale"
-    assert narration["audio_review"]["status"] == "pending"
+    assert narration["audio_selection"]["status"] == "unselected"
     assert narration["output"] == ""
-    assert current_audio_is_human_approved(narration) is False
+    assert current_audio_is_ready(narration) is False
 
 
 def test_stale_candidate_cannot_be_approved() -> None:
@@ -382,7 +381,7 @@ def test_flat_field_hash_drift_invalidates_human_approved_audio(mutate_flat_fiel
     narration = _approved_narration()
     mutate_flat_field(narration)
 
-    assert current_audio_is_human_approved(narration) is False
+    assert current_audio_is_ready(narration) is False
 
 
 def test_prepare_candidate_rejects_flat_field_hash_drift() -> None:
@@ -474,8 +473,8 @@ def test_status_only_revision_change_keeps_matching_approved_audio_current() -> 
 
     assert changed is True
     assert narration["revision"]["number"] == 2
-    assert narration["audio_review"]["approved_revision"] == 1
-    assert current_audio_is_human_approved(narration) is True
+    assert narration["audio_selection"]["revision"] == 1
+    assert current_audio_is_ready(narration) is True
 
 
 def test_provenance_only_revision_number_change_keeps_matching_approved_audio_current() -> None:
@@ -484,7 +483,7 @@ def test_provenance_only_revision_number_change_keeps_matching_approved_audio_cu
     narration["revision"]["source"] = "migration"
     narration["revision"]["updated_at"] = "2026-07-11T10:16:00+09:00"
 
-    assert current_audio_is_human_approved(narration) is True
+    assert current_audio_is_ready(narration) is True
 
 
 def test_approved_audio_is_bound_to_candidate_hashes_and_output() -> None:
@@ -492,18 +491,18 @@ def test_approved_audio_is_bound_to_candidate_hashes_and_output() -> None:
     candidate = narration["candidates"][0]
     candidate["generated_from_tts_hash"] = "sha256:" + "0" * 64
 
-    assert current_audio_is_human_approved(narration) is False
+    assert current_audio_is_ready(narration) is False
 
     candidate["generated_from_tts_hash"] = narration["revision"]["tts_hash"]
     narration["output"] = "assets/audio/candidates/a-different-file.mp3"
 
-    assert current_audio_is_human_approved(narration) is False
+    assert current_audio_is_ready(narration) is False
 
 
 def test_regeneration_keeps_current_approval_until_new_candidate_is_explicitly_approved() -> None:
     narration = _approved_narration()
     approved_output = narration["output"]
-    approved_id = narration["audio_review"]["approved_candidate_id"]
+    approved_id = narration["audio_selection"]["candidate_id"]
     failed_snapshot = prepare_audio_candidate(
         narration,
         candidate_id="retry-failed",
@@ -513,9 +512,9 @@ def test_regeneration_keeps_current_approval_until_new_candidate_is_explicitly_a
         now="2026-07-11T10:16:00+09:00",
     )
 
-    assert current_audio_is_human_approved(narration) is True
+    assert current_audio_is_ready(narration) is True
     assert narration["output"] == approved_output
-    assert narration["candidates"][0]["status"] == "human_approved"
+    assert narration["candidates"][0]["status"] == "selected"
 
     record_audio_candidate_result(
         narration,
@@ -525,7 +524,7 @@ def test_regeneration_keeps_current_approval_until_new_candidate_is_explicitly_a
         output_sha256="",
         now="2026-07-11T10:16:05+09:00",
     )
-    assert current_audio_is_human_approved(narration) is True
+    assert current_audio_is_ready(narration) is True
     assert narration["status"] == "audio_ready"
 
     replacement_snapshot = prepare_audio_candidate(
@@ -545,8 +544,8 @@ def test_regeneration_keeps_current_approval_until_new_candidate_is_explicitly_a
         now="2026-07-11T10:16:15+09:00",
     )
 
-    assert current_audio_is_human_approved(narration) is True
-    assert narration["audio_review"]["approved_candidate_id"] == approved_id
+    assert current_audio_is_ready(narration) is True
+    assert narration["audio_selection"]["candidate_id"] == approved_id
 
     approve_audio_candidate(
         narration,
@@ -556,7 +555,7 @@ def test_regeneration_keeps_current_approval_until_new_candidate_is_explicitly_a
         now="2026-07-11T10:16:20+09:00",
     )
     assert narration["candidates"][0]["status"] == "superseded"
-    assert narration["audio_review"]["approved_candidate_id"] == "retry-current"
+    assert narration["audio_selection"]["candidate_id"] == "retry-current"
     assert narration["output"] == "assets/audio/candidates/retry-current.mp3"
 
 def test_downgrade_to_draft_explicitly_unlocks_approved_audio() -> None:
@@ -574,6 +573,6 @@ def test_downgrade_to_draft_explicitly_unlocks_approved_audio() -> None:
     )
 
     assert narration["output"] == ""
-    assert narration["audio_review"]["status"] == "pending"
+    assert narration["audio_selection"]["status"] == "unselected"
     assert narration["candidates"][0]["status"] == "candidate"
-    assert current_audio_is_human_approved(narration) is False
+    assert current_audio_is_ready(narration) is True

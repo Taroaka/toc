@@ -262,7 +262,7 @@ def _project_scene_design(module: Any, story: dict[str, Any], index: int) -> tup
         "neutral fixture source",
         variant_seed="lifecycle-downstream-projection",
     )
-    profile = module._profile_from_reviewed_story(base_profile, story)
+    profile = module._profile_from_story(base_profile, story)
     title = profile["scene_titles"][index - 1]
     location = module._location_spec_for_scene(profile, index)
     intent = module._scene_intent_for_cut_design(
@@ -294,9 +294,9 @@ def test_rich_scene_lifecycle_is_projected_into_scene_intent_without_reconstruct
     # The profile handoff and the scene-intent handoff must retain the
     # author-owned state machine.  Rebuilding a fresh state from profile
     # titles/locations loses the causal boundary before cut design begins.
-    assert profile["reviewed_story_scenes"][0]["start_state"] == authored["start_state"]
-    assert profile["reviewed_story_scenes"][0]["end_state"] == authored["end_state"]
-    assert profile["reviewed_story_scenes"][0]["handoff_chain"] == authored["handoff_chain"]
+    assert profile["story_scenes"][0]["start_state"] == authored["start_state"]
+    assert profile["story_scenes"][0]["end_state"] == authored["end_state"]
+    assert profile["story_scenes"][0]["handoff_chain"] == authored["handoff_chain"]
     assert intent.get("start_state") == authored["start_state"]
     assert intent.get("end_state") == authored["end_state"]
     assert intent.get("handoff_chain") == authored["handoff_chain"]
@@ -350,3 +350,50 @@ def test_each_authored_scene_keeps_its_own_turning_beat_and_neighbor_state(index
     assert intent["handoff_chain"] == authored["handoff_chain"]
     assert event["start_state"]["state_id"] == authored["start_state"]["state_id"]
     assert event["end_state"]["state_id"] == authored["end_state"]["state_id"]
+
+
+@pytest.mark.parametrize("delta", [None, "", "  ", "同じ行為に複数の解釈が残る。"])
+def test_event_obligation_prefers_authored_understanding_with_legacy_fallback(delta) -> None:
+    module = _load_frontend_run_module()
+    beat = {
+        "beat_id": "beat_source",
+        "what_happens": "行為が終わる。",
+        "audience_knowledge_delta": delta,
+        "immediate_consequence": "周囲の状況が変わる。",
+    }
+    scene_event = {"event_sequence": [beat]}
+    original = deepcopy(scene_event)
+
+    obligations = module._story_event_obligations_from_scene_event(scene_event)
+
+    expected = (delta or "").strip() or beat["immediate_consequence"]
+    assert obligations[0]["audience_knowledge_delta"] == expected
+    assert scene_event == original
+
+
+def test_cut_coverage_preserves_the_primary_beats_authored_understanding() -> None:
+    module = _load_frontend_run_module()
+    story = _rich_story()
+    authored = story["script"]["scenes"][0]
+    for index, beat in enumerate(authored["event_sequence"]):
+        beat["audience_knowledge_delta"] = f"根拠{index}を知っても、解釈は未確定のまま残る。"
+    profile, intent, event = _project_scene_design(module, story, 1)
+    location = module._location_spec_for_scene(profile, 1)
+    event_before = deepcopy(event)
+
+    result = module._scene_cut_coverage_plan(
+        title=profile["scene_titles"][0],
+        idx=1,
+        scene_intent=intent,
+        scene_event=event,
+        location_name=str(location["name"]),
+        profile=profile,
+        include_artifact=False,
+    )
+
+    deltas = {beat["beat_id"]: beat["audience_knowledge_delta"] for beat in authored["event_sequence"]}
+    assert result["coverage_plan"]["cut_assignments"]
+    for assignment in result["coverage_plan"]["cut_assignments"]:
+        primary_id = assignment["event_assignment"]["source_event_contract"]["primary_event_beat_id"]
+        assert assignment["audience_knowledge_delta"] == deltas[primary_id]
+    assert event == event_before

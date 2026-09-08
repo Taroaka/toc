@@ -62,7 +62,8 @@ class TestProductionContract(unittest.TestCase):
             run_dir = Path(td) / "topic_20990101_0001"
             run_dir.mkdir(parents=True)
             (run_dir / "p000_index.md").write_text(
-                build_run_index_markdown(run_dir, state={"status": "INIT"}),
+                build_run_index_markdown(run_dir, state={"status": "INIT"})
+                + "\n#### p230 Historical Story Review\n\n- status: `blocked`\n",
                 encoding="utf-8",
             )
             (run_dir / "state.txt").write_text(

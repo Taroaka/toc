@@ -34,23 +34,6 @@ def _run_grounding(run_dir: Path, stage: str, *, flow: str = "toc-run") -> subpr
     )
 
 
-def _run_audit(run_dir: Path, stage: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "audit-stage-grounding.py"),
-            "--stage",
-            stage,
-            "--run-dir",
-            str(run_dir),
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
 def _run_prepare(run_dir: Path, stage: str, *, flow: str = "toc-run") -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -145,7 +128,6 @@ class TestStageGrounding(unittest.TestCase):
             self.assertEqual(report["required_paths"]["inputs"], [])
             self.assertIn("docs/system-architecture.md", report["required_paths"]["global_docs"])
             self.assertTrue((run_dir / "logs" / "grounding" / "research.readset.json").exists())
-            self.assertTrue((run_dir / "logs" / "grounding" / "research.audit.json").exists())
 
     def test_story_grounding_fails_when_research_missing(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
@@ -161,7 +143,7 @@ class TestStageGrounding(unittest.TestCase):
             state = parse_state_file(run_dir / "state.txt")
             self.assertEqual(state["stage.story.grounding.status"], "missing_inputs")
 
-    def test_script_grounding_requires_approved_story(self) -> None:
+    def test_script_grounding_uses_story_input_without_approval_certificate(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0002"
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -169,15 +151,13 @@ class TestStageGrounding(unittest.TestCase):
 
             result = _run_grounding(run_dir, "script")
 
-            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
             report = json.loads((run_dir / "logs" / "grounding" / "script.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["status"], "missing_inputs")
-            self.assertEqual(report["approved_input_checks"][0]["review_key"], "review.story.status")
-            self.assertEqual(report["approved_input_checks"][0]["policy_key"], "review.policy.story")
-            self.assertTrue(report["approved_input_checks"][0]["approval_required"])
-            self.assertFalse(report["approved_input_checks"][0]["passed"])
+            self.assertEqual(report["status"], "ready")
+            self.assertNotIn("approved_input_checks", report)
+            self.assertNotIn("review_policy", report)
 
-    def test_script_grounding_allows_optional_story_review_policy(self) -> None:
+    def test_script_grounding_ignores_legacy_review_policy_state(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0002b"
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -189,10 +169,10 @@ class TestStageGrounding(unittest.TestCase):
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             report = json.loads((run_dir / "logs" / "grounding" / "script.json").read_text(encoding="utf-8"))
             self.assertEqual(report["status"], "ready")
-            self.assertFalse(report["approved_input_checks"][0]["approval_required"])
-            self.assertEqual(report["review_policy"]["story"], "optional")
+            self.assertNotIn("approved_input_checks", report)
+            self.assertNotIn("review_policy", report)
 
-    def test_script_grounding_allows_skipped_preapproved_story_review_policy(self) -> None:
+    def test_script_grounding_ignores_legacy_preapproved_state(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0002c"
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -215,12 +195,10 @@ class TestStageGrounding(unittest.TestCase):
                 )
             )
             self.assertEqual(report["status"], "ready")
-            self.assertFalse(
-                report["approved_input_checks"][0]["approval_required"]
-            )
-            self.assertEqual(report["review_policy"]["story"], "skipped")
+            self.assertNotIn("approved_input_checks", report)
+            self.assertNotIn("review_policy", report)
 
-    def test_manifest_grounding_is_separate_from_downstream_image_prompt_gate(self) -> None:
+    def test_manifest_grounding_and_scene_grounding_use_only_real_inputs(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
             run_dir = Path(td) / "output" / "momotaro_20990101_0003"
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -236,153 +214,13 @@ class TestStageGrounding(unittest.TestCase):
             self.assertTrue(validation["report_exists"])
             self.assertTrue(validation["report_ready"])
             self.assertTrue(validation["readset_exists"])
-            self.assertTrue(validation["audit_exists"])
-            self.assertTrue(validation["audit_passed"])
+            self.assertNotIn("audit", validation)
             self.assertEqual(validation["state_status"], "ready")
 
             image_prompt = _run_grounding(run_dir, "image_prompt")
-            self.assertEqual(image_prompt.returncode, 1)
+            self.assertEqual(image_prompt.returncode, 0, msg=image_prompt.stderr)
             report = json.loads((run_dir / "logs" / "grounding" / "scene_implementation.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["status"], "missing_inputs")
-
-    def test_audit_cli_rewrites_passed_state(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
-            run_dir = Path(td) / "output" / "momotaro_20990101_0003b"
-            run_dir.mkdir(parents=True, exist_ok=True)
-
-            _run_grounding(run_dir, "research")
-            result = _run_audit(run_dir, "research")
-
-            self.assertEqual(result.returncode, 0, msg=result.stderr)
-            audit = json.loads((run_dir / "logs" / "grounding" / "research.audit.json").read_text(encoding="utf-8"))
-            self.assertEqual(audit["status"], "passed")
-            state = parse_state_file(run_dir / "state.txt")
-            self.assertEqual(state["stage.research.audit.status"], "passed")
-
-    def test_audit_rejects_obsolete_report_and_readset_contract_versions(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
-            run_dir = Path(td) / "output" / "momotaro_20990101_0003c"
-            grounding_dir = run_dir / "logs" / "grounding"
-            grounding_dir.mkdir(parents=True, exist_ok=True)
-            legacy_stage_docs = [
-                "docs/video-generation.md",
-                "docs/implementation/video-prompting.md",
-            ]
-            report = {
-                "contract_version": 3,
-                "stage": "video_generation",
-                "canonical_stage": "video_generation",
-                "flow": "toc-run",
-                "status": "ready",
-                "resolved_paths": {
-                    "docs": [
-                        {"path": path, "exists": True}
-                        for path in legacy_stage_docs
-                    ],
-                },
-            }
-            readset = {
-                "contract_version": 3,
-                "stage": "video_generation",
-                "canonical_stage": "video_generation",
-                "flow": "toc-run",
-                "verified_before_edit": True,
-                "global_docs": [
-                    {"path": "docs/system-architecture.md", "exists": True},
-                ],
-                "stage_docs": [
-                    {"path": path, "exists": True}
-                    for path in legacy_stage_docs
-                ],
-            }
-            (grounding_dir / "video_generation.json").write_text(
-                json.dumps(report),
-                encoding="utf-8",
-            )
-            (grounding_dir / "video_generation.readset.json").write_text(
-                json.dumps(readset),
-                encoding="utf-8",
-            )
-
-            result = _run_audit(run_dir, "video_generation")
-
-            self.assertEqual(result.returncode, 1)
-            audit = json.loads(
-                (grounding_dir / "video_generation.audit.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(audit["status"], "failed")
-            checks = {entry["id"]: entry for entry in audit["checks"]}
-            self.assertFalse(checks["video_generation.audit.report_contract_current"]["passed"])
-            self.assertFalse(checks["video_generation.audit.readset_contract_current"]["passed"])
-            self.assertIn(
-                "workflow/playbooks/video-generation/kling.md",
-                audit["missing_stage_docs"],
-            )
-
-    def test_audit_uses_current_stage_contract_instead_of_saved_report_docs(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
-            run_dir = Path(td) / "output" / "momotaro_20990101_0003d"
-            run_dir.mkdir(parents=True, exist_ok=True)
-
-            self.assertEqual(_run_grounding(run_dir, "research").returncode, 0)
-            grounding_dir = run_dir / "logs" / "grounding"
-            report = json.loads(
-                (grounding_dir / "research.json").read_text(encoding="utf-8")
-            )
-            readset = json.loads(
-                (grounding_dir / "research.readset.json").read_text(encoding="utf-8")
-            )
-            report["resolved_paths"]["docs"] = []
-            readset["stage_docs"] = []
-            (grounding_dir / "research.json").write_text(
-                json.dumps(report),
-                encoding="utf-8",
-            )
-            (grounding_dir / "research.readset.json").write_text(
-                json.dumps(readset),
-                encoding="utf-8",
-            )
-
-            result = _run_audit(run_dir, "research")
-
-            self.assertEqual(result.returncode, 1)
-            audit = json.loads(
-                (grounding_dir / "research.audit.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(audit["status"], "failed")
-            self.assertEqual(
-                audit["missing_stage_docs"],
-                ["docs/information-gathering.md"],
-            )
-
-    def test_grounding_validation_rejects_obsolete_artifacts_without_reaudit(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
-            run_dir = Path(td) / "output" / "momotaro_20990101_0003e"
-            run_dir.mkdir(parents=True, exist_ok=True)
-
-            self.assertEqual(_run_grounding(run_dir, "research").returncode, 0)
-            grounding_dir = run_dir / "logs" / "grounding"
-            report_path = grounding_dir / "research.json"
-            readset_path = grounding_dir / "research.readset.json"
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-            readset = json.loads(readset_path.read_text(encoding="utf-8"))
-            report["contract_version"] = 3
-            readset["contract_version"] = 3
-            report_path.write_text(json.dumps(report), encoding="utf-8")
-            readset_path.write_text(json.dumps(readset), encoding="utf-8")
-
-            validation = grounding_validation(run_dir, "research")
-
-            self.assertTrue(validation["audit_exists"])
-            self.assertEqual(validation["audit"]["status"], "passed")
-            self.assertFalse(validation["audit_passed"])
-            self.assertFalse(validation["audit_current_contract_passed"])
-            current_checks = {
-                entry["id"]: entry
-                for entry in validation["current_contract_audit"]["checks"]
-            }
-            self.assertFalse(current_checks["research.audit.report_contract_current"]["passed"])
-            self.assertFalse(current_checks["research.audit.readset_contract_current"]["passed"])
+            self.assertEqual(report["status"], "ready")
 
     def test_run_stage_grounding_marks_failed_after_retry(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
@@ -419,11 +257,9 @@ class TestStageGrounding(unittest.TestCase):
 
             self.assertEqual(report["status"], "ready")
             self.assertEqual(report["parent_run_dir"], str(root_run_dir.resolve()))
-            self.assertEqual(report["required_state_checks"][0]["key"], "eval.p400_readiness.status")
-            self.assertTrue(report["required_state_checks"][0]["passed"])
+            self.assertEqual(report["required_state_checks"], [])
             scene_state = parse_state_file(scene_dir / "state.txt")
             self.assertEqual(scene_state["stage.scene_implementation.grounding.status"], "ready")
-            self.assertEqual(scene_state["stage.scene_implementation.audit.status"], "passed")
 
     def test_prepare_stage_context_returns_serialized_readset_for_script(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_grounding_") as td:
@@ -439,10 +275,8 @@ class TestStageGrounding(unittest.TestCase):
             self.assertEqual(payload["stage"], "script")
             self.assertEqual(payload["flow"], "toc-run")
             self.assertEqual(payload["read_order"], ["global_docs", "stage_docs", "templates", "inputs"])
-            self.assertTrue(payload["verified_before_edit"])
             self.assertTrue(payload["readset_path"].endswith("script.readset.json"))
             self.assertTrue(Path(payload["readset_path"]).exists())
-            self.assertTrue(Path(payload["audit_path"]).exists())
             self.assertEqual(payload["selected_optional_playbooks"], [])
             self.assertEqual(payload["selected_optional_playbook_paths"], [])
             self.assertEqual(payload["selected_optional_playbook_count"], 0)

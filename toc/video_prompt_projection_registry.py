@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 
-VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION = "video_prompt_projection_registry_v5"
+VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION = "video_prompt_projection_registry_v6"
 VIDEO_PROMPT_GROUP_ORDER = (
     "start_state",
     "primary_motion",
@@ -25,7 +25,6 @@ VIDEO_PROMPT_GROUP_ORDER = (
 
 _AUTHORING_RELEVANCE = {"required", "conditional", "none"}
 _PROVIDER_PROJECTION = {"derive", "may_surface", "must_not_surface"}
-_REVIEW_VISIBILITY = {"projection", "review_only", "none"}
 
 
 @dataclass(frozen=True)
@@ -33,9 +32,7 @@ class VideoPromptProjectionRule:
     source_keys: tuple[str, ...]
     authoring_relevance: str
     provider_projection: str
-    review_visibility: str
     transform: str
-    semantic_checks: tuple[str, ...]
     target_group: str | None = None
     activation_dependency: str = ""
     exclusion_reason: str = ""
@@ -45,9 +42,7 @@ class VideoPromptProjectionRule:
             "source_keys": list(self.source_keys),
             "authoring_relevance": self.authoring_relevance,
             "provider_projection": self.provider_projection,
-            "review_visibility": self.review_visibility,
             "transform": self.transform,
-            "semantic_checks": list(self.semantic_checks),
         }
         if source_key:
             payload["source_key"] = source_key
@@ -67,74 +62,55 @@ _RULES = (
         ("video_generation.tool",),
         "required",
         "derive",
-        "projection",
         "select_provider_specific_motion_policy",
-        ("provider固有の尺、camera、continuity制約に整合するか",),
         "constraints",
     ),
     VideoPromptProjectionRule(
         ("manifest.video_metadata.time",),
         "conditional",
         "derive",
-        "projection",
         "preserve_historical_world_continuity",
-        ("衣装、髪型、建築、生活道具、素材、技術水準を別時代へ変えていないか",),
         "continuity",
     ),
     VideoPromptProjectionRule(
         ("scene.time_of_day",),
         "conditional",
         "derive",
-        "projection",
         "preserve_daypart_light_continuity",
-        ("空の明るさ、光源、影、色温度を別時間帯へ変えていないか",),
         "continuity",
     ),
     VideoPromptProjectionRule(
         ("scene.time_of_day_visual_basis",),
         "conditional",
         "must_not_surface",
-        "review_only",
-        "review_daypart_lighting_basis_without_duplicating_provider_prose",
-        ("光源、明るさ、影、色温度がscene.time_of_dayを具体化しているか",),
-        exclusion_reason="derived scene review evidence",
+        "exclude_derived_daypart_basis_from_provider_prose",
+        exclusion_reason="derived scene evidence",
     ),
     VideoPromptProjectionRule(
         (
             "scene.location_mode",
             "scene.location_sequence",
             "scene.location_segments",
-        ),
+            ),
         "conditional",
         "must_not_surface",
-        "review_only",
-        "review_scene_route_while_motion_uses_only_the_assigned_cut_location",
-        ("複数場所sceneでも1 clipが一つの場所移動または一つの場所内動作に限定されているか",),
+        "exclude_scene_route_from_cut_local_motion_prose",
         exclusion_reason="scene routing metadata; cut location is the provider-facing anchor",
     ),
     VideoPromptProjectionRule(
         (
             "scene.visualizable_action",
-            "scene.review_only_visualizable_action",
         ),
         "none",
         "must_not_surface",
-        "review_only",
-        "review_scene_overview_but_project_only_cut_local_motion_state",
-        (
-            "scene全体の出来事列がcutの開始状態、主動作、終了状態へ複製されていないか",
-        ),
+        "exclude_scene_overview_from_cut_local_motion_prose",
         exclusion_reason="story/scene overview; cut-local event state owns provider motion prose",
     ),
     VideoPromptProjectionRule(
         ("first_frame_visual_plan",),
         "conditional",
         "must_not_surface",
-        "review_only",
-        "retain_exact_first_frame_visual_plan_for_review",
-        (
-            "provider開始状態が承認済みfirst_frame_visual_planの時間境界と一致するか",
-        ),
+        "retain_exact_first_frame_visual_plan_for_contract_trace",
         exclusion_reason="derived visual-plan metadata; selected temporal leaves are projected separately",
     ),
     VideoPromptProjectionRule(
@@ -149,12 +125,10 @@ _RULES = (
             "cut.cut_contract.first_frame_contract.visible_start_state.gaze_or_attention",
             "cut.cut_contract.first_frame_contract.first_frame_brief",
             "compiler_normalized.authoring_source.start_state",
-        ),
+            ),
         "required",
         "derive",
-        "projection",
-        "bind_motion_to_approved_visible_start_state",
-        ("承認済み開始画像の人物、構図、光、物の状態から自然に始まるか",),
+        "bind_motion_to_visible_start_state",
         "start_state",
     ),
     VideoPromptProjectionRule(
@@ -162,12 +136,10 @@ _RULES = (
             "video_generation.first_frame",
             "video_generation.input_image",
             "video_generation.last_frame",
-        ),
+            ),
         "conditional",
         "must_not_surface",
-        "review_only",
         "bind_frame_paths_without_rendering_paths",
-        ("開始・終了frame pathがprovider_request_bindingと一致するか",),
         exclusion_reason="provider binding paths; boundary instructions are rendered without paths",
     ),
     VideoPromptProjectionRule(
@@ -184,12 +156,10 @@ _RULES = (
             "video_generation.prompt_authoring_source",
             "video_generation.source_motion_prompt",
             "video_generation.motion_prompt",
-        ),
+            ),
         "required",
         "derive",
-        "projection",
         "resolve_one_primary_visible_action",
-        ("1 clip 1 intentとなり、複数の大きな出来事を詰め込んでいないか",),
         "primary_motion",
     ),
     VideoPromptProjectionRule(
@@ -198,12 +168,10 @@ _RULES = (
             "cut_contract.motion_contract.camera_motion",
             "video_generation.motion_contract.camera_motion",
             "compiler_normalized.authoring_source.camera_motion",
-        ),
+            ),
         "conditional",
         "derive",
-        "projection",
         "limit_camera_to_one_or_two_compatible_moves",
-        ("camera指示が1〜2個以内で主動作と競合しないか",),
         "camera_motion",
     ),
     VideoPromptProjectionRule(
@@ -212,12 +180,10 @@ _RULES = (
             "cut_contract.motion_contract.environment_motion",
             "video_generation.motion_contract.environment_motion",
             "compiler_normalized.authoring_source.environment_motion",
-        ),
+            ),
         "conditional",
         "may_surface",
-        "projection",
         "add_only_small_environment_motion_present_in_start_frame",
-        ("開始画像にない環境要素を追加せず、主動作を妨げないか",),
         "environment_motion",
     ),
     VideoPromptProjectionRule(
@@ -227,12 +193,10 @@ _RULES = (
             "cut.cut_contract.viewer_contract.emotional_micro_shift",
             "video_generation.motion_contract.emotional_change",
             "compiler_normalized.authoring_source.emotional_change",
-        ),
+            ),
         "conditional",
         "derive",
-        "projection",
         "translate_emotion_to_visible_expression_posture_and_timing",
-        ("感情変化が表情、姿勢、視線、速度として見えるか",),
         "emotional_change",
     ),
     VideoPromptProjectionRule(
@@ -245,12 +209,10 @@ _RULES = (
             "video_generation.motion_contract.handoff_state",
             "video_generation.motion_contract.end_state",
             "compiler_normalized.authoring_source.end_state",
-        ),
+            ),
         "required",
         "derive",
-        "projection",
         "resolve_visible_end_or_handoff_state",
-        ("宣言した終了状態に到達し、次の出来事を先取りしていないか",),
         "end_state",
     ),
     VideoPromptProjectionRule(
@@ -259,12 +221,10 @@ _RULES = (
             "video_generation.continuity_notes",
             "video_generation.direction_notes",
             "compiler_normalized.authoring_source.continuity",
-        ),
+            ),
         "conditional",
         "derive",
-        "projection",
         "preserve_face_outfit_props_geography_direction_and_light",
-        ("人物、衣装、重要物、進行方向、camera高、光源がclip内でdriftしないか",),
         "continuity",
     ),
     VideoPromptProjectionRule(
@@ -273,14 +233,10 @@ _RULES = (
             "cut_contract.continuity_contract.carry_forward_to_next_cut",
             "cut.cut_contract.cut_handoff.receives_from_previous.visible_or_audible_form",
             "cut.cut_contract.cut_handoff.delivers_to_next.visible_or_audible_form",
-        ),
+            ),
         "conditional",
         "must_not_surface",
-        "review_only",
-        "review_downstream_handoff_without_constraining_current_clip",
-        (
-            "current clipの終了状態と下流handoffを区別し、到達後の状態をclip全体へ逆投影していないか",
-        ),
+        "exclude_downstream_handoff_from_current_clip_prose",
         exclusion_reason="downstream handoff evidence; current clip continuity uses stable preserve inputs only",
     ),
     VideoPromptProjectionRule(
@@ -289,14 +245,10 @@ _RULES = (
             "cut.cut_contract.continuity_contract.location_ids",
             "cut.cut_contract.asset_dependency.location_ids_required",
             "cut.cut_contract.source_event_contract.source_concrete_events",
-        ),
+            ),
         "required",
         "must_not_surface",
-        "review_only",
-        "review_cut_local_location_provenance",
-        (
-            "cutの開始場所がscene route内の担当場所と一致し、sibling場所を混ぜていないか",
-        ),
+        "exclude_cut_location_provenance_from_provider_prose",
         exclusion_reason="cut-local location provenance; visible spatial state is projected separately",
     ),
     VideoPromptProjectionRule(
@@ -307,32 +259,24 @@ _RULES = (
             "cut.cut_blueprint.first_frame_excluded_object_ids",
             "cut.cut_blueprint.first_frame_asset_policy.character_asset_overrides",
             "cut.cut_blueprint.first_frame_asset_policy.excluded_object_ids",
-        ),
+            ),
         "conditional",
         "must_not_surface",
-        "review_only",
-        "review_first_frame_asset_boundary_policy",
-        (
-            "開始人物assetと除外objectが終了側revealを開始画像へ先取りさせていないか",
-        ),
-        exclusion_reason="first-frame asset dependency policy; provider motion prose uses the approved frame",
+        "exclude_first_frame_asset_boundary_policy_from_provider_prose",
+        exclusion_reason="first-frame asset dependency policy; provider motion prose uses the supplied frame",
     ),
     VideoPromptProjectionRule(
         ("video_generation.reference_roles",),
         "conditional",
         "derive",
-        "projection",
         "render_ordered_reference_roles_without_paths",
-        ("各参照画像の役割が画像順と一対一に対応しているか",),
         "continuity",
     ),
     VideoPromptProjectionRule(
         ("video_generation.references",),
         "conditional",
         "must_not_surface",
-        "review_only",
         "bind_reference_paths_without_rendering_paths",
-        ("参照画像pathの順序がreference_rolesと一致しているか",),
         exclusion_reason="provider binding paths; roles are rendered instead",
     ),
     VideoPromptProjectionRule(
@@ -340,26 +284,20 @@ _RULES = (
             "cut.cut_contract.motion_contract.allowed_new_reveal_elements",
             "cut_contract.motion_contract.allowed_new_reveal_elements",
             "video_generation.motion_contract.allowed_new_reveal_elements",
-        ),
+            ),
         "conditional",
         "derive",
-        "projection",
         "render_explicit_primary_motion_reveal_allowlist",
-        (
-            "主動作が因果的に生成する要素だけが許可され、開始画像との矛盾を作っていないか",
-        ),
         "constraints",
     ),
     VideoPromptProjectionRule(
         (
             "cut.cut_contract.source_event_contract.allowed_reveal_info_ids",
             "cut_contract.source_event_contract.allowed_reveal_info_ids",
-        ),
+            ),
         "conditional",
         "must_not_surface",
-        "review_only",
-        "review_allowed_reveal_information_boundary",
-        ("許可IDがcanonical reveal inventoryと当該cutのevent境界に一致するか",),
+        "exclude_opaque_reveal_information_boundary_from_provider_prose",
         exclusion_reason="opaque reveal identifiers",
     ),
     VideoPromptProjectionRule(
@@ -367,14 +305,10 @@ _RULES = (
             "cut.cut_contract.use_next_cut_first_frame_as_last_frame",
             "cut_contract.use_next_cut_first_frame_as_last_frame",
             "cut.cut_contract.cut_handoff.delivers_to_next.binds_video_last_frame_to_next_first_frame",
-        ),
+            ),
         "conditional",
         "must_not_surface",
-        "review_only",
-        "review_resolved_next_first_frame_boundary_binding",
-        (
-            "next first-frame境界が同一または明示許可された場所とrevealに一致するか",
-        ),
+        "exclude_next_first_frame_boundary_metadata_from_provider_prose",
         exclusion_reason="boundary-resolution metadata; only the resolved last-frame binding reaches the provider",
     ),
     VideoPromptProjectionRule(
@@ -386,12 +320,10 @@ _RULES = (
             "video_generation.motion_contract.must_avoid",
             "video_generation.motion_contract.forbidden_additions",
             "compiler_normalized.authoring_source.constraints",
-        ),
+            ),
         "required",
         "derive",
-        "projection",
         "render_minimal_high_risk_negative_constraints",
-        ("新しい人物、重要物、reveal、別shot化を防げているか",),
         "constraints",
     ),
     VideoPromptProjectionRule(
@@ -400,12 +332,10 @@ _RULES = (
             "cut.cut_contract.viewer_contract.target_beat",
             "cut.cut_contract.viewer_contract.screen_question",
             "cut.cut_contract.viewer_contract.dramatic_job",
-        ),
+            ),
         "required",
         "must_not_surface",
-        "review_only",
-        "use_story_job_to_review_motion_without_rendering_design_labels",
-        ("動きがcutの物語上の責務を満たすか",),
+        "exclude_story_job_labels_from_motion_prose",
         exclusion_reason="production design metadata",
     ),
     VideoPromptProjectionRule(
@@ -416,12 +346,10 @@ _RULES = (
             "cut_contract.motion_contract.source_event_beat_id",
             "cut.cut_contract.motion_contract.must_not_advance_to_event_beat_ids",
             "cut.cut_contract.source_event_contract.forbidden_reveal_info_ids",
-        ),
+            ),
         "required",
         "must_not_surface",
-        "review_only",
         "enforce_event_and_reveal_boundary_without_rendering_internal_ids",
-        ("担当eventとreveal境界を越えていないか",),
         exclusion_reason="opaque event and reveal identifiers",
     ),
     VideoPromptProjectionRule(
@@ -430,40 +358,23 @@ _RULES = (
             "cut.image_generation.api_prompt_payload",
             "cut.audio.narration.text",
             "cut.audio.narration.tts_text",
-        ),
+            ),
         "none",
         "must_not_surface",
-        "review_only",
         "keep_image_and_narration_prose_out_of_motion_prompt",
-        ("画像promptやnarrationをmotion指示として複製していないか",),
-        exclusion_reason="review context only",
+        exclusion_reason="provider boundary only",
     ),
 )
 
 _REQUIRED_REGISTRY_SOURCE_KEYS = (
-    "scene.visualizable_action",
-    "first_frame_visual_plan",
     "first_frame_visual_plan.temporal_boundary.event_fact_visible_in_still",
     "first_frame_visual_plan.temporal_boundary.first_visible_moment",
     "cut.cut_contract.first_frame_contract.visible_start_state.spatial_state",
     "video_generation.motion_contract.motion_brief",
     "video_generation.motion_contract.action_intent",
-    "cut.cut_contract.location",
-    "cut.cut_contract.continuity_contract.carry_forward_to_next_cut",
-    "cut.cut_contract.continuity_contract.location_ids",
-    "cut.cut_contract.asset_dependency.location_ids_required",
-    "cut.cut_contract.source_event_contract.source_concrete_events",
-    "cut.cut_contract.source_event_contract.allowed_reveal_info_ids",
-    "cut.cut_contract.use_next_cut_first_frame_as_last_frame",
-    "cut.cut_contract.cut_handoff.delivers_to_next.binds_video_last_frame_to_next_first_frame",
-    "cut.cut_contract.cut_handoff.receives_from_previous.visible_or_audible_form",
-    "cut.cut_contract.cut_handoff.delivers_to_next.visible_or_audible_form",
-    "cut.cut_contract.first_frame_character_asset_overrides",
-    "cut.cut_contract.first_frame_excluded_object_ids",
-    "cut.cut_blueprint.first_frame_character_asset_overrides",
-    "cut.cut_blueprint.first_frame_excluded_object_ids",
-    "cut.cut_blueprint.first_frame_asset_policy.character_asset_overrides",
-    "cut.cut_blueprint.first_frame_asset_policy.excluded_object_ids",
+    "video_generation.motion_contract.end_state",
+    "video_generation.reference_roles",
+    "video_generation.motion_contract.allowed_new_reveal_elements",
 )
 
 
@@ -491,8 +402,6 @@ def video_projection_registry_issues() -> list[str]:
             issues.append(f"invalid_authoring_relevance:{rule.authoring_relevance}")
         if rule.provider_projection not in _PROVIDER_PROJECTION:
             issues.append(f"invalid_provider_projection:{rule.provider_projection}")
-        if rule.review_visibility not in _REVIEW_VISIBILITY:
-            issues.append(f"invalid_review_visibility:{rule.review_visibility}")
         if rule.target_group and rule.target_group not in VIDEO_PROMPT_GROUP_ORDER:
             issues.append(f"unknown_target_group:{rule.target_group}")
         if rule.provider_projection in {"derive", "may_surface"} and not rule.target_group:
@@ -530,7 +439,7 @@ def build_video_prompt_projection(
     normalized_authoring_groups: Mapping[str, Any] | None = None,
     compact: bool = False,
 ) -> dict[str, Any]:
-    """Project one video target into authoring/review groups.
+    """Project one video target into authoring/provider groups.
 
     Direct keyword values are adapters for CLI and frontend call sites.  They
     are normalized into the same scoped structure used by manifest readers.
@@ -601,7 +510,7 @@ def build_video_prompt_projection(
     active_rules: list[dict[str, Any]] = []
     inactive_rules: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
-    review_only_sources: list[dict[str, Any]] = []
+    excluded_sources: list[dict[str, Any]] = []
     shadowed_sources: list[dict[str, Any]] = []
     canonical_motion = _mapping(canonical_contract.get("motion_contract"))
     authoritative_empty_source_keys = set()
@@ -621,22 +530,20 @@ def build_video_prompt_projection(
         ]
         if rule.provider_projection == "must_not_surface":
             excluded.append(rule.as_dict())
-            if rule.review_visibility == "review_only":
-                for source_key, value in present_sources:
-                    item = rule.as_dict(source_key=source_key, value=value)
-                    if compact:
-                        item = {
-                            key: item[key]
-                            for key in (
-                                "source_key",
-                                "authoring_relevance",
-                                "provider_projection",
-                                "review_visibility",
-                                "value",
-                            )
-                            if key in item
-                        }
-                    review_only_sources.append(item)
+            for source_key, value in present_sources:
+                item = rule.as_dict(source_key=source_key, value=value)
+                if compact:
+                    item = {
+                        key: item[key]
+                        for key in (
+                            "source_key",
+                            "authoring_relevance",
+                            "provider_projection",
+                            "value",
+                        )
+                        if key in item
+                    }
+                excluded_sources.append(item)
             continue
         explicit_empty_source = next(
             (
@@ -671,7 +578,6 @@ def build_video_prompt_projection(
                         "source_key",
                         "authoring_relevance",
                         "provider_projection",
-                        "review_visibility",
                         "target_group",
                         "value",
                     )
@@ -690,9 +596,7 @@ def build_video_prompt_projection(
             "source_key": "provider_policy.kling.one_clip_one_intent",
             "authoring_relevance": "required",
             "provider_projection": "derive",
-            "review_visibility": "projection",
             "transform": "enforce_kling_single_intent_continuous_shot",
-            "semantic_checks": ["主動作が一つで、camera指示が最大2つか"],
             "target_group": "constraints",
             "value": ["主動作は一つ", "単一の連続ショット"],
         }
@@ -721,7 +625,7 @@ def build_video_prompt_projection(
         "active_rules": active_rules,
         "inactive_rules": inactive_rules,
         "excluded": excluded,
-        "review_only_sources": review_only_sources,
+        "excluded_sources": excluded_sources,
         "shadowed_sources": shadowed_sources,
         "provider": provider,
         "mode": mode,

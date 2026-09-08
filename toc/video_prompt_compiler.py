@@ -298,7 +298,7 @@ def compile_video_api_prompt_v1(
     direction_notes: Sequence[Any] = (),
     continuity_notes: Sequence[Any] = (),
     first_frame_visual_plan: Mapping[str, Any] | None = None,
-    review_only_dependencies: Mapping[str, Any] | None = None,
+    source_context: Mapping[str, Any] | None = None,
     scene_time_of_day_visual_basis: Any = None,
     scene_location_mode: str = "",
     scene_location_sequence: Sequence[Any] = (),
@@ -307,7 +307,7 @@ def compile_video_api_prompt_v1(
     prefix: str = "",
     suffix: str = "",
 ) -> dict[str, Any]:
-    """Return a deterministic, reviewable provider prompt payload."""
+    """Return a deterministic provider prompt payload."""
 
     vg = dict(video_generation or {})
     raw_source = str(source_prompt or vg.get("prompt_authoring_source") or vg.get("source_motion_prompt") or "").strip()
@@ -363,9 +363,7 @@ def compile_video_api_prompt_v1(
     first_frame_plan_start_values = _dedupe(
         _first_frame_plan_start_values(first_frame_visual_plan)
     )
-    normalized_review_only_dependencies = _normalized_digest_source(
-        dict(review_only_dependencies or {})
-    )
+    normalized_source_context = _normalized_digest_source(dict(source_context or {}))
 
     projection = build_video_prompt_projection(
         manifest={"video_metadata": {"time": story_time}},
@@ -400,11 +398,6 @@ def compile_video_api_prompt_v1(
         first_frame_visual_plan=first_frame_visual_plan,
         normalized_authoring_groups=parsed_source,
     )
-    if normalized_review_only_dependencies:
-        projection["review_only_dependencies"] = (
-            normalized_review_only_dependencies
-        )
-
     motion = _mapping(contract.get("motion_contract"))
     first_contract = _mapping(contract.get("first_frame_contract"))
     continuity_contract = _mapping(contract.get("continuity_contract"))
@@ -448,8 +441,7 @@ def compile_video_api_prompt_v1(
             vg_motion.get("action_intent"),
             *parsed_primary,
         )
-    generated_primary_fallback = not bool(primary)
-    if generated_primary_fallback:
+    if not primary:
         if first and last:
             primary = "開始状態から終了画像の状態へ、一つの自然な動きで連続して移る"
         elif first:
@@ -681,10 +673,6 @@ def compile_video_api_prompt_v1(
     omitted_groups = [group for group in VIDEO_PROMPT_GROUP_ORDER if not fragment_values[group]]
     prompt = _render_prompt(included_fragments)
     _validate_provider_prompt(prompt)
-    quality_issues = _video_prompt_quality_issues(
-        fragment_values=fragment_values,
-        generated_primary_fallback=generated_primary_fallback,
-    )
 
     mode = (
         "first_last_frame"
@@ -732,8 +720,7 @@ def compile_video_api_prompt_v1(
         "provider_policy": provider_policy,
         "provider_request_binding": provider_request_binding,
         "negative_prompt": negative_prompt,
-        "quality_issues": quality_issues,
-        "review_only_sources": projection["review_only_sources"],
+        "projection_contract": projection,
         "design_source": _normalized_digest_source(
             {
                 "contract": contract,
@@ -744,7 +731,7 @@ def compile_video_api_prompt_v1(
                 "direction_notes": direction,
                 "continuity_notes": continuity,
                 "first_frame_visual_plan": first_frame_visual_plan,
-                "review_only_dependencies": normalized_review_only_dependencies,
+                "source_context": normalized_source_context,
                 "explicit_empty_authoring_fields": (
                     ["motion_contract.allowed_new_reveal_elements"]
                     if (
@@ -783,8 +770,9 @@ def compile_video_api_prompt_v1(
         },
         "included_fragments": included_fragments,
         "omitted_groups": omitted_groups,
-        "quality_issues": quality_issues,
     }
+    if normalized_source_context:
+        ir["dependencies"]["source_context"] = normalized_source_context
     return {
         "policy_version": VIDEO_API_PROMPT_POLICY_VERSION,
         "compiler_version": VIDEO_PROMPT_COMPILER_VERSION,
@@ -795,12 +783,11 @@ def compile_video_api_prompt_v1(
         "provider_request_binding": provider_request_binding,
         "prompt": prompt,
         "negative_prompt": negative_prompt,
-        "quality_issues": quality_issues,
         "source_digest": source_digest,
         "sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "included_fragments": included_fragments,
         "omitted_groups": omitted_groups,
-        "projection_review_contract": projection,
+        "projection_contract": projection,
         "video_prompt_ir": ir,
     }
 
@@ -1226,117 +1213,6 @@ def _normalize_reference_roles(
             "video_reference_roles_image_index_must_be_consecutive_unique_and_ordered"
         )
     return tuple(normalized)
-
-
-_UNRESOLVED_ALTERNATIVE_RE = re.compile(
-    r"(?:または|もしくは|あるいは|\bor\b)",
-    re.I,
-)
-_ABSTRACT_PRIMARY_MOTION_RE = re.compile(
-    r"(?:変化点|(?:scene|シーン|画面内|内面)の変化|"
-    r"変化を(?:見せる|表す|描く)|何かが変化|動きが起きる|"
-    r"change(?:s|d)?\s+(?:occurs?|happens?))",
-    re.I,
-)
-_ABSTRACT_END_STATE_RE = re.compile(
-    r"(?:変化点|変化の証拠|変化後の(?:物証|証拠)|物証|"
-    r"(?:scene|シーン|画面内|内面)の変化|その後へつながる|"
-    r"次へつながる|結果が見える|end\s+state)",
-    re.I,
-)
-_SEQUENTIAL_OVERVIEW_RE = re.compile(r"(?:→|⇒|->|=>)")
-
-
-def _video_prompt_quality_issues(
-    *,
-    fragment_values: Mapping[str, str],
-    generated_primary_fallback: bool,
-) -> list[dict[str, Any]]:
-    issues: list[dict[str, Any]] = []
-
-    def add(code: str, group: str, message: str, value: str) -> None:
-        item = {
-            "code": code,
-            "blocking": True,
-            "group": group,
-            "message": message,
-            "value": value,
-        }
-        if item not in issues:
-            issues.append(item)
-
-    primary = str(fragment_values.get("primary_motion") or "").strip()
-    environment = str(fragment_values.get("environment_motion") or "").strip()
-    emotional = str(fragment_values.get("emotional_change") or "").strip()
-    end_state = str(fragment_values.get("end_state") or "").strip()
-
-    if generated_primary_fallback:
-        add(
-            "video_motion_generated_fallback",
-            "primary_motion",
-            "主動作が設計値から解決できず、compiler fallbackが生成された",
-            primary,
-        )
-
-    for group in (
-        "start_state",
-        "primary_motion",
-        "environment_motion",
-        "emotional_change",
-        "end_state",
-    ):
-        value = str(fragment_values.get(group) or "").strip()
-        if value and _UNRESOLVED_ALTERNATIVE_RE.search(value):
-            add(
-                "video_motion_unresolved_alternative",
-                group,
-                "providerへ渡す前に一つの画面上の状態へ確定する必要がある",
-                value,
-            )
-        if value and _SEQUENTIAL_OVERVIEW_RE.search(value):
-            add(
-                "video_motion_sequential_overview",
-                group,
-                "scene全体の出来事列ではなく、このclip内の一つの開始・動作・終了へ分解する必要がある",
-                value,
-            )
-
-    if primary and _ABSTRACT_PRIMARY_MOTION_RE.search(primary):
-        add(
-            "video_motion_abstract_primary",
-            "primary_motion",
-            "主動作を人物または物の具体的で観察可能な動作へ変換する必要がある",
-            primary,
-        )
-    if end_state and _ABSTRACT_END_STATE_RE.search(end_state):
-        add(
-            "video_motion_abstract_end_state",
-            "end_state",
-            "終了状態を静止画でも確認できる具体的な配置・姿勢・物の状態へ変換する必要がある",
-            end_state,
-        )
-
-    primary_key = _quality_comparison_key(primary)
-    for group, value in (
-        ("environment_motion", environment),
-        ("emotional_change", emotional),
-    ):
-        if value and primary_key and _quality_comparison_key(value) == primary_key:
-            add(
-                (
-                    "video_motion_duplicate_environment"
-                    if group == "environment_motion"
-                    else "video_motion_duplicate_emotion"
-                ),
-                group,
-                f"{group}が主動作を重複しており独立した補助情報になっていない",
-                value,
-            )
-    return issues
-
-
-def _quality_comparison_key(value: str) -> str:
-    return re.sub(r"[\s、。,.!！?？;；:：]+", "", str(value or "")).lower()
 
 
 def _sha256_json(value: Any) -> str:

@@ -30,6 +30,7 @@ import tempfile
 from typing import Any, TypeAlias
 
 from .story_authoring import (
+    AUDIENCE_MEANING_INSTRUCTION,
     STORY_CONTRACT_VERSION,
     SCENE_CAUSAL_CONNECTION_INSTRUCTION,
     build_research_registry,
@@ -610,6 +611,7 @@ def build_scene_author_prompt(
         "role": "Scene Author",
         "instructions": [
             SCENE_CAUSAL_CONNECTION_INSTRUCTION,
+            AUDIENCE_MEANING_INSTRUCTION,
             "Author only the declared scene; do not move source events between scenes.",
             "Preserve every source-backed fact and keep creative complements explicit.",
             "Define the complete lifecycle: start_state, event_sequence, turning_event, end_state, preservation/reveal contract, and handoff_chain.",
@@ -655,6 +657,7 @@ def build_scene_batch_author_prompt(
         "role": "Scene Author",
         "instructions": [
             SCENE_CAUSAL_CONNECTION_INSTRUCTION,
+            AUDIENCE_MEANING_INSTRUCTION,
             "Author every frozen scene plan in order and return one scenes array.",
             "Do not add, remove, reorder, merge, or split plans or source-event ownership.",
             "For every scene write the complete lifecycle and all concrete causal beats; one source event may expand into multiple beats.",
@@ -1131,6 +1134,7 @@ def _build_repair_prompt(
         "role": "Scene Repair Author",
         "instructions": [
             SCENE_CAUSAL_CONNECTION_INSTRUCTION,
+            AUDIENCE_MEANING_INSTRUCTION,
             "Repair only the named scene and return scene_id plus replacement_scene.",
             "Do not return or rewrite the complete story; neighboring scenes are read-only context.",
             "Preserve the frozen source event ownership and handoff contract.",

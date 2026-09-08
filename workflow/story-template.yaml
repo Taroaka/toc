@@ -6,11 +6,11 @@ story_metadata:
   scene_authoring_contract: "story_scene_contract_v1"
   story_author_model: "gpt-6-astra"
   scene_author_model: "gpt-6-astra"
-  # 既存の評価済み物語を映像化する場合のみ、次のコメントを外す。original_story では key 自体を出力しない。
+  # 既存物語を映像化する場合のみ、次のコメントを外す。original_story では key 自体を出力しない。
   # adaptation_value_contract: "required_v1"
   # scene time-of-day 新契約の明示マーカー。Historical time の有無で代用しない。
   scene_time_of_day_contract: "required_v1"
-  # time_of_day から導いた光源/明るさ/影/色温度の review evidence 契約。
+  # time_of_day から導いた光源/明るさ/影/色温度の derived contract。
   scene_time_of_day_visual_basis_contract: "required_v1"
   # 物語世界の歴史的時代。古典・既存物語は「〇〇時代」、ユーザー創作は空文字を許容する。
   time: "string"
@@ -40,26 +40,18 @@ adaptation_source_contract:
   forbidden_value_distortions:
     - "REPLACE_ME: 現代化・スペクタクル化で起こりやすい原作価値の改悪"
 
-subagent_trace:
-  - subagent_id: "story-candidate-audit-001"
-    role: "story_candidate|source_vs_creative_audit|grounding_audit"
-    input_artifact: "output/<topic>_<timestamp>/research.md"
-    output_artifact: "output/<topic>_<timestamp>/scratch/story_candidate_a.md"
-    accepted_by_main: false
-    reason: "string"
-
 outcome_contract:
   goal: "research.md を、後続 stage が迷わず使える story.md に変換する"
   success_criteria:
     - "p100 の story_materials / source_passages / variants / conflicts から scene / beat / emotion curve を作る"
-    - "protagonist / world / conflict / transformation / theme が scene 分解済みである"
+    - "world / conflict / theme と、作品に該当する protagonist / transformation が scene 分解済みである"
     - "primary hook と opening が具体的な事実または強い物語状況を持つ"
     - "各 scene が research refs を持ち、創作補完と事実主張を混同しない"
     - "各 scene が purpose / conflict / turn / affect / visualizable_action / grounding_note を持つ"
     - "最初を除く全 scene が直前の結果を原因として始まる理由を持つ（なぜなら）。時間的な並び（そしてそれから）だけにしない"
     - "各 scene が非空の open string time_of_day を持つ"
     - "各 scene が time_of_day を光源・明るさ・影・色温度へ具体化した visual basis を持つ"
-    - "hybridization が必要な場合は approval_status が approved である"
+    - "hybridization が必要な場合は明示した user choice が保存されている"
     - "下流で 1 clip = 1意図 に分けられる scene 意図が残っている"
   source_vs_creative_boundary:
     source_backed:
@@ -81,9 +73,8 @@ outcome_contract:
 # Creative selection（必須: 複数案→選択）
 #
 # 目的:
-# - “創造”で多様性を出し、“選択”でスコアが高い案を採用する。
+# - “創造”で多様性を出し、“選択”で source grounding と映像化可能性を確認する。
 # - Hero's Journey への当てはめは必須ではない（フレームワークは道具）。
-# - 候補の numeric score は author が自己採点せず、p230 story_review.md の subagent 評価で付ける。
 selection:
   candidates:
     - candidate_id: "A"
@@ -93,14 +84,14 @@ selection:
         - element: "string"
           purpose: "dramatic_compression|composite_character|visual_symbol|dialogue"
           does_not_contradict_refs: true
-      why_it_scores: ["string"]
+      rationale: ["string"]
       requires_hybridization_approval: false
       conflicts_referenced: ["research.conflicts[C1]"]
     - candidate_id: "B"
       logline: "string"
       fact_basis_refs: ["research.story_baseline.beat_sheet[0]"]
       creative_inventions: []
-      why_it_scores: ["string"]
+      rationale: ["string"]
       requires_hybridization_approval: false
       conflicts_referenced: []
   chosen_candidate_id: "A"
@@ -126,10 +117,12 @@ ask_before_edit:
   question_for_user: "この変更は事実関係または承認済み構成を変えます。進めてよいですか？"
 
 story_structure:
+  # 単独主人公を持つ場合の記述例。群像・解説などで不要な主体を追加しない。
   protagonist:
     name: "string"
     role: "string"
     source_node_id: "string"
+  # 英雄譚の構成が適する場合に使う。不要な段階は省略でき、成長・帰還を必須にしない。
   journey:
     ordinary_world:
       description: "string"
@@ -141,12 +134,18 @@ story_structure:
     return:
       resolution: "string"
   theme:
+    # 任意: 作品が扱う問いと観客の理解の始点・終点を、主題と併せて記述できる。
+    # docs/story-creation.md「観客の理解と意味の設計」を参照。成長・教訓・解決は必須でない。
+    # 人物の journey.transformation と、観客が知ること・解釈することを混同しない。
     governing_thought: "string"
 
 # Architect の scene_plan では causal_connection_from_previous に直前の原因→結果→今の行動を記述（最初は null）。
 # Scene Author は冒頭 trigger / start_state / handoff_chain.incoming に反映。根拠のない因果は grounding_note に明示。
 story_decomposition:
   source_material_refs: ["research.story_materials.chronological_events[E1]", "research.source_passages[P1]"]
+  # 任意: 観客の理解を支える/深める/揺らす出来事と提示順を、既存 scene の責務へ結ぶ。
+  # 反復要素や世界観の行動表現を採用する場合だけ、意味の推移と source/scene をここで説明する。
+  # 固定段階・反復回数・必須の象徴は設けず、不確かさや変わらないことも保つ。
   beat_strategy: "string"
   emotion_curve_summary: "string"
   notes_on_ignored_or_deferred_material: ["string"]
@@ -157,7 +156,7 @@ script:
       # scene 固有の時間帯。enum ではないため「夜明け前」「真夜中」なども許容する。新規 artifact では非空必須。
       # contract marker がない Legacy の missing/empty だけ、読み込み時に "" として扱い、時間帯 prompt fragment を生成しない。
       time_of_day: "朝"
-      # time_of_day から導く review evidence。第二の時間帯 authoring root にしない。
+      # time_of_day から導く derived visual basis。第二の時間帯 authoring root にしない。
       time_of_day_visual_basis: "光源は低い朝の自然光。空や窓外の明るさは穏やかに上がる。影は長く柔らかい。色温度はわずかに暖かい。"
       location:
         location_id: "location_01"
@@ -217,6 +216,7 @@ script:
         locations: []
         objects: []
         active_world_rules: []
+        # 任意指針の具体化: この時点の観客に開示済みの情報。人物の信念や世界の事実と区別する。
         audience_knowledge: []
       event_sequence:
         - beat_id: "scene_01_beat_01"
@@ -229,6 +229,7 @@ script:
           what_happens: "誰がどこで何をするか"
           conflict_or_constraint: "行為を妨げる具体的な力"
           required_visual_evidence: ["画面で確認できる人物・物・状態"]
+          # 更新だけでなく、理解の補強・維持・疑念も記述できる。毎 beat の反転や新事実は要求しない。
           audience_knowledge_delta: "観客の理解の変化"
           immediate_consequence: "次beatを発生させる結果"
       turning_event:
@@ -241,6 +242,7 @@ script:
         locations: []
         objects: []
         active_world_rules: []
+        # 始点からの理解の到達点。未解決の問いは unresolved_threads と reveal_contract に整合させる。
         audience_knowledge: []
         unresolved_threads: []
       reveal_contract:
@@ -280,9 +282,11 @@ engagement_design:
     content: "string"
     position_percent: 0
 
-quality_scores:
-  engagement_potential: 0.0
-  information_accuracy: 0.0
+authoring_checks:
+  source_refs_present: true
+  scene_ids_unique: true
+  event_order_valid: true
+  scene_handoffs_valid: true
   success_criteria:
     viewer_takeaway: "string"
     must_remember: ["string"]

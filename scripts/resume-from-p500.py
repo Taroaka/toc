@@ -756,49 +756,10 @@ def _resolve_resume_mode_contract(
     if create_mode:
         state_updates["runtime.create_mode"] = create_mode
     create_input = _read_canonical_create_input(run_dir)
-    canonical_review_mode = str(
-        create_input.get("review_mode")
-        if isinstance(create_input, dict)
-        else ""
-    ).strip()
-    if canonical_review_mode and canonical_review_mode not in {
-        "standard",
-        "preapproved",
-    }:
-        raise P500ResumeError(
-            "canonical create input review_mode is unsupported"
-        )
-    state_review_mode = str(
-        contract_state.get("runtime.review_mode") or ""
-    ).strip()
-    if not state_review_mode and (
-        contract_state.get("runtime.review_policy") == "preapproved"
-    ):
-        state_review_mode = "preapproved"
-    if (
-        state_review_mode
-        and canonical_review_mode
-        and state_review_mode != canonical_review_mode
-    ):
-        raise P500ResumeError(
-            "p500 resume review mode conflicts between authenticated state "
-            "and create_input.json"
-        )
-    review_mode = state_review_mode or canonical_review_mode or "standard"
-    if review_mode not in {"standard", "preapproved"}:
-        raise P500ResumeError(
-            f"p500 resume review mode is unsupported: {review_mode}"
-        )
-    state_updates["runtime.review_mode"] = review_mode
-    state_updates["runtime.review_policy"] = (
-        "preapproved" if review_mode == "preapproved" else "frontend"
-    )
-
     return {
         "experience": experience,
         "source_run": source_run,
         "create_mode": create_mode,
-        "review_mode": review_mode,
         "state_updates": state_updates,
     }
 
@@ -852,11 +813,6 @@ def _resolve_exact_resume_source(
     if payload.get("schema_version") != CREATE_INPUT_SCHEMA_VERSION:
         raise P500ResumeError(
             "canonical create input has an unsupported schema_version"
-        )
-    review_mode = str(payload.get("review_mode") or "standard").strip()
-    if review_mode not in {"standard", "preapproved"}:
-        raise P500ResumeError(
-            "canonical create input review_mode is unsupported"
         )
     canonical_topic = payload.get("topic")
     if not isinstance(canonical_topic, str) or canonical_topic != topic:
@@ -1453,50 +1409,46 @@ def _resume_state_updates(
             "slot.p520.status": "done",
             "slot.p520.note": "asset inventory rematerialized from preserved p450 manifest",
             "slot.p530.status": "done",
-            "slot.p530.note": "asset plan rematerialized; semantic review pending",
+            "slot.p530.note": "asset plan rematerialized",
             "slot.p540.status": "pending",
-            "slot.p540.note": "asset semantic review has not completed",
+            "slot.p540.note": "asset generation is pending",
             "slot.p550.status": "pending",
             "slot.p550.note": "candidate requests exist but are not frozen",
             "slot.p560.status": "pending",
             "slot.p560.note": "asset generation has not completed",
             "slot.p570.status": "pending",
-            "slot.p570.note": "asset continuity review has not completed",
+            "slot.p570.note": "asset continuity handoff is pending",
             "slot.p620.status": "done",
             "slot.p620.note": "preserved production manifest rematerialized into candidate requests",
             "slot.p630.status": "pending",
-            "slot.p630.note": "scene implementation hard review has not completed",
+            "slot.p630.note": "scene implementation validation is pending",
             "slot.p640.status": "pending",
-            "slot.p640.note": "scene implementation judgment has not completed",
+            "slot.p640.note": "scene implementation requests are pending",
             "slot.p650.status": "pending",
-            "slot.p650.note": "candidate requests materialized; waiting for semantic review and final freeze",
-            "review.image_prompt.request_freeze.status": "draft",
-            "review.image_prompt.request_freeze.request": "image_generation_requests.md",
-            "review.image_prompt.request_freeze.snapshot": "image_generation_request_snapshot.json",
+            "slot.p650.note": "candidate requests materialized; waiting for request freeze",
+            "generation.image_prompt.request_freeze.status": "draft",
+            "generation.image_prompt.request_freeze.request": "image_generation_requests.md",
+            "generation.image_prompt.request_freeze.snapshot": "image_generation_request_snapshot.json",
         }
     )
     if stop_target == "p680":
         state_updates.update(
             {
                 "slot.p660.status": "pending",
-                "slot.p660.note": "waiting for image-prompt semantic review and final request freeze",
+                "slot.p660.note": "waiting for final image request freeze",
                 "slot.p670.status": "pending",
                 "slot.p670.note": "waiting for scene image generation to finish",
                 "slot.p680.status": "pending",
-                "slot.p680.note": "frontend image review waits for every scene image",
+                "slot.p680.note": "scene image generation waits for every request",
             }
         )
     duration_plan = dict(profile["duration_plan"])
-    preapproved_reviews = resolved_mode["review_mode"] == "preapproved"
-    review_policy = "preapproved" if preapproved_reviews else "frontend"
-    required_review_gate = "skipped" if preapproved_reviews else "required"
-    optional_review_gate = "skipped" if preapproved_reviews else "optional"
     state_updates.update(
         {
             "timestamp": now,
             "topic": topic,
             "status": "P650",
-            "runtime.stage": "image_prompt_semantic_review_pending",
+            "runtime.stage": "image_prompt_request_freeze_pending",
             "runtime.stage_target": "p600",
             "runtime.stop_slot": stop_target,
             "runtime.resume.p500.status": "materialized",
@@ -1512,23 +1464,10 @@ def _resume_state_updates(
                 duration_plan["minimum_narration_seconds"]
             ),
             "runtime.scaffold.content_status": "authored",
-            "runtime.review_policy": review_policy,
-            "runtime.review_mode": resolved_mode["review_mode"],
-            "review.policy.story": required_review_gate,
-            "review.policy.image": required_review_gate,
-            "review.policy.narration": optional_review_gate,
-            "gate.research_review": required_review_gate,
-            "gate.story_review": required_review_gate,
-            "gate.narration_review": optional_review_gate,
-            "review.research.status": "approved",
-            "review.story.status": "approved",
-            "review.script.status": "approved",
-            "stage.research.status": "reviewed",
-            "stage.story.status": "reviewed",
+            "stage.research.status": "ready",
+            "stage.story.status": "ready",
             "stage.asset.status": "in_progress",
             "stage.scene_implementation.status": "in_progress",
-            "review.image.status": "pending",
-            "gate.image_review": required_review_gate,
         }
     )
     state_updates.update(resolved_mode["state_updates"])
@@ -1615,7 +1554,6 @@ def _write_resume_orchestration(
                     "pending"
                 )
             },
-            "review_outputs": [],
             "next_bucket": next_bucket,
         }
         _write_resume_text(
@@ -1675,7 +1613,6 @@ def materialize_from_p500(
             "last_error": "",
         },
     )
-    _archive_p400_review_evidence(run_dir)
     source_references = _restore_world_walk_source_references(
         frontend,
         run_dir=run_dir,
@@ -1728,15 +1665,11 @@ def materialize_from_p500(
         frontend._md_yaml("Asset Plan", asset_plan),
     )
     frontend._prepare_authoring_grounding(run_dir)
-    frontend._refresh_p400_review_artifacts(run_dir)
-    frontend._require_fresh_p400_readiness(run_dir)
     frontend._write_asset_request_files(run_dir, asset_plan, profile)
     frontend._materialize_standard_request_files(run_dir)
     # Request projection persists compiled payloads into video_manifest.md.
-    # Re-ground and re-freeze P400 against that final pre-provider revision.
+    # Refresh deterministic grounding against that final pre-provider revision.
     frontend._prepare_authoring_grounding(run_dir)
-    frontend._refresh_p400_review_artifacts(run_dir)
-    frontend._require_fresh_p400_readiness(run_dir)
     _append_resume_state(
         run_dir,
         _resume_state_updates(
@@ -1748,76 +1681,6 @@ def materialize_from_p500(
             mode_contract=mode_contract,
         ),
     )
-
-
-def _archive_p400_review_evidence(run_dir: Path) -> Path:
-    checkpoint = _resume_checkpoint_dir(run_dir)
-    if checkpoint is None:
-        raise P500ResumeError("p500 resume checkpoint is missing from state")
-
-    root_files = {
-        "visual_value_review.md",
-        "scene_set_review.md",
-        "scene_detail_review.md",
-        "scene_intent_review.md",
-        "cut_blueprint_review.md",
-        "script_review.md",
-        "production_readiness_review.md",
-    }
-    eval_stages = (
-        "visual_value",
-        "scene_set",
-        "scene_detail",
-        "cut_blueprint",
-        "script",
-        "production_readiness",
-    )
-    semantic_stages = ("scene_set", "scene_detail", "cut_blueprint")
-    selected: list[str] = []
-    for relative in _iter_resume_regular_files(run_dir):
-        rel = relative.as_posix()
-        if rel in root_files:
-            selected.append(rel)
-            continue
-        if any(rel.startswith(f"logs/eval/{stage}/") for stage in eval_stages):
-            selected.append(rel)
-            continue
-        if any(
-            rel.startswith(f"logs/review/semantic/{stage}.")
-            for stage in semantic_stages
-        ):
-            selected.append(rel)
-            continue
-        if rel.startswith(("logs/grounding/script.", "logs/grounding/manifest.")):
-            selected.append(rel)
-
-    checkpoint_relative = checkpoint.relative_to(run_dir)
-    evidence_relative = checkpoint_relative / "p400_evidence"
-    _ensure_resume_directory(run_dir, evidence_relative)
-    for rel in sorted(set(selected)):
-        destination_relative = evidence_relative / rel
-        _ensure_resume_directory(run_dir, destination_relative.parent)
-        try:
-            source_bytes = _read_resume_bytes(run_dir, rel)
-        except (OSError, ValueError) as exc:
-            raise P500ResumeError(
-                f"could not archive p400 evidence safely: {rel}"
-            ) from exc
-        _write_resume_bytes(run_dir, destination_relative, source_bytes)
-    _write_resume_text(
-        run_dir,
-        checkpoint_relative / "p400_evidence_manifest.json",
-        json.dumps(
-            {
-                "schema_version": "toc.p500_resume.p400_evidence.v1",
-                "files": sorted(set(selected)),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-    )
-    return run_dir / evidence_relative
 
 
 def _prepare_stage_context(run_dir: Path, stage: str) -> None:
@@ -1854,34 +1717,6 @@ def _prepare_resume_grounding(run_dir: Path) -> None:
     )
 
 
-def _mark_resume_dependency_sync_complete(run_dir: Path) -> None:
-    """Supersede interrupted repair sync after full p500 rematerialization."""
-
-    state = _parse_resume_state(run_dir)
-    updates: dict[str, str] = {}
-    for stage in (
-        "research",
-        "story",
-        "scene_set",
-        "scene_detail",
-        "cut_blueprint",
-        "asset_plan",
-    ):
-        prefix = f"review.semantic.{stage}.dependency_sync"
-        if state.get(f"{prefix}.status") not in {"failed", "in_progress"}:
-            continue
-        updates.update(
-            {
-                f"{prefix}.status": "done",
-                f"{prefix}.error": "",
-                f"{prefix}.completed_by": "p500_full_rematerialization",
-                f"{prefix}.updated_at": now_iso(),
-            }
-        )
-    if updates:
-        _append_resume_state(run_dir, updates)
-
-
 def _mark_materialized_asset_requests(run_dir: Path) -> None:
     """Keep non-executed media pending while recording the p550 handoff."""
 
@@ -1889,11 +1724,11 @@ def _mark_materialized_asset_requests(run_dir: Path) -> None:
         run_dir,
         {
             "slot.p550.status": "done",
-            "slot.p550.note": "asset requests rematerialized after semantic review; media generation not requested",
+            "slot.p550.note": "asset requests rematerialized; media generation not requested",
             "slot.p560.status": "pending",
             "slot.p560.note": "materialize-only mode did not generate reusable assets",
             "slot.p570.status": "pending",
-            "slot.p570.note": "asset continuity review waits for reusable asset generation",
+            "slot.p570.note": "asset continuity handoff waits for reusable asset generation",
             "stage.asset.status": "in_progress",
         },
     )
@@ -1928,7 +1763,7 @@ def _finalize_resume_orchestration(
             slot
             for slot in slots
             if state.get(f"slot.{slot}.status")
-            in {"done", "skipped", "awaiting_approval"}
+            in {"done", "skipped"}
         ]
         _write_resume_text(
             run_dir,
@@ -2009,15 +1844,7 @@ def _continue_run(
                 stop_target=materialize_stop_target,
             )
             _prepare_resume_grounding(run_dir)
-            frontend._refresh_downstream_review_artifacts(run_dir)
-            _mark_resume_dependency_sync_complete(run_dir)
             if materialize_only:
-                asyncio.run(
-                    frontend.run_pre_media_semantic_pipeline(
-                        run_dir,
-                        image_prompt_provider_ready=False,
-                    )
-                )
                 _mark_materialized_asset_requests(run_dir)
             else:
                 asyncio.run(frontend.generate_images(run_dir, stop_target))
@@ -2064,7 +1891,7 @@ def _continue_run(
                 {
                     **final_updates,
                     "runtime.resume.p500.status": (
-                        "semantic_materialized"
+                        "requests_materialized"
                         if materialize_only
                         else "completed"
                     ),
@@ -2107,7 +1934,7 @@ def main() -> None:
     parser.add_argument(
         "--materialize-only",
         action="store_true",
-        help="Run semantic materialization but do not generate media.",
+        help="Materialize deterministic asset/image requests but do not generate media.",
     )
     parser.add_argument("--skip-validation", action="store_true")
     args = parser.parse_args()

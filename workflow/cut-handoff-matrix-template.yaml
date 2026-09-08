@@ -3,15 +3,17 @@
 cut_handoff_matrix_version: "3.0"
 scene_id: "1"
 scene_selector: "scene1"
+
 scene_event:
-  schema_version: "scene_event_v1"
+  schema_version: scene_event_v1
   event_sequence:
-    - beat_id: ""
-      beat_function: ""
+    - beat_id: scene1_beat_01
+      beat_function: custom
       visible_action: ""
       visible_reaction: ""
       required_visual_evidence: []
-scene_obligations_legacy_projection:
+
+scene_obligations:
   dramatic_question: ""
   value_shift_visible_evidence: []
   causal_turn: ""
@@ -26,36 +28,36 @@ scene_obligations_legacy_projection:
   handoff_to_next_scene: ""
 
 cuts:
-  - selector: "scene1_cut1"
+  - selector: scene1_cut1
     source_event_contract:
-      primary_event_beat_id: ""
-      source_event_beat_ids: []
-      event_beat_function: ""
-      event_time_position: ""
+      primary_event_beat_id: scene1_beat_01
+      source_event_beat_ids: [scene1_beat_01]
+      event_beat_function: custom
+      event_time_position: before_trigger
       event_facts_to_preserve: []
       event_facts_not_to_invent: []
-    cut_function: "setup"
+    cut_function: custom
     target_beat: ""
     audience_knowledge_delta: ""
     causal_proof: ""
     visual_evidence: []
     required_roles: []
     anti_redundancy_key: ""
-    emotional_micro_shift:
-      from: ""
-      to: ""
-    mixed_affect_design:
-      mode: "none|single|mixed|tension_release|bittersweet|aftertaste"
-      optional: true
-      positive_valence_thread: ""
-      negative_valence_thread: ""
-      arousal_strategy: "hold|rise|drop|spike|release"
-      audience_rollercoaster_job: "none|bond|strain|release|reframe|aftertaste"
-      visible_support: []
-      narration_support: []
-      sound_or_rhythm_support: []
-      handoff_effect: ""
-    static_first_frame_rule: ""
+    first_frame:
+      state: ""
+      static_evidence: []
+      must_not_show: []
+    motion:
+      start_state: ""
+      end_state: ""
+      must_not_add: []
+    narration:
+      narrative_position: opening|middle|ending
+      voice_function: information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence
+      visual_distance_policy: stay_close|contextual|meaning_first|silent
+      narration_should_add: []
+      pronunciation_targets: []
+      silent_reason: ""
     receives_from_previous:
       visual: ""
       audio: ""
@@ -72,7 +74,7 @@ cuts:
       spatial_state: ""
     downstream:
       event_context_for_cut:
-        derived_from: "scene_event.event_sequence + cut_contract.source_event_contract"
+        derived_from: scene_event.event_sequence + cut_contract.source_event_contract
         editable: false
       p500_asset:
         required_assets: []
@@ -81,41 +83,27 @@ cuts:
         first_frame_requirements: []
         must_not_show: []
       p700_narration:
-        narrative_position: "opening|middle|ending"
-        cut_function: "setup|pressure|threshold|turn|payoff|reaction|handoff"
-        voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
-        visual_distance_policy: "stay_close|contextual|meaning_first|silent"
-        narration_should_add: []
-        pronunciation_targets: []
-        # compatibility alias
-        role: "setup|fact|emotion|contrast|aftertaste|silent"
-        must_cover: []
-        must_avoid: []
+        requirements: []
       p800_video:
-        motion_start: ""
+        motion_requirements: []
         end_state: ""
         must_not_add: []
-    review:
-      handoff_clear: false
-      continuity_clear: false
-      reveal_safe: false
-      downstream_ready: false
-      findings: []
 
-scene_level_review:
+handoff_validation:
   all_scene_obligations_covered: false
-  scene_event_coverage: false
   event_beat_reference_integrity: false
   source_event_preservation: false
   causal_proof_coverage: false
   role_coverage: false
   audience_knowledge_delta_coverage: false
-  anti_redundancy_gate: false
   no_overloaded_cuts: false
-  no_missing_thresholds: false
-  no_missing_reactions: false
-  final_handoff_clear: false
+  first_frame_imageable: false
+  motion_boundary_valid: false
+  narration_boundary_valid: false
+  continuity_clear: false
+  handoff_clear: false
   ready_for_p500: false
   ready_for_p600: false
   ready_for_p700: false
   ready_for_p800: false
+

@@ -18,7 +18,7 @@ def _merge_state(path: Path) -> dict[str, str]:
 
 
 class TestTocStateScript(unittest.TestCase):
-    def test_ensure_append_approve_show(self) -> None:
+    def test_ensure_append_show(self) -> None:
         import tempfile
 
         with tempfile.TemporaryDirectory(prefix="toc_state_test_") as td:
@@ -56,6 +56,7 @@ class TestTocStateScript(unittest.TestCase):
             st = _merge_state(state_path)
             self.assertEqual(st.get("topic"), "テストトピック")
             self.assertEqual(st.get("runtime.stage"), "init")
+            self.assertNotIn("gate.video_review", st)
             self.assertIn("artifact.video_manifest", st)
             self.assertIn("artifact.run_index", st)
 
@@ -88,7 +89,7 @@ class TestTocStateScript(unittest.TestCase):
                     "--run-dir",
                     str(run_dir),
                     "--slot",
-                    "p540",
+                    "p570",
                     "--status",
                     "skipped",
                     "--requirement",
@@ -103,48 +104,10 @@ class TestTocStateScript(unittest.TestCase):
                 text=True,
             )
             st = _merge_state(state_path)
-            self.assertEqual(st.get("slot.p540.status"), "skipped")
-            self.assertEqual(st.get("slot.p540.requirement"), "optional")
-            self.assertEqual(st.get("slot.p540.skip_reason"), "asset stage not needed for draft")
-            self.assertEqual(st.get("slot.p540.note"), "user deferred reusable assets")
-
-            subprocess.run(
-                [
-                    sys.executable,
-                    "scripts/toc-state.py",
-                    "approve-image-prompts",
-                    "--run-dir",
-                    str(run_dir),
-                    "--note",
-                    "human checked",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            st = _merge_state(state_path)
-            self.assertEqual(st.get("review.image_prompt.status"), "approved")
-            self.assertEqual(st.get("review.image_prompt.note"), "human checked")
-            self.assertIn("review.image_prompt.at", st)
-
-            subprocess.run(
-                [
-                    sys.executable,
-                    "scripts/toc-state.py",
-                    "approve-video",
-                    "--run-dir",
-                    str(run_dir),
-                    "--note",
-                    "OK",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            st = _merge_state(state_path)
-            self.assertEqual(st.get("review.video.status"), "approved")
-            self.assertEqual(st.get("review.video.note"), "OK")
-            self.assertIn("review.video.at", st)
+            self.assertEqual(st.get("slot.p570.status"), "skipped")
+            self.assertEqual(st.get("slot.p570.requirement"), "optional")
+            self.assertEqual(st.get("slot.p570.skip_reason"), "asset stage not needed for draft")
+            self.assertEqual(st.get("slot.p570.note"), "user deferred reusable assets")
 
             r = subprocess.run(
                 [sys.executable, "scripts/toc-state.py", "show", "--run-dir", str(run_dir)],
@@ -152,18 +115,14 @@ class TestTocStateScript(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            self.assertIn("Review: approved", r.stdout)
-            self.assertIn("Image prompt gate:", r.stdout)
+            self.assertNotIn("Review:", r.stdout)
+            self.assertNotIn("Image prompt gate:", r.stdout)
             self.assertIn("Render: started", r.stdout)
             self.assertIn("Run status:", r.stdout)
 
             index_text = (run_dir / "p000_index.md").read_text(encoding="utf-8")
-            p540_start = index_text.index("#### p540 Asset Eval/Improve Loop")
-            p540_end = index_text.index("#### p550 Asset Requests", p540_start)
-            p540_section = index_text[p540_start:p540_end]
-            self.assertIn("- status: `skipped`", p540_section)
-            self.assertIn("- requirement: `optional`", p540_section)
-            self.assertIn("- skip_reason: `asset stage not needed for draft`", p540_section)
+            self.assertNotIn("p540", index_text)
+            self.assertIn("#### p570 Asset Continuity Check", index_text)
             self.assertIn("#### p740 Duration Fit Gate", index_text)
 
     def test_set_slot_rejects_unknown_slot_and_invalid_enums(self) -> None:
@@ -200,7 +159,7 @@ class TestTocStateScript(unittest.TestCase):
                     "--run-dir",
                     str(run_dir),
                     "--slot",
-                    "p540",
+                    "p570",
                     "--status",
                     "whatever",
                 ],
@@ -218,7 +177,7 @@ class TestTocStateScript(unittest.TestCase):
                     "--run-dir",
                     str(run_dir),
                     "--slot",
-                    "p540",
+                    "p570",
                     "--requirement",
                     "maybe",
                 ],
@@ -228,7 +187,32 @@ class TestTocStateScript(unittest.TestCase):
             self.assertNotEqual(bad_requirement.returncode, 0)
             self.assertIn("Invalid --requirement", bad_requirement.stderr)
 
-    def test_sync_embeds_eval_report(self) -> None:
+            retired = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/toc-state.py",
+                    "set-slot",
+                    "--run-dir",
+                    str(run_dir),
+                    "--slot",
+                    "p230",
+                    "--status",
+                    "done",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(retired.returncode, 0)
+            self.assertIn("Invalid --slot", retired.stderr)
+
+            removed_command = subprocess.run(
+                [sys.executable, "scripts/toc-state.py", "approve-video", "--run-dir", str(run_dir)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(removed_command.returncode, 0)
+
+    def test_sync_keeps_eval_report_out_of_production_projection(self) -> None:
         import json
         import tempfile
 
@@ -263,8 +247,7 @@ class TestTocStateScript(unittest.TestCase):
             )
 
             payload = json.loads((run_dir / "run_status.json").read_text(encoding="utf-8"))
-            self.assertIn("eval_report", payload)
-            self.assertEqual(payload["eval_report"]["overall"]["passed"], True)
+            self.assertNotIn("eval_report", payload)
             self.assertTrue((run_dir / "p000_index.md").exists())
 
 

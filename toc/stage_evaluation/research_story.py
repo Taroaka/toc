@@ -9,6 +9,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from toc.adaptation_value_contract import (
+    source_value_ids as adaptation_source_value_ids,
+    visual_value_adaptation_issues,
+)
 from toc.harness import load_structured_document
 
 from .common import (
@@ -97,6 +101,60 @@ def _asset_bible_candidate_count(value: Any) -> int:
     return 0
 
 
+def _scene_key(value: Any) -> str:
+    """Normalize authored and runtime scene selectors for ID comparison."""
+
+    text = str(value or "").strip().lower()
+    if text.startswith("scene"):
+        text = text.removeprefix("scene")
+    text = text.replace("_", ".").replace("-", ".")
+    parts = [part for part in text.split(".") if part]
+    if parts and all(part.isdigit() for part in parts):
+        return ".".join(str(int(part)) for part in parts)
+    return text
+
+
+def _visual_scene_coverage_issues(run_dir: Path, data: dict[str, Any]) -> list[str]:
+    """Check scene-value projection IDs without assessing creative quality."""
+
+    story_path = run_dir / "story.md"
+    if not story_path.is_file():
+        return []
+    _story_text, story_data = load_structured_document(story_path)
+    story_scenes = as_list(nested_get(story_data, ["script", "scenes"], [])) or as_list(story_data.get("scenes"))
+    visual_scenes = as_list(data.get("scene_visual_values"))
+    if not story_scenes or not visual_scenes:
+        return []
+
+    expected = {
+        _scene_key(scene.get("scene_id") or index)
+        for index, scene in enumerate(story_scenes, start=1)
+        if isinstance(scene, dict)
+    }
+    actual: dict[str, int] = {}
+    for index, visual_scene in enumerate(visual_scenes, start=1):
+        if not isinstance(visual_scene, dict):
+            continue
+        raw_selector = visual_scene.get("scene_selector") or visual_scene.get("scene_id")
+        key = _scene_key(raw_selector)
+        # Runtime scene IDs are emitted as 10, 20, ... while story IDs are
+        # commonly 1, 2, ...; compare both in the same scene namespace.
+        if key.isdigit() and int(key) >= 10 and int(key) % 10 == 0:
+            key = str(int(key) // 10)
+        if not key:
+            return [f"scene_visual_values[{index}]:scene_selector:missing"]
+        actual[key] = actual.get(key, 0) + 1
+
+    issues = [
+        f"scene_visual_values[{key}]:duplicate_selector"
+        for key, count in sorted(actual.items())
+        if count > 1
+    ]
+    issues.extend(f"scene[{key}]:visual_projection_missing" for key in sorted(expected - set(actual)))
+    issues.extend(f"scene_visual_values[{key}]:unexpected_projection" for key in sorted(set(actual) - expected))
+    return issues
+
+
 def check_visual_value(
     run_dir: Path,
     profile: str = "standard",
@@ -116,11 +174,31 @@ def check_visual_value(
         add_check(checks, "visual_value.scene_values_type", isinstance(data.get("scene_visual_values"), list), "scene_visual_values is a list when declared")
     if "handoff" in data:
         add_check(checks, "visual_value.handoff_type", isinstance(data.get("handoff"), dict), "visual_value handoff is a mapping when declared")
+    coverage_issues = _visual_scene_coverage_issues(run_dir, data)
+    add_check(
+        checks,
+        "visual_value.scene_coverage",
+        not coverage_issues,
+        "visual scene-value selectors map to authored story scene IDs"
+        + (f" (issues: {','.join(coverage_issues[:8])})" if coverage_issues else ""),
+    )
     production_issues = _p300_production_artifact_issues(run_dir) if forbid_production_artifacts else []
     add_check(checks, "visual_value.no_production_artifacts", not production_issues, "visual value stage contains no downstream production files" + (f" (issues: {','.join(production_issues[:8])})" if production_issues else ""))
     if isinstance(data.get("visual_value_metadata"), dict) and "adaptation_value_contract" in data["visual_value_metadata"]:
         contract = data["visual_value_metadata"]["adaptation_value_contract"]
         add_check(checks, "visual_value.adaptation_value_contract_type", isinstance(contract, dict), "declared adaptation value contract is a mapping")
+        story_data = load_structured_document(run_dir / "story.md")[1] if (run_dir / "story.md").is_file() else {}
+        issues = visual_value_adaptation_issues(
+            data,
+            source_value_ids=adaptation_source_value_ids(story_data),
+        )
+        add_check(
+            checks,
+            "visual_value.adaptation_value_contract",
+            not issues,
+            "declared visual-value adaptation contract is structurally consistent"
+            + (f" (issues: {','.join(issues[:8])})" if issues else ""),
+        )
     return make_stage("visual_value", path.name, checks, details={"scene_value_count": len(as_list(data.get("scene_visual_values")))}), {}
 
 

@@ -14,7 +14,6 @@ from toc.harness import load_structured_document
 from toc.story_duration import normalize_target_duration
 
 from .common import (
-    P400_READINESS_CHECK_IDS,
     _cut_contract_structure_issues,
     _node_cut_contract,
     as_dict,
@@ -158,7 +157,6 @@ def _append_immersive_manifest_checks(
 
 
 __all__ = [
-    "P400_READINESS_CHECK_IDS",
     "_append_immersive_manifest_checks",
     "_append_manifest_contract_checks",
     "_iter_manifest_nodes",

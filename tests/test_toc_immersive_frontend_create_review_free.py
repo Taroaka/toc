@@ -13,8 +13,9 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -89,7 +90,7 @@ class TestFrontendCreateReviewFree(unittest.TestCase):
             with self.subTest(symbol=symbol):
                 self.assertNotIn(symbol, source)
 
-    def test_p650_generation_freezes_requests_after_assets_without_semantic_review(self) -> None:
+    def test_p650_generation_freezes_requests_after_assets_before_scene_lane(self) -> None:
         runner = load_runner()
         from server import image_gen_app
 
@@ -98,7 +99,7 @@ class TestFrontendCreateReviewFree(unittest.TestCase):
         async def generate(*, run_dir: Path, kind: str) -> None:
             events.append(f"generate:{kind}")
 
-        def asset_quality(_run_dir: Path) -> None:
+        def asset_quality(_run_dir: Path, _kind: str) -> None:
             events.append("validate_assets")
 
         def asset_handoff(_run_dir: Path, *, asset_quality_passed: bool) -> None:
@@ -108,9 +109,18 @@ class TestFrontendCreateReviewFree(unittest.TestCase):
         def freeze(_run_dir: Path, **_kwargs) -> None:
             events.append("freeze_scene_requests")
 
+        @asynccontextmanager
+        async def serialized(_run_dir: Path, _resource: str):
+            yield
+
         with tempfile.TemporaryDirectory(dir=REPO_ROOT / "output") as tmp:
             run_dir = Path(tmp)
             with (
+                patch.object(
+                    image_gen_app,
+                    "_validate_pre_asset_provider_gate",
+                    return_value=None,
+                ),
                 patch.object(
                     image_gen_app,
                     "_generate_request_outputs",
@@ -118,7 +128,7 @@ class TestFrontendCreateReviewFree(unittest.TestCase):
                 ),
                 patch.object(
                     image_gen_app,
-                    "_validate_p560_asset_quality",
+                    "_validate_generated_outputs",
                     side_effect=asset_quality,
                 ),
                 patch.object(
@@ -130,6 +140,11 @@ class TestFrontendCreateReviewFree(unittest.TestCase):
                     image_gen_app,
                     "_mark_image_prompt_request_freeze_done",
                     side_effect=freeze,
+                ),
+                patch.object(
+                    image_gen_app,
+                    "_serialized_run_write",
+                    serialized,
                 ),
             ):
                 asyncio.run(runner.generate_images(run_dir, "p650"))
@@ -149,12 +164,14 @@ class TestFrontendCreateReviewFree(unittest.TestCase):
         from server import image_gen_app
 
         create_images = AsyncMock(return_value=True)
-        with patch.object(image_gen_app, "_generate_create_images", create_images):
-            asyncio.run(runner.generate_images(Path("/tmp/example-run"), "p680"))
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT / "output") as tmp:
+            run_dir = Path(tmp)
+            with patch.object(image_gen_app, "_generate_create_images", create_images):
+                asyncio.run(runner.generate_images(run_dir, "p680"))
 
         create_images.assert_awaited_once_with(
             "toc-immersive-frontend-run",
-            run_id="example-run",
+            run_id=run_dir.name,
         )
 
 

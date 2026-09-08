@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import json
 
 import pytest
 
-from toc.story_authoring import build_research_registry
+from toc.story_authoring import AUDIENCE_MEANING_INSTRUCTION, build_research_registry
 from toc.story_author_pipeline import (
     ARCHITECT_OUTPUT_SCHEMA,
     SCENE_AUTHOR_OUTPUT_SCHEMA,
@@ -381,4 +382,6 @@ def test_story_pipeline_repairs_only_failing_scene_then_revalidates() -> None:
         "scene_author",
         "repair",
     ]
+    for call in runner.calls:
+        assert AUDIENCE_MEANING_INSTRUCTION in json.loads(call["prompt"])["instructions"]
     assert result.story["script"]["scenes"][1]["start_state"]["state_id"] == "state_clock_found"

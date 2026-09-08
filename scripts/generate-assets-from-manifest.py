@@ -5339,10 +5339,6 @@ def _dispatch_video_provider_call(
     evolink_client: EvoLinkClient | None,
     seedance_client: SeedanceClient | None,
 ) -> None:
-    _assert_video_prompt_quality_allows_provider_execution(
-        selector=selector,
-        payload=api_prompt_payload,
-    )
     materialized = _video_provider_request_values(
         selector=selector,
         api_prompt_payload=api_prompt_payload,
@@ -6963,10 +6959,6 @@ def _build_image_api_prompt_payload(scene: SceneSpec, *, request_visual_beat: st
         temporal_override["event_fact_visible_in_still"] = request_visual_beat
         temporal_override["first_visible_moment"] = request_visual_beat
         plan["temporal_boundary"] = temporal_override
-    shot = _shot_design_contract_from_plan(plan)
-    location = _cut_location_frame_plan_from_plan(scene, plan)
-    delta = _cut_visual_delta_from_plan(scene, plan)
-    blocking = _blocking_and_interaction_from_plan(plan)
     return compile_image_api_prompt_v2(
         first_frame_visual_plan=plan,
         character_ids=scene.image_character_ids,
@@ -6975,12 +6967,6 @@ def _build_image_api_prompt_payload(scene: SceneSpec, *, request_visual_beat: st
         reference_images=scene.image_references,
         story_time=scene.story_time,
         scene_time_of_day=scene.scene_time_of_day,
-        review_metadata={
-            "shot_design_contract": shot,
-            "cut_location_frame_plan": location,
-            "cut_visual_delta": delta,
-            "blocking_and_interaction": blocking,
-        },
     )
 
 
@@ -7386,7 +7372,7 @@ def _video_api_prompt_payload_for_target(
         scene_visualizable_action=(
             first_source.scene_visualizable_action if first_source else None
         ),
-        review_only_dependencies=(
+        source_context=(
             {
                 "render_unit_source_cut_ids": list(target.source_cut_ids),
                 "render_unit_source_cut_contracts": [
@@ -8200,44 +8186,6 @@ def _require_exact_persisted_video_payload(
     return stored_payload
 
 
-def _blocking_video_prompt_quality_issue_codes(
-    payload: dict[str, Any],
-) -> list[str]:
-    raw_ir = payload.get("video_prompt_ir")
-    sources = [
-        payload.get("quality_issues"),
-        raw_ir.get("quality_issues") if isinstance(raw_ir, dict) else None,
-    ]
-    codes: list[str] = []
-    for source in sources:
-        for raw_issue in _list_value(source):
-            if (
-                not isinstance(raw_issue, dict)
-                or raw_issue.get("blocking") is not True
-            ):
-                continue
-            code = (
-                str(raw_issue.get("code") or "").strip()
-                or "video_motion_blocking_quality_issue"
-            )
-            if code and code not in codes:
-                codes.append(code)
-    return codes
-
-
-def _assert_video_prompt_quality_allows_provider_execution(
-    *,
-    selector: str,
-    payload: dict[str, Any],
-) -> None:
-    codes = _blocking_video_prompt_quality_issue_codes(payload)
-    if codes:
-        raise RuntimeError(
-            f"video provider execution blocked for {selector}: "
-            + ", ".join(codes)
-        )
-
-
 def _write_image_request_snapshot(
     *,
     run_dir: Path,
@@ -8830,12 +8778,26 @@ def main() -> None:
     canonical_manifest_path = (base_dir / "video_manifest.md").resolve()
     if manifest_path.resolve() != canonical_manifest_path and not is_asset_stage_manifest:
         raise SystemExit(
-            "p400 readiness gate must evaluate the same manifest passed to generation.\n"
+            "video generation must evaluate the canonical manifest passed to generation.\n"
             f"  expected: {canonical_manifest_path}\n"
             f"  got: {manifest_path.resolve()}"
         )
     if not is_asset_stage_manifest:
-        _stage_result, p400_updates = check_manifest_single(base_dir, "standard", "immersive")
+        stage_result, p400_updates = check_manifest_single(base_dir, "standard", "immersive")
+        structural_failures = [
+            str(check.get("id") or "manifest.structural")
+            for check in (
+                stage_result.get("checks", [])
+                if isinstance(stage_result, dict)
+                else []
+            )
+            if isinstance(check, dict) and check.get("passed") is False
+        ]
+        if structural_failures:
+            raise SystemExit(
+                "manifest structural validation failed: "
+                + ", ".join(structural_failures)
+            )
         # The evaluator may expose ordinary structural diagnostics alongside
         # legacy review keys while an older run is being resumed.  Persist only
         # execution state; reviewer reports and approval statuses are never a
@@ -9478,17 +9440,9 @@ def main() -> None:
                 additional_negative_prompt=args.video_negative_prompt or "",
             )
             if not args.materialize_request_files_only:
-                _assert_video_prompt_quality_allows_provider_execution(
-                    selector=str(target.selector),
-                    payload=video_api_prompt_payload,
-                )
                 video_api_prompt_payload = _require_exact_persisted_video_payload(
                     target,
                     video_api_prompt_payload,
-                )
-                _assert_video_prompt_quality_allows_provider_execution(
-                    selector=str(target.selector),
-                    payload=video_api_prompt_payload,
                 )
             video_preview_entries.append(
                 {
@@ -9711,17 +9665,9 @@ def main() -> None:
                 execution_options=execution_options,
                 additional_negative_prompt=args.video_negative_prompt or "",
             )
-            _assert_video_prompt_quality_allows_provider_execution(
-                selector=str(target.selector),
-                payload=video_api_prompt_payload,
-            )
             video_api_prompt_payload = _require_exact_persisted_video_payload(
                 target,
                 video_api_prompt_payload,
-            )
-            _assert_video_prompt_quality_allows_provider_execution(
-                selector=str(target.selector),
-                payload=video_api_prompt_payload,
             )
             materialized_video_payloads[str(target.selector)] = video_api_prompt_payload
             video_preview_entries.append(
@@ -9828,10 +9774,6 @@ def main() -> None:
                 f"video prompt payload is missing for {target.selector}; "
                 "rematerialize before generation"
             )
-        _assert_video_prompt_quality_allows_provider_execution(
-            selector=str(target.selector),
-            payload=materialized_payload,
-        )
         snapshot_dir: Path | None = None
         provider_input_image = input_image
         provider_last_image = last_image

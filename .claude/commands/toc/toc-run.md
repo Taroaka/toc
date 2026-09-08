@@ -1,41 +1,63 @@
 # /toc-run
 
-ToC（TikTok Story Creator）をトピックから実行するためのコマンド。
+ToC を topic/source から実行する command。production は source context → authoring →
+ordinary structural validation → generation の順で進む。
 
-## 使い方（想定）
+## 使い方
 
-```
+```text
 /toc-run "桃太郎" --dry-run
 ```
 
-## 期待される出力
+## 出力
 
-- `output/<topic>_<timestamp>/` が作成される
-- `state.txt`（追記型）が生成される
-- `logs/grounding/<stage>.json` に stage ごとの参照証跡が残る
-- 成果物（`research.md` / `story.md` / `visual_value.md` / `script.md` / `video_manifest.md` 等）の本文は **日本語**で記述する（ユーザーが直接修正する前提）
-- cutは映像編集単位、narration spanは文章・演技単位として分け、spanは複数cutをまたいでよい（詳細は `docs/implementation/video-integration.md`）
-- 音声（ナレーション）は **デフォルト必須**。意図的に作らない場合だけ `scripts/generate-assets-from-manifest.py --skip-audio` を指定する
+```text
+output/<topic>_<timestamp>/
+  state.txt
+  p000_index.md
+  research.md
+  story.md
+  visual_value.md
+  script.md
+  video_manifest.md
+  assets/
+  audio/
+  video.mp4
+  logs/grounding/
+  logs/orchestration/
+  logs/validation/
+```
 
-## 方針メモ（創造と選択）
+本文は日本語で記録する。cut は編集単位、narration span は文章/演技単位として分ける。
+音声を明示的に省略したい場合だけ `--skip-audio` を使う。
 
-- Research は多様性（登場人物/世界観/解釈）を厚めに集め、Story でスコアが高い案を **選択**する
-- Story の後に `visual_value.md` を作り、中盤に置く視覚報酬パートを設計してから Script へ渡す
-- Hero's Journey への当てはめは必須ではない（フレームワークは道具）
-- 矛盾する複数ソースの要素を同一シーン/設定として **混成（ハイブリッド）**する必要が出た場合は、確定前にユーザー承認を取る（運用）
+## Production order
 
-## Grounding Preflight（必須）
+```text
+research → story → visual_value → script
+  → asset → scene_implementation/image
+  → narration/TTS → video → render → qa
+```
 
-- `research` 開始前:
-  - `python scripts/resolve-stage-grounding.py --stage research --run-dir output/<topic>_<timestamp> --flow toc-run`
-- `story` 開始前:
-  - `python scripts/resolve-stage-grounding.py --stage story --run-dir output/<topic>_<timestamp> --flow toc-run`
-- `script` 開始前:
-  - `python scripts/resolve-stage-grounding.py --stage script --run-dir output/<topic>_<timestamp> --flow toc-run`
-- 画像 prompt / 動画生成へ進む前:
-  - `python scripts/resolve-stage-grounding.py --stage image_prompt --run-dir output/<topic>_<timestamp> --flow toc-run`
-  - `python scripts/resolve-stage-grounding.py --stage video_generation --run-dir output/<topic>_<timestamp> --flow toc-run`
-- 各 resolve の直後に `python scripts/audit-stage-grounding.py --stage <stage> --run-dir output/<topic>_<timestamp>` を実行する
-- `stage.<name>.grounding.status=ready` と `stage.<name>.audit.status=passed` を確認できない限り、その stage を開始しない
+p400 は scene/cut authoring と skeleton manifest materialization を行う。p500 以降で request
+payload を materializeし、画像/音声/動画を生成する。
 
-詳細は `docs/how-to-run.md` を参照。
+## Source context and checks
+
+stage ごとに `prepare-stage-context.py` を使い、返された readset を
+`global_docs → stage_docs → templates → inputs` の順で読む。各 author は schema、type、unique
+ID、source/reference/selector、request hash、file/decode、duration、provenance を確認する。
+不足入力や failed check は該当 artifact を修正して再実行する。
+
+## Human choices
+
+Research は候補を複数作ってもよい。候補選択、candidate listening、画像/音声編集、change request
+は任意の user action として保存する。矛盾 source の hybridization と publication は、それぞれ
+明示された user action として扱う。
+
+## References
+
+- docs/how-to-run.md
+- docs/data-contracts.md
+- docs/orchestration-and-ops.md
+

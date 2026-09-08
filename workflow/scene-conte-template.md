@@ -155,7 +155,7 @@
 - must_avoid:
   - `<手崩れ/余計な人物/文字/reveal早出し/破綻>`
 - done_when:
-  - `<reviewer が完了判断できる条件>`
+  - `<この cut の構造と visible evidence が成立する条件>`
 
 ### Cut `<scene_id>_2`
 

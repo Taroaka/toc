@@ -67,7 +67,7 @@ For repo scene stills, generate for YouTube horizontal delivery.
    - `prompt`
    - `output_path`
    - `aspect_ratio` if present
-   - `review_status` if present
+   - `provenance_status` if present
 5. If the request is a repo scene still and no explicit aspect ratio overrides it,
    add an explicit native-horizontal instruction to the generation prompt:
    - YouTube horizontal frame

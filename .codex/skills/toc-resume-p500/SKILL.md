@@ -1,6 +1,6 @@
 ---
 name: toc-resume-p500
-description: Use when an existing frontend-created ToC run must resume after a semantic, asset, reference, or image-generation failure. Start from the closest verified boundary with a canonical continuation—normally p650 for scene-image-only retry or p500 when asset/reference or upstream state is stale—while preserving valid work in the same run.
+description: Use when an existing frontend-created ToC run must resume after an asset, reference, request, or image-generation failure. Start from the closest verified boundary with a canonical continuation—normally p650 for scene-image-only retry or p500 when asset/reference or upstream state is stale—while preserving valid work in the same run.
 ---
 
 # ToC Adaptive Resume
@@ -41,7 +41,7 @@ Resolve:
 
 - the exact existing run directory under `output/`
 - stop target: normally `p680`
-- whether the request is reset-only, semantic/materialization diagnostics, or a
+- whether the request is reset-only, materialization diagnostics, or a
   full media retry
 - the failed operation and its evidence: canonical state, app-server/job log,
   request snapshot, generation provenance, validator result, and regeneration
@@ -69,7 +69,7 @@ Choose p650 only when all of these are true:
 - no create, resume, or bulk image job is active for the run
 
 This includes a scene image API timeout or provider failure when the frozen
-requests, approved assets, semantic evidence, and provenance bindings remain
+requests, current assets, source bindings, and provenance remain
 current. Preserve valid p500 assets and unaffected scene outputs. Use the Image
 generation app resume API; its image-only worker performs hash-aware partial
 regeneration and revalidates p650 under the retained lease.
@@ -80,11 +80,10 @@ Choose p500 when the verified p650 route does not apply and any of these are tru
 
 - scene-image work is the target but strict p650 validation fails
 - asset generation, asset/reference repair, or prompt materialization must run
-- the asset plan, asset request snapshot, image prompt request, or their semantic
-  evidence is stale or invalid
+- the asset plan, asset request snapshot, or image prompt request is stale or invalid
 - a canonical artifact before p650 changed and invalidated downstream bindings
 
-The p400 foundation must still pass fresh deterministic readiness. The p500
+The p400 foundation must still pass fresh structural readiness. The p500
 route preserves p100-p450, quarantines stale p500+ artifacts, and applies an
 append-only invalidation event.
 
@@ -119,9 +118,9 @@ python scripts/resume-from-p500.py \
   --checkpoint-id "<unique-checkpoint-id>"
 ```
 
-The command must pass the fresh deterministic p400 content/readiness gate before
-it produces a plan. The continuation path rematerializes p400 review artifacts
-and passes the full review-integrity gate before any p500 request/provider work.
+The command must pass the fresh p400 structural checks before it produces a plan.
+The continuation path rematerializes p400 request artifacts and passes the
+structural integrity checks before any p500 request/provider work.
 Inspect the JSON and confirm:
 
 - `preserved_files` includes `research.md`, `story.md`, `visual_value.md`,
@@ -147,7 +146,7 @@ python scripts/resume-from-p500.py \
   --apply
 ```
 
-Run semantic/materialization diagnostics without media generation:
+Run materialization diagnostics without media generation:
 
 ```bash
 python scripts/resume-from-p500.py \
@@ -159,7 +158,7 @@ python scripts/resume-from-p500.py \
   --materialize-only
 ```
 
-Normal frontend image-review retry:
+Normal frontend image retry:
 
 ```bash
 python scripts/resume-from-p500.py \
@@ -177,12 +176,12 @@ conflict and wait; do not remove lock files.
 
 ### 4. Handle a repeated QA failure
 
-If semantic QA fails:
+If a structural or provider check fails:
 
 1. Keep the same run directory.
 2. Diagnose and fix the canonical upstream artifact named by the QA report.
-3. Make the p400 deterministic/review gate current if the fix changed
-   `script.md` or `video_manifest.md`.
+3. Make the p400 structural checks current if the fix changed `script.md` or
+   `video_manifest.md`.
 4. Invoke this skill again. Reclassify from current evidence; do not assume the
    next attempt must use the same boundary.
 
@@ -196,12 +195,12 @@ Do not create a fresh frontend run merely to retry a downstream failure.
 - A p650 image-only retry must preserve current p500 assets and unaffected scene
   outputs; it may regenerate only scene paths named by the validated current
   regeneration plan.
-- Contextless semantic QA remains mandatory. Do not convert schema/count success
-  into a semantic pass.
+- Ordinary schema, reference, request, file, decode, duration, and provenance
+  checks remain mandatory.
 - `video_manifest.md` remains in place even when it says
   `manifest_phase: production`; frontend create materializes its execution
-  skeleton at p450. Requests, frozen snapshots, reports, media bytes, and
-  downstream state are what become stale.
+  skeleton at p450. Requests, frozen snapshots, media bytes, and downstream
+  state are what become stale.
 
 ## Completion Gate
 

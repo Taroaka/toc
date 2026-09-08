@@ -15,14 +15,6 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import yaml
 
-from toc.semantic_review import (
-    FOUNDATION_SEMANTIC_CRITERIA,
-    SEMANTIC_REVIEW_INPUT_SCHEMA,
-    semantic_review_input_digest,
-    semantic_review_scope_binding_sha256,
-)
-from toc.review_loop import review_input_snapshot_issues
-from toc.review_projection import review_source_fingerprint
 from toc.harness import load_structured_document
 from toc.story_duration import build_duration_plan
 
@@ -34,18 +26,6 @@ def load_frontend_run_module():
     spec = importlib.util.spec_from_file_location(
         "toc_immersive_frontend_run_under_test",
         REPO_ROOT / "scripts" / "toc-immersive-frontend-run.py",
-    )
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def load_image_prompt_review_module():
-    spec = importlib.util.spec_from_file_location(
-        "image_prompt_story_review_under_test",
-        REPO_ROOT / "scripts" / "review-image-prompt-story-consistency.py",
     )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -176,7 +156,6 @@ def write_test_llm_story(
             "schema_version": "adaptation_source_contract_v1",
             "mode": "existing_story",
             "authoring_provenance": "test_llm_double",
-            "semantic_review_criterion": "adaptation_value_fidelity",
             "source_story_promise": f"{topic}の出来事を因果順に描く。",
             "core_values": [
                 {
@@ -223,7 +202,7 @@ def minimal_authored_story_for_time_contract() -> dict:
                 "turn": f"scene {index}で不可逆な変化が起きる。",
                 "affect": {"label_hint": "tension", "audience_job": "follow_causality"},
                 "visualizable_action": f"scene {index}の具体的な行為。",
-                "grounding_note": "reviewed researchを保持したtest fixture",
+                "grounding_note": "researchを保持したtest fixture",
                 "source_basis": {"event_ids": [f"E{index:02d}"]},
                 "research_refs": [
                     f"research.story_materials.chronological_events[E{index:02d}]"
@@ -315,50 +294,6 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         )
         return title, location, intent, event, include_artifact
 
-    def test_pre_media_semantic_pipeline_reviews_every_design_stage_without_media(self) -> None:
-        module = load_frontend_run_module()
-        calls: list[tuple[str, bool]] = []
-        fixed_point = AsyncMock()
-        snapshot_refresh = Mock()
-
-        async def review(_job_id, *, run_dir, stage, image_prompt_provider_ready=True):
-            self.assertEqual(run_dir, Path("/tmp/example-run"))
-            calls.append((stage, image_prompt_provider_ready))
-
-        with (
-            patch(
-                "server.image_gen_app._run_pre_asset_semantic_fixed_point",
-                fixed_point,
-            ),
-            patch("server.image_gen_app._run_semantic_review", side_effect=review),
-            patch.object(module, "check_semantic_review", return_value=Mock(passed=True, errors=())),
-            patch.object(
-                module,
-                "_refresh_downstream_review_input_snapshots",
-                snapshot_refresh,
-            ),
-        ):
-            import asyncio
-
-            asyncio.run(
-                module.run_pre_media_semantic_pipeline(
-                    Path("/tmp/example-run"),
-                    image_prompt_provider_ready=False,
-                )
-            )
-
-        fixed_point.assert_awaited_once_with(
-            "toc-immersive-frontend-run",
-            run_dir=Path("/tmp/example-run"),
-        )
-        snapshot_refresh.assert_called_once_with(Path("/tmp/example-run"))
-        self.assertEqual(
-            calls,
-            [
-                ("image_prompt", False),
-            ],
-        )
-
     def test_world_walk_binds_canonical_source_metadata(self) -> None:
         module = load_frontend_run_module()
         source_run = REPO_ROOT / "output" / "桃太郎_20260727_1200"
@@ -404,27 +339,6 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             )
             self.assertIsNone(payload["source_run"])
             self.assertEqual(payload["target_duration_seconds"], 600)
-
-    def test_create_input_contract_records_preapproved_review_mode(self) -> None:
-        module = load_frontend_run_module()
-        with tempfile.TemporaryDirectory(
-            prefix="frontend_preapproved_input_",
-            dir=REPO_ROOT / "output",
-        ) as tmp:
-            run_dir = Path(tmp)
-            path = module._write_create_input_contract(
-                run_dir=run_dir,
-                topic="創作",
-                source="レビューを省略する物語",
-                experience="cinematic_story",
-                source_run=None,
-                target_duration_seconds=300,
-                review_mode="preapproved",
-            )
-
-            payload = json.loads(path.read_text(encoding="utf-8"))
-
-        self.assertEqual(payload["review_mode"], "preapproved")
 
     def test_world_walk_create_input_uses_actual_source_story_bytes(self) -> None:
         module = load_frontend_run_module()
@@ -1169,7 +1083,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                 msg=f"stdout={completed.stdout!r} stderr={completed.stderr!r}",
             )
 
-    def test_prepare_grounding_preserves_frozen_authoring_readsets(self) -> None:
+    def test_prepare_grounding_only_prepares_source_readsets(self) -> None:
         module = load_frontend_run_module()
         run_dir = Path("/tmp/frontend-grounding-order")
 
@@ -1181,29 +1095,6 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
 
         authoring_grounding.assert_not_called()
         commands = [call.args[0] for call in subprocess_run.call_args_list]
-        self.assertIn("verify-pipeline.py", str(commands[0][1]))
-        self.assertIn("--stage-target", commands[0])
-        self.assertEqual(
-            [
-                command[command.index("--stage") + 1]
-                for command in commands[1:]
-            ],
-            ["asset", "scene_implementation"],
-        )
-
-    def test_prepare_grounding_can_defer_p450_until_repaired_stage_rereview(
-        self,
-    ) -> None:
-        module = load_frontend_run_module()
-        run_dir = Path("/tmp/frontend-grounding-semantic-repair")
-
-        with patch.object(module.subprocess, "run") as subprocess_run:
-            module.prepare_grounding(run_dir, verify_p450=False)
-
-        commands = [call.args[0] for call in subprocess_run.call_args_list]
-        self.assertFalse(
-            any("verify-pipeline.py" in str(command) for command in commands)
-        )
         self.assertEqual(
             [
                 command[command.index("--stage") + 1]
@@ -1252,559 +1143,6 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
 
         self.assertEqual(state["slot.p510.status"], "done")
         self.assertEqual(state["slot.p610.status"], "pending")
-
-    def test_materialize_declares_final_frontend_review_policy_before_grounding(self) -> None:
-        module = load_frontend_run_module()
-        output_root = REPO_ROOT / "output"
-        output_root.mkdir(exist_ok=True)
-        captured: dict[str, str] = {}
-        captured_create_input: dict[str, object] = {}
-
-        with tempfile.TemporaryDirectory(
-            prefix="frontend_grounding_policy_",
-            dir=output_root,
-        ) as tmp:
-            # materialize_run() derives its story variant from run_dir.name.
-            # Keep the leaf stable so this contract test cannot select a
-            # different asset/prompt variant from a random tempfile suffix.
-            run_dir = Path(tmp) / "fixed_grounding_policy_seed"
-
-            def capture_policy(target_run_dir: Path) -> None:
-                captured_create_input.update(
-                    json.loads(
-                        (
-                            target_run_dir
-                            / "logs/orchestration/create_input.json"
-                        ).read_text(encoding="utf-8")
-                    )
-                )
-                state = parse_state(target_run_dir / "state.txt")
-                for key in (
-                    "runtime.review_policy",
-                    "review.policy.story",
-                    "review.policy.image",
-                    "review.policy.narration",
-                    "gate.research_review",
-                    "gate.story_review",
-                    "gate.image_review",
-                    "gate.narration_review",
-                ):
-                    captured[key] = state.get(key, "")
-                raise RuntimeError("stop after grounding policy capture")
-
-            with (
-                patch.object(
-                    module,
-                    "_prepare_authoring_grounding",
-                    side_effect=capture_policy,
-                ),
-                self.assertRaisesRegex(
-                    RuntimeError,
-                    "stop after grounding policy capture",
-                ),
-            ):
-                module.materialize_run(
-                    "創作",
-                    "架空の主人公が閉ざされた門を越える物語。",
-                    run_dir,
-                    "p650",
-                    story_author_runner=write_test_llm_story,
-                )
-
-        self.assertEqual(
-            captured,
-            {
-                "runtime.review_policy": "frontend",
-                "review.policy.story": "required",
-                "review.policy.image": "required",
-                "review.policy.narration": "optional",
-                "gate.research_review": "required",
-                "gate.story_review": "required",
-                "gate.image_review": "required",
-                "gate.narration_review": "optional",
-            },
-        )
-        self.assertEqual(
-            captured_create_input["source"],
-            "架空の主人公が閉ざされた門を越える物語。",
-        )
-        self.assertEqual(
-            captured_create_input["schema_version"],
-            "toc.create_input.v1",
-        )
-
-    def test_preapproved_materialize_keeps_image_review_pending_until_p680(self) -> None:
-        module = load_frontend_run_module()
-        output_root = REPO_ROOT / "output"
-        output_root.mkdir(exist_ok=True)
-        captured: dict[str, str] = {}
-
-        with tempfile.TemporaryDirectory(
-            prefix="frontend_preapproved_policy_",
-            dir=output_root,
-        ) as tmp:
-            run_dir = Path(tmp) / "fixed_preapproved_policy_seed"
-
-            def capture_policy(target_run_dir: Path) -> None:
-                state = parse_state(target_run_dir / "state.txt")
-                for key in (
-                    "runtime.review_policy",
-                    "runtime.review_mode",
-                    "gate.research_review",
-                    "gate.story_review",
-                    "gate.image_review",
-                    "review.image.status",
-                ):
-                    captured[key] = state.get(key, "")
-                raise RuntimeError("stop after preapproved policy capture")
-
-            with (
-                patch.object(
-                    module,
-                    "_prepare_authoring_grounding",
-                    side_effect=capture_policy,
-                ),
-                self.assertRaisesRegex(
-                    RuntimeError,
-                    "stop after preapproved policy capture",
-                ),
-            ):
-                module.materialize_run(
-                    "創作",
-                    "架空の主人公が境界を越える物語。",
-                    run_dir,
-                    "p680",
-                    review_mode="preapproved",
-                    story_author_runner=write_test_llm_story,
-                )
-
-        self.assertEqual(
-            captured,
-            {
-                "runtime.review_policy": "preapproved",
-                "runtime.review_mode": "preapproved",
-                "gate.research_review": "skipped",
-                "gate.story_review": "skipped",
-                "gate.image_review": "skipped",
-                "review.image.status": "pending",
-            },
-        )
-    def test_prepare_grounding_keeps_real_p400_snapshot_bindings_current(self) -> None:
-        module = load_frontend_run_module()
-        output_root = REPO_ROOT / "output"
-        output_root.mkdir(exist_ok=True)
-
-        with tempfile.TemporaryDirectory(
-            prefix="frontend_grounding_snapshot_",
-            dir=output_root,
-        ) as tmp:
-            # Exercise the real materialization path with a deterministic
-            # variant; the random parent still isolates every test run.
-            # This fixed leaf selects a known-valid generic-story variant while
-            # the random parent keeps filesystem state isolated.
-            run_dir = Path(tmp) / "frontend_grounding_snapshot_aoosiyjk"
-            module.materialize_run(
-                "創作",
-                "架空の主人公が閉ざされた門を越え、失われた証を取り戻す物語。",
-                run_dir,
-                "p650",
-                foundation_review_runner=self._write_passing_foundation_review,
-                story_author_runner=write_test_llm_story,
-            )
-            readset_path = run_dir / "logs" / "grounding" / "script.readset.json"
-            readset_sha_before = hashlib.sha256(readset_path.read_bytes()).hexdigest()
-            manifest_path = run_dir / "video_manifest.md"
-
-            module.prepare_grounding(run_dir)
-
-            readset_sha_after = hashlib.sha256(readset_path.read_bytes()).hexdigest()
-            readset = json.loads(readset_path.read_text(encoding="utf-8"))
-            state = parse_state(run_dir / "state.txt")
-
-            self.assertEqual(readset_sha_after, readset_sha_before)
-            self.assertEqual(
-                readset["review_policy"],
-                {
-                    "story": "required",
-                    "image": "required",
-                    "narration": "optional",
-                },
-            )
-            for stage in (
-                "scene_set",
-                "scene_detail",
-                "cut_blueprint",
-                "script",
-                "production_readiness",
-            ):
-                snapshot_path = (
-                    run_dir
-                    / "logs"
-                    / "eval"
-                    / stage
-                    / "round_01"
-                    / "review_input_snapshot.json"
-                )
-                snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-                self.assertEqual(
-                    snapshot["readset"],
-                    {
-                        "path": "logs/grounding/script.readset.json",
-                        "sha256": readset_sha_before,
-                        "size_bytes": readset_path.stat().st_size,
-                    },
-                    stage,
-                )
-                self.assertEqual(
-                    review_input_snapshot_issues(
-                        run_dir=run_dir,
-                        stage=stage,
-                        round_number=1,
-                    ),
-                    [],
-                    stage,
-                )
-                if stage != "visual_value":
-                    manifest_source = next(
-                        item
-                        for item in snapshot["source_artifacts"]
-                        if item["path"] == "video_manifest.md"
-                    )
-                    self.assertEqual(
-                        manifest_source["sha256"],
-                        review_source_fingerprint(
-                            manifest_path,
-                            artifact_relpath="video_manifest.md",
-                            review_kind="review_loop",
-                            stage=stage,
-                        ).sha256,
-                        stage,
-                    )
-            self.assertEqual(state["eval.p400_readiness.status"], "approved")
-
-    def test_review_materialization_phases_have_exact_stage_ownership(self) -> None:
-        module = load_frontend_run_module()
-
-        self.assertEqual(
-            module.P400_REVIEW_STAGES,
-            (
-                "visual_value",
-                "scene_set",
-                "scene_detail",
-                "cut_blueprint",
-                "script",
-                "production_readiness",
-            ),
-        )
-        self.assertEqual(
-            module.DOWNSTREAM_REVIEW_STAGES,
-            (
-                "asset",
-                "scene_implementation_hard",
-                "scene_implementation_judgment",
-            ),
-        )
-
-    def test_materialize_run_orders_p400_reviews_before_requests_and_orchestration(self) -> None:
-        module = load_frontend_run_module()
-        output_root = REPO_ROOT / "output"
-        output_root.mkdir(exist_ok=True)
-        events: list[str] = []
-
-        with tempfile.TemporaryDirectory(
-            prefix="frontend_review_phase_order_",
-            dir=output_root,
-        ) as tmp:
-            run_dir = Path(tmp) / "fixed_grounding_policy_seed"
-            with (
-                patch.object(
-                    module,
-                    "_prepare_authoring_grounding",
-                    side_effect=lambda _run_dir: events.append("authoring_grounding"),
-                ),
-                patch.object(
-                    module,
-                    "_refresh_p400_review_artifacts",
-                    side_effect=lambda _run_dir: events.append("p400_reviews"),
-                ),
-                patch.object(
-                    module,
-                    "_require_fresh_p400_readiness",
-                    side_effect=lambda _run_dir: events.append("p400_readiness"),
-                ),
-                patch.object(
-                    module,
-                    "_write_asset_request_files",
-                    side_effect=lambda *_args: events.append("asset_requests"),
-                ),
-                patch.object(
-                    module,
-                    "_materialize_standard_request_files",
-                    side_effect=lambda _run_dir: events.append("scene_requests"),
-                ),
-                patch.object(
-                    module,
-                    "_write_orchestration",
-                    side_effect=lambda *_args, **_kwargs: (
-                        events.append("orchestration") or {}
-                    ),
-                ),
-            ):
-                module.materialize_run(
-                    "創作",
-                    "架空の主人公が閉ざされた門を越える物語。",
-                    run_dir,
-                    "p650",
-                    story_author_runner=write_test_llm_story,
-                )
-
-        self.assertEqual(
-            events,
-            [
-                "authoring_grounding",
-                "p400_reviews",
-                "p400_readiness",
-                "asset_requests",
-                "scene_requests",
-                "authoring_grounding",
-                "p400_reviews",
-                "p400_readiness",
-                "orchestration",
-            ],
-        )
-
-    def test_downstream_review_snapshots_bind_current_non_null_readsets(self) -> None:
-        module = load_frontend_run_module()
-        with tempfile.TemporaryDirectory(prefix="frontend_downstream_reviews_") as tmp:
-            run_dir = Path(tmp)
-            grounding_dir = run_dir / "logs" / "grounding"
-            grounding_dir.mkdir(parents=True)
-            for relpath in (
-                "story.md",
-                "script.md",
-                "video_manifest.md",
-                "asset_inventory.md",
-                "asset_plan.md",
-                "image_prompt_story_review.md",
-                "asset_generation_requests.md",
-                "asset_generation_request_snapshot.json",
-                "image_generation_requests.md",
-                "image_generation_request_snapshot.json",
-            ):
-                path = run_dir / relpath
-                path.write_text(
-                    (
-                        "```yaml\nscenes: []\n```\n"
-                        if relpath == "video_manifest.md"
-                        else f"{relpath}\n"
-                    ),
-                    encoding="utf-8",
-                )
-            readset_paths = {
-                "asset": grounding_dir / "asset.readset.json",
-                "scene_implementation": grounding_dir
-                / "scene_implementation.readset.json",
-            }
-            for stage, path in readset_paths.items():
-                path.write_text(
-                    json.dumps({"stage": stage}, sort_keys=True) + "\n",
-                    encoding="utf-8",
-                )
-
-            with (
-                patch.object(module.subprocess, "run") as subprocess_run,
-                patch.object(
-                    module,
-                    "_authoring_review_blocking_findings",
-                    return_value=(),
-                ),
-            ):
-                module._refresh_downstream_review_artifacts(run_dir)
-
-            semantic_pack_stages = [
-                command[index + 1]
-                for command in (
-                    call.args[0] for call in subprocess_run.call_args_list
-                )
-                if "build-semantic-review-pack.py" in str(command[1])
-                for index, argument in enumerate(command[:-1])
-                if argument == "--stage"
-            ]
-            self.assertEqual(
-                semantic_pack_stages,
-                ["asset_plan", "image_prompt"],
-            )
-            snapshot_readsets = {
-                "asset": "asset",
-                "scene_implementation_hard": "scene_implementation",
-                "scene_implementation_judgment": "scene_implementation",
-            }
-            for review_stage, grounding_stage in snapshot_readsets.items():
-                snapshot_path = (
-                    run_dir
-                    / "logs"
-                    / "eval"
-                    / review_stage
-                    / "round_01"
-                    / "review_input_snapshot.json"
-                )
-                snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-                readset_path = readset_paths[grounding_stage]
-                self.assertEqual(
-                    snapshot["readset"],
-                    {
-                        "path": (
-                            f"logs/grounding/{grounding_stage}.readset.json"
-                        ),
-                        "sha256": hashlib.sha256(
-                            readset_path.read_bytes()
-                        ).hexdigest(),
-                        "size_bytes": readset_path.stat().st_size,
-                    },
-                    review_stage,
-                )
-                self.assertEqual(
-                    review_input_snapshot_issues(
-                        run_dir=run_dir,
-                        stage=review_stage,
-                        round_number=1,
-                    ),
-                    [],
-                    review_stage,
-                )
-            (run_dir / "video_manifest.md").write_text(
-                "```yaml\n"
-                "video_metadata:\n"
-                "  topic: final repaired manifest\n"
-                "scenes: []\n"
-                "```\n",
-                encoding="utf-8",
-            )
-            (run_dir / "image_prompt_story_review.md").write_text(
-                "final repaired deterministic review\n",
-                encoding="utf-8",
-            )
-
-            module._refresh_downstream_review_input_snapshots(run_dir)
-
-            for review_stage in (
-                "scene_implementation_hard",
-                "scene_implementation_judgment",
-            ):
-                self.assertEqual(
-                    review_input_snapshot_issues(
-                        run_dir=run_dir,
-                        stage=review_stage,
-                        round_number=1,
-                    ),
-                    [],
-                    review_stage,
-                )
-            self.assertTrue(
-                review_input_snapshot_issues(
-                    run_dir=run_dir,
-                    stage="asset",
-                    round_number=1,
-                ),
-                "approved asset review must not be rebound without rerunning its critics",
-            )
-
-    def test_p400_review_refresh_reuses_identical_manifest_preflight(self) -> None:
-        module = load_frontend_run_module()
-        stages = (
-            "scene_set",
-            "scene_detail",
-            "cut_blueprint",
-            "production_readiness",
-        )
-        with tempfile.TemporaryDirectory(prefix="frontend_review_cache_") as tmp:
-            run_dir = Path(tmp)
-            for stage in stages:
-                for critic_number in range(1, module.REVIEW_LOOP_CRITIC_COUNT + 1):
-                    prompt_path = run_dir / module.critic_prompt_relpath(
-                        stage,
-                        1,
-                        critic_number,
-                    )
-                    prompt_path.parent.mkdir(parents=True, exist_ok=True)
-                    prompt_path.write_text(
-                        "critic_focus: contract\n"
-                        f"Review input digest: `{'a' * 64}`\n",
-                        encoding="utf-8",
-                    )
-
-            preflight = Mock(return_value=())
-            with (
-                patch.object(module, "materialize_review_loop_round"),
-                patch.object(module, "review_input_snapshot_issues", return_value=()),
-                patch.object(module, "review_input_digest", return_value="a" * 64),
-                patch.object(module, "_authoring_review_blocking_findings", preflight),
-                patch.object(
-                    module,
-                    "render_aggregated_review",
-                    return_value="- status: passed\n",
-                ),
-                patch.object(module, "_write_run_text_nofollow"),
-                patch.object(module, "append_state_snapshot"),
-            ):
-                module._refresh_review_loop_artifacts(run_dir, stages)
-
-        self.assertEqual(preflight.call_count, 1)
-
-    def test_preapproved_p400_review_refresh_projects_pass_without_content_preflight(self) -> None:
-        module = load_frontend_run_module()
-        stage = "scene_set"
-        with tempfile.TemporaryDirectory(prefix="frontend_preapproved_p400_") as tmp:
-            run_dir = Path(tmp)
-            for critic_number in range(1, module.REVIEW_LOOP_CRITIC_COUNT + 1):
-                prompt_path = run_dir / module.critic_prompt_relpath(
-                    stage,
-                    1,
-                    critic_number,
-                )
-                prompt_path.parent.mkdir(parents=True, exist_ok=True)
-                prompt_path.write_text(
-                    "critic_focus: contract\n"
-                    f"Review input digest: `{'a' * 64}`\n",
-                    encoding="utf-8",
-                )
-
-            preflight = Mock(return_value=("content quality finding",))
-            critic = Mock(wraps=module._review_loop_critic_report)
-            with (
-                patch.object(
-                    module,
-                    "review_mode_is_bound_preapproved",
-                    return_value=True,
-                ),
-                patch.object(module, "materialize_review_loop_round"),
-                patch.object(module, "review_input_snapshot_issues", return_value=()),
-                patch.object(module, "review_input_digest", return_value="a" * 64),
-                patch.object(module, "_authoring_review_blocking_findings", preflight),
-                patch.object(module, "_review_loop_critic_report", critic),
-                patch.object(
-                    module,
-                    "render_aggregated_review",
-                    return_value="- status: passed\n",
-                ),
-                patch.object(module, "_write_run_text_nofollow"),
-                patch.object(module, "append_state_snapshot") as append_state,
-            ):
-                module._refresh_review_loop_artifacts(run_dir, (stage,))
-
-        preflight.assert_not_called()
-        self.assertEqual(critic.call_count, module.REVIEW_LOOP_CRITIC_COUNT)
-        self.assertTrue(
-            all(
-                call.kwargs["blocking_findings"] == ()
-                for call in critic.call_args_list
-            )
-        )
-        state_updates = append_state.call_args.args[1]
-        self.assertEqual(
-            state_updates["eval.scene_set.loop.review_mode"],
-            "deterministic_preapproval",
-        )
 
     def test_materialization_disk_preflight_rejects_106_mib_with_recovery_guidance(self) -> None:
         module = load_frontend_run_module()
@@ -1875,611 +1213,17 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         preflight.assert_called_once_with(Path("/tmp/materialized-run"))
         materialize.assert_not_called()
 
-    def test_semantic_pack_failure_labels_enospc_and_bounds_stderr_tail(self) -> None:
-        module = load_frontend_run_module()
-        noisy_prefix = "LEAK_SENTINEL\n" + ("provider-noise-" * 1000)
-        failure = subprocess.CalledProcessError(
-            1,
-            ["build-semantic-review-pack.py"],
-            stderr=f"{noisy_prefix}\nOSError: [Errno 28] No space left on device",
-        )
-
-        with (
-            patch.object(
-                module,
-                "_run_materialization_subprocess",
-                side_effect=failure,
-            ),
-            self.assertRaises(RuntimeError) as raised,
-        ):
-            module._build_semantic_review_packs(
-                Path("/tmp/example-run"),
-                ("scene_set", "scene_detail", "cut_blueprint"),
-            )
-
-        message = str(raised.exception)
-        self.assertIn("storage/ENOSPC", message)
-        self.assertIn("scene_set, scene_detail, cut_blueprint", message)
-        self.assertIn("exit code 1", message)
-        self.assertIn("[Errno 28] No space left on device", message)
-        self.assertIn("remove unused output runs", message)
-        self.assertNotIn("LEAK_SENTINEL", message)
-        self.assertLessEqual(len(message), 4600)
-
-    def test_materialize_only_main_runs_semantic_pipeline_but_not_media_generation(self) -> None:
-        module = load_frontend_run_module()
-        events: list[str] = []
-        semantic_pipeline = AsyncMock()
-        media_generation = AsyncMock()
-
-        with (
-            patch.object(
-                module,
-                "_validated_fresh_cli_run_dir",
-                return_value=Path("/tmp/materialized-run"),
-            ),
-            patch.object(
-                module,
-                "directory_identity_nofollow",
-                return_value=(1, 2),
-            ),
-            patch.object(module, "_run_materialization_lock", return_value=nullcontext()),
-            patch.object(
-                module,
-                "materialize_run",
-                side_effect=lambda *_args, **_kwargs: events.append("materialize"),
-            ),
-            patch.object(
-                module,
-                "prepare_grounding",
-                side_effect=lambda _run_dir: events.append("grounding"),
-            ),
-            patch.object(
-                module,
-                "_refresh_downstream_review_artifacts",
-                side_effect=lambda _run_dir: events.append("downstream_reviews"),
-            ),
-            patch.object(
-                module,
-                "run_pre_media_semantic_pipeline",
-                semantic_pipeline,
-            ),
-            patch.object(module, "generate_images", media_generation),
-            patch.object(module, "write_run_index"),
-            patch.object(
-                sys,
-                "argv",
-                [
-                    "toc-immersive-frontend-run.py",
-                    "--topic",
-                    "創作",
-                    "--run-dir",
-                    "/tmp/materialized-run",
-                    "--materialize-only",
-                    "--skip-validation",
-                ],
-            ),
-        ):
-            module.main()
-
-        self.assertEqual(
-            events,
-            ["materialize", "grounding", "downstream_reviews"],
-        )
-        semantic_pipeline.assert_awaited_once_with(
-            Path("/tmp/materialized-run"),
-            image_prompt_provider_ready=False,
-        )
-        media_generation.assert_not_awaited()
-
-    def test_main_stops_before_p680_validation_when_asset_review_is_required(self) -> None:
-        module = load_frontend_run_module()
-        output_root = REPO_ROOT / "output"
-        output_root.mkdir(exist_ok=True)
-        validation = Mock()
-
-        with tempfile.TemporaryDirectory(prefix="frontend_asset_review_", dir=output_root) as tmp:
-            run_dir = Path(tmp)
-
-            def seed_pending_handoff(*_args, **_kwargs) -> None:
-                (run_dir / "state.txt").write_text(
-                    "slot.p680.status=pending\n",
-                    encoding="utf-8",
-                )
-
-            with (
-                patch.object(module, "_validated_fresh_cli_run_dir", return_value=run_dir),
-                patch.object(
-                    module,
-                    "directory_identity_nofollow",
-                    return_value=(1, 2),
-                ),
-                patch.object(module, "_run_materialization_lock", return_value=nullcontext()),
-                patch.object(module, "materialize_run", side_effect=seed_pending_handoff),
-                patch.object(module, "prepare_grounding"),
-                patch.object(module, "_refresh_downstream_review_artifacts"),
-                patch.object(module, "write_run_index"),
-                patch.object(module, "validate", validation),
-                patch(
-                    "server.image_gen_app._generate_create_images",
-                    new_callable=AsyncMock,
-                    return_value=False,
-                ) as create_images,
-                patch.object(
-                    sys,
-                    "argv",
-                    [
-                        "toc-immersive-frontend-run.py",
-                        "--topic",
-                        "創作",
-                        "--run-dir",
-                        str(run_dir),
-                        "--stop-target",
-                        "p680",
-                    ],
-                ),
-                self.assertRaisesRegex(RuntimeError, "p570"),
-            ):
-                module.main()
-
-            state = parse_state(run_dir / "state.txt")
-
-        create_images.assert_awaited_once_with(
-            "toc-immersive-frontend-run",
-            run_id=run_dir.relative_to(output_root).as_posix(),
-        )
-        validation.assert_not_called()
-        self.assertEqual(state["slot.p680.status"], "pending")
-
-    def test_p650_generation_completes_asset_quality_handoff_before_validation(self) -> None:
-        module = load_frontend_run_module()
-        run_dir = REPO_ROOT / "output" / "frontend_p650_asset_handoff"
-        events: list[str] = []
-
-        async def fixed_point(_job_id: str, *, run_dir: Path) -> None:
-            events.append("fixed_point")
-
-        def provider_gate(_run_dir: Path) -> None:
-            events.append("provider_gate")
-
-        async def generate_assets(*, run_dir: Path, kind: str) -> None:
-            events.append(f"provider:{kind}")
-
-        def asset_quality(_run_dir: Path) -> None:
-            events.append("asset_quality")
-
-        def asset_handoff(_run_dir: Path, *, asset_quality_passed: bool) -> None:
-            self.assertTrue(asset_quality_passed)
-            events.append("asset_handoff")
-
-        async def semantic_review(
-            _job_id: str,
-            *,
-            run_dir: Path,
-            stage: str,
-        ) -> None:
-            self.assertEqual(stage, "image_prompt")
-            events.append("image_prompt")
-
-        def snapshot_refresh(_run_dir: Path) -> None:
-            events.append("snapshot_refresh")
-
-        with (
-            patch(
-                "server.image_gen_app._run_pre_asset_semantic_fixed_point",
-                side_effect=fixed_point,
-            ),
-            patch(
-                "server.image_gen_app._validate_pre_asset_provider_gate",
-                side_effect=provider_gate,
-            ),
-            patch(
-                "server.image_gen_app._run_semantic_review",
-                side_effect=semantic_review,
-            ),
-            patch(
-                "server.image_gen_app._generate_request_outputs",
-                side_effect=generate_assets,
-            ),
-            patch(
-                "server.image_gen_app._validate_p560_asset_quality",
-                side_effect=asset_quality,
-            ),
-            patch(
-                "server.image_gen_app._mark_asset_generation_handoff",
-                side_effect=asset_handoff,
-            ),
-            patch.object(
-                module,
-                "_refresh_downstream_review_input_snapshots",
-                side_effect=snapshot_refresh,
-            ),
-            patch.object(module, "check_semantic_review", return_value=Mock(passed=True, errors=())),
-        ):
-            import asyncio
-
-            asyncio.run(module.generate_images(run_dir, "p650"))
-
-        self.assertEqual(
-            events,
-            [
-                "fixed_point",
-                "provider_gate",
-                "provider:asset",
-                "asset_quality",
-                "asset_handoff",
-                "image_prompt",
-                "snapshot_refresh",
-            ],
-        )
-
-    def test_p650_provider_gate_failure_blocks_asset_submission(self) -> None:
-        module = load_frontend_run_module()
-        run_dir = REPO_ROOT / "output" / "frontend_p650_provider_gate"
-        fixed_point = AsyncMock()
-        generate_assets = AsyncMock()
-
-        with (
-            patch(
-                "server.image_gen_app._run_pre_asset_semantic_fixed_point",
-                fixed_point,
-            ),
-            patch(
-                "server.image_gen_app._validate_pre_asset_provider_gate",
-                side_effect=RuntimeError("pre-asset gate failed"),
-            ),
-            patch(
-                "server.image_gen_app._generate_request_outputs",
-                generate_assets,
-            ),
-            self.assertRaisesRegex(RuntimeError, "pre-asset gate failed"),
-        ):
-            import asyncio
-
-            asyncio.run(module.generate_images(run_dir, "p650"))
-
-        fixed_point.assert_awaited_once_with(
-            "toc-immersive-frontend-run",
-            run_dir=run_dir,
-        )
-        generate_assets.assert_not_awaited()
-
-    def test_p650_asset_gate_failure_preserves_completed_provider_work(self) -> None:
-        module = load_frontend_run_module()
-        from server import image_gen_app
-
-        output_root = REPO_ROOT / "output"
-        output_root.mkdir(exist_ok=True)
-        cases = (
-            (
-                image_gen_app.P560AssetGateError(
-                    "visual quality failed",
-                    failed_check_ids=("asset.visual_not_vector_like",),
-                    retryable_visual_quality=True,
-                ),
-                "awaiting_approval",
-            ),
-            (
-                image_gen_app.P560AssetGateError(
-                    "orchestration failed",
-                    failed_check_ids=("orchestration.supervisor_results",),
-                    retryable_visual_quality=False,
-                ),
-                "failed",
-            ),
-        )
-
-        for gate_error, expected_p570_status in cases:
-            with self.subTest(expected_p570_status=expected_p570_status):
-                with tempfile.TemporaryDirectory(prefix="frontend_p650_gate_", dir=output_root) as tmp:
-                    run_dir = Path(tmp)
-                    (run_dir / "state.txt").write_text(
-                        "slot.p550.status=pending\n"
-                        "slot.p560.status=pending\n"
-                        "slot.p570.status=pending\n",
-                        encoding="utf-8",
-                    )
-                    with (
-                        patch(
-                            "server.image_gen_app._run_pre_asset_semantic_fixed_point",
-                            new_callable=AsyncMock,
-                        ),
-                        patch(
-                            "server.image_gen_app._validate_pre_asset_provider_gate",
-                        ),
-                        patch("server.image_gen_app._run_semantic_review", new_callable=AsyncMock),
-                        patch("server.image_gen_app._generate_request_outputs", new_callable=AsyncMock),
-                        patch(
-                            "server.image_gen_app._validate_p560_asset_quality",
-                            side_effect=gate_error,
-                        ),
-                        patch.object(
-                            module,
-                            "check_semantic_review",
-                            return_value=Mock(passed=True, errors=()),
-                        ),
-                        self.assertRaises(image_gen_app.P560AssetGateError),
-                    ):
-                        import asyncio
-
-                        asyncio.run(module.generate_images(run_dir, "p650"))
-
-                    state = parse_state(run_dir / "state.txt")
-
-                self.assertEqual(state["slot.p550.status"], "done")
-                self.assertEqual(state["slot.p560.status"], "done")
-                self.assertEqual(state["slot.p570.status"], expected_p570_status)
-
-    @staticmethod
-    def _write_passing_foundation_review(run_dir: Path, stage: str) -> None:
-        review_dir = run_dir / "logs" / "review" / "semantic"
-        review_dir.mkdir(parents=True, exist_ok=True)
-        entry_id = f"{stage}:foundation"
-        collection_path = review_dir / f"{stage}.collection.md"
-        scope_path = review_dir / f"{stage}.scope.json"
-        prompt_path = review_dir / f"{stage}.prompt.md"
-        report_path = review_dir / f"{stage}.report.md"
-        collection_path.write_text(f"# Collection\n\n## {entry_id}\n", encoding="utf-8")
-        prompt_path.write_text("review prompt\n", encoding="utf-8")
-        source_artifacts = (
-            ["research.md"] if stage == "research" else ["research.md", "story.md"]
-        )
-        source_artifact_digests = [
-            {
-                "path": source,
-                "sha256": hashlib.sha256((run_dir / source).read_bytes()).hexdigest(),
-            }
-            for source in source_artifacts
-        ]
-        scope = {
-            "stage": stage,
-            "entry_count": 1,
-            "entry_ids": [entry_id],
-            "review_scope": "all_entries",
-            "source_artifacts": source_artifacts,
-            "semantic_review_input_schema": SEMANTIC_REVIEW_INPUT_SCHEMA,
-            "source_artifact_digests": source_artifact_digests,
-            "collection_sha256": hashlib.sha256(collection_path.read_bytes()).hexdigest(),
-            "prompt_sha256": hashlib.sha256(prompt_path.read_bytes()).hexdigest(),
-            "artifacts": {
-                "collection": collection_path.relative_to(run_dir).as_posix(),
-                "scope": scope_path.relative_to(run_dir).as_posix(),
-                "prompt": prompt_path.relative_to(run_dir).as_posix(),
-                "report": report_path.relative_to(run_dir).as_posix(),
-            },
-        }
-        binding = semantic_review_scope_binding_sha256(scope)
-        digest = semantic_review_input_digest(
-            stage=stage,
-            entry_ids=[entry_id],
-            collection_sha256=scope["collection_sha256"],
-            prompt_sha256=scope["prompt_sha256"],
-            source_artifact_digests=source_artifact_digests,
-            scope_binding_sha256=binding,
-        )
-        scope["scope_binding_sha256"] = binding
-        scope["semantic_review_input_digest"] = digest
-        scope_path.write_text(
-            json.dumps(scope, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        criteria_results = [
-            {
-                "criterion_id": criterion_id,
-                "status": "passed",
-                "evidence": f"{stage}.md:{criterion_id}",
-            }
-            for criterion_id in FOUNDATION_SEMANTIC_CRITERIA[stage]
-        ]
-        report_path.write_text(
-            "\n".join(
-                [
-                    "status: passed",
-                    f"semantic_review_input_digest: {digest}",
-                    f"reviewed_entries: [{entry_id}]",
-                    "blocked_entries: []",
-                    "failed_selectors: []",
-                    "criteria_results_json: " + json.dumps(criteria_results, ensure_ascii=False),
-                    "findings: []",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
-
-    def test_research_semantic_failure_stops_before_story_and_cut_generation(self) -> None:
-        module = load_frontend_run_module()
-        output_root = REPO_ROOT / "output"
-        output_root.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="frontend_foundation_research_fail_", dir=output_root) as tmp:
-            run_dir = Path(tmp)
-            cut_builder = Mock(side_effect=AssertionError("cut builder must not run"))
-
-            def fail_research(_run_dir: Path, stage: str) -> None:
-                self.assertEqual(stage, "research")
-                raise RuntimeError("research semantic review failed")
-
-            with patch.object(module, "_build_script_and_manifest", cut_builder):
-                with self.assertRaisesRegex(RuntimeError, "research semantic review failed"):
-                    module.materialize_run(
-                        "桃太郎",
-                        "桃太郎",
-                        run_dir,
-                        "p650",
-                        target_duration_seconds=900,
-                        foundation_review_runner=fail_research,
-                    )
-
-            self.assertTrue((run_dir / "research.md").exists())
-            self.assertFalse((run_dir / "story.md").exists())
-            self.assertFalse((run_dir / "script.md").exists())
-            self.assertFalse((run_dir / "video_manifest.md").exists())
-            self.assertFalse((run_dir / "logs" / "scene_design" / "scene_event_input.json").exists())
-            cut_builder.assert_not_called()
-            state = parse_state(run_dir / "state.txt")
-            self.assertEqual(state["runtime.target_video_seconds"], "900")
-            self.assertEqual(state["runtime.duration_plan.minimum_scene_count"], "23")
-            self.assertNotIn("runtime.duration_plan.minimum_cut_count", state)
-            self.assertEqual(state["runtime.duration_plan.minimum_narration_seconds"], "630")
-
-    def test_story_semantic_transport_failure_stops_before_cut_generation(self) -> None:
-        module = load_frontend_run_module()
-        output_root = REPO_ROOT / "output"
-        output_root.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="frontend_foundation_story_transport_", dir=output_root) as tmp:
-            run_dir = Path(tmp)
-            cut_builder = Mock(side_effect=AssertionError("cut builder must not run"))
-            reviewed: list[str] = []
-
-            def review_foundation(target_run_dir: Path, stage: str) -> None:
-                reviewed.append(stage)
-                if stage == "story":
-                    raise RuntimeError("Codex app-server transport failed")
-                self._write_passing_foundation_review(target_run_dir, stage)
-
-            with patch.object(module, "_build_script_and_manifest", cut_builder):
-                with self.assertRaisesRegex(RuntimeError, "transport failed"):
-                    module.materialize_run(
-                        "桃太郎",
-                        "桃太郎",
-                        run_dir,
-                        "p650",
-                        foundation_review_runner=review_foundation,
-                        story_author_runner=write_test_llm_story,
-                    )
-
-            self.assertEqual(reviewed, ["research", "story"])
-            self.assertTrue((run_dir / "research.md").exists())
-            self.assertTrue((run_dir / "story.md").exists())
-            self.assertFalse((run_dir / "script.md").exists())
-            self.assertFalse((run_dir / "video_manifest.md").exists())
-            self.assertFalse((run_dir / "logs" / "scene_design" / "scene_event_input.json").exists())
-            cut_builder.assert_not_called()
-
-    def test_cli_main_always_enables_foundation_semantic_reviews(self) -> None:
-        module = load_frontend_run_module()
-        calls: list[dict[str, object]] = []
-        semantic_pipeline = AsyncMock()
-
-        def fake_materialize(*args, **kwargs) -> None:
-            calls.append({"args": args, "kwargs": kwargs})
-
-        with (
-            patch.object(module, "materialize_run", fake_materialize),
-            patch.object(module, "prepare_grounding", Mock()),
-            patch.object(
-                module,
-                "_refresh_downstream_review_artifacts",
-                Mock(),
-            ),
-            patch.object(
-                module,
-                "run_pre_media_semantic_pipeline",
-                semantic_pipeline,
-            ),
-            patch.object(module, "write_run_index", Mock()),
-            patch.object(
-                sys,
-                "argv",
-                [
-                    "toc-immersive-frontend-run.py",
-                    "--topic",
-                    "桃太郎",
-                    "--run-dir",
-                    "output/test_foundation_cli",
-                    "--materialize-only",
-                    "--skip-validation",
-                ],
-            ),
-        ):
-            module.main()
-
-        self.assertEqual(len(calls), 1)
-        self.assertIs(calls[0]["kwargs"]["foundation_review_runner"], module._run_foundation_semantic_review)
-        semantic_pipeline.assert_awaited_once_with(
-            Path("output/test_foundation_cli"),
-            image_prompt_provider_ready=False,
-        )
-
-    def test_cli_main_propagates_preapproved_review_mode(self) -> None:
-        module = load_frontend_run_module()
-        calls: list[dict[str, object]] = []
-
-        def fake_materialize(*args, **kwargs) -> None:
-            calls.append({"args": args, "kwargs": kwargs})
-
-        with (
-            patch.object(module, "materialize_run", fake_materialize),
-            patch.object(module, "prepare_grounding", Mock()),
-            patch.object(module, "_refresh_downstream_review_artifacts", Mock()),
-            patch.object(module, "run_pre_media_semantic_pipeline", AsyncMock()),
-            patch.object(module, "write_run_index", Mock()),
-            patch.object(
-                sys,
-                "argv",
-                [
-                    "toc-immersive-frontend-run.py",
-                    "--topic",
-                    "桃太郎",
-                    "--run-dir",
-                    "output/test_preapproved_cli",
-                    "--review-mode",
-                    "preapproved",
-                    "--materialize-only",
-                    "--skip-validation",
-                ],
-            ),
-        ):
-            module.main()
-
-        self.assertEqual(calls[0]["kwargs"]["review_mode"], "preapproved")
-
-    def test_orchestration_results_match_completed_foundation_review_slots(self) -> None:
-        module = load_frontend_run_module()
-        with tempfile.TemporaryDirectory(prefix="frontend_orchestration_foundations_") as tmp:
-            run_dir = Path(tmp)
-            module._write_orchestration(
-                run_dir,
-                "p680",
-                "2099-01-01T00:00:00+09:00",
-                foundation_reviews_passed=True,
-            )
-            p100 = json.loads(
-                (run_dir / "logs" / "orchestration" / "p100.supervisor_result.json").read_text(encoding="utf-8")
-            )
-            p200 = json.loads(
-                (run_dir / "logs" / "orchestration" / "p200.supervisor_result.json").read_text(encoding="utf-8")
-            )
-            p500 = json.loads(
-                (run_dir / "logs" / "orchestration" / "p500.supervisor_result.json").read_text(encoding="utf-8")
-            )
-            p600 = json.loads(
-                (run_dir / "logs" / "orchestration" / "p600.supervisor_result.json").read_text(encoding="utf-8")
-            )
-
-        self.assertEqual(p100["state_keys"]["slot.p130.status"], "done")
-        self.assertEqual(p200["state_keys"]["slot.p230.status"], "done")
-        self.assertEqual(p500["status"], "pending")
-        self.assertEqual(p500["completed_slots"], ["p520", "p530"])
-        self.assertEqual(p500["state_keys"]["slot.p570.status"], "pending")
-        self.assertEqual(p600["status"], "pending")
-        self.assertEqual(p600["completed_slots"], ["p620"])
-        self.assertEqual(p600["state_keys"]["slot.p680.status"], "pending")
-
     def test_fresh_materialized_media_slots_only_complete_executed_work(self) -> None:
         module = load_frontend_run_module()
         expected_common_statuses = {
             "p510": "pending",
             "p520": "done",
             "p530": "done",
-            "p540": "pending",
             "p550": "pending",
             "p560": "pending",
             "p570": "pending",
             "p610": "pending",
             "p620": "done",
-            "p630": "pending",
-            "p640": "pending",
             "p650": "pending",
         }
 
@@ -2500,23 +1244,23 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                     else:
                         self.assertNotIn(key, updates)
 
-    def test_reviewed_foundations_feed_story_and_cut_builders(self) -> None:
+    def test_researched_foundations_feed_story_and_cut_builders(self) -> None:
         module = load_frontend_run_module()
         base_profile = module._duration_aware_profile(
-            module._story_profile("桃太郎", "桃太郎", variant_seed="reviewed-foundation"),
+            module._story_profile("桃太郎", "桃太郎", variant_seed="authored-foundation"),
             target_duration_seconds=600,
         )
-        reviewed_event = "審査で確定した出来事が、主人公を橋の向こうへ進ませる。"
-        reviewed_research = {
+        authored_event = "確定した出来事が、主人公を橋の向こうへ進ませる。"
+        researched_source = {
             "story_materials": {
-                "canonical_story_dump": "審査済みの内部物語基準。",
-                "chronological_events": [{"event_id": "E99", "event": reviewed_event}],
-                "characters": [{"character_id": "protagonist", "name": "審査済み主人公", "role": "主人公"}],
+                "canonical_story_dump": "研究済みの物語基準。",
+                "chronological_events": [{"event_id": "E99", "event": authored_event}],
+                "characters": [{"character_id": "protagonist", "name": "研究済み主人公", "role": "主人公"}],
             },
-            "source_passages": [{"passage_id": "P99", "passage": reviewed_event}],
+            "source_passages": [{"passage_id": "P99", "passage": authored_event}],
         }
 
-        research_profile = module._profile_from_reviewed_research(base_profile, reviewed_research)
+        research_profile = module._profile_from_research(base_profile, researched_source)
         story = {
             "story_metadata": {
                 "time": "",
@@ -2529,12 +1273,12 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
                         "scene_id": "scene_01",
                         "canonical_scene_index": 1,
                         "title": "橋の向こうへ",
-                        "purpose": reviewed_event,
+                        "purpose": authored_event,
                         "conflict": "橋の境界が前進を阻む。",
-                        "turn": reviewed_event,
+                        "turn": authored_event,
                         "affect": {"label_hint": "resolve"},
-                        "visualizable_action": reviewed_event,
-                        "grounding_note": "reviewed research event E99",
+                        "visualizable_action": authored_event,
+                        "grounding_note": "researched source event E99",
                         "research_refs": [
                             "research.story_materials.chronological_events[E99]",
                             "research.source_passages[P99]",
@@ -2548,16 +1292,16 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
 
         self.assertIn("time", story["story_metadata"])
         self.assertIsInstance(story["story_metadata"]["time"], str)
-        self.assertEqual(research_profile["events"], [reviewed_event])
-        self.assertIn(reviewed_event, story["script"]["scenes"][0]["purpose"])
+        self.assertEqual(research_profile["events"], [authored_event])
+        self.assertIn(authored_event, story["script"]["scenes"][0]["purpose"])
         self.assertIn("research.story_materials.chronological_events[E99]", story["script"]["scenes"][0]["research_refs"])
         self.assertIn("research.source_passages[P99]", story["script"]["scenes"][0]["research_refs"])
 
-        reviewed_turn = "審査で修正された不可逆な転換を画面上の事実にする。"
-        story["script"]["scenes"][0]["purpose"] = "審査で修正されたscene目的"
-        story["script"]["scenes"][0]["turn"] = reviewed_turn
+        authored_turn = "確定した不可逆な転換を画面上の事実にする。"
+        story["script"]["scenes"][0]["purpose"] = "authoringで確定したscene目的"
+        story["script"]["scenes"][0]["turn"] = authored_turn
         story["story_metadata"]["time"] = "室町時代"
-        cut_profile = module._profile_from_reviewed_story(research_profile, story)
+        cut_profile = module._profile_from_story(research_profile, story)
         self.assertEqual(cut_profile["story_time"], "室町時代")
         location = module._location_spec_for_scene(cut_profile, 1)
         scene_intent = module._scene_intent_for_cut_design(
@@ -2577,10 +1321,10 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             include_artifact=False,
         )
 
-        self.assertEqual(scene_intent["story_purpose"], "審査で修正されたscene目的")
-        self.assertEqual(scene_intent["causal_turn"], reviewed_turn)
+        self.assertEqual(scene_intent["story_purpose"], "authoringで確定したscene目的")
+        self.assertEqual(scene_intent["causal_turn"], authored_turn)
         turn_beat = next(item for item in scene_event["event_sequence"] if item["beat_function"] == "turn")
-        self.assertEqual(turn_beat["what_happens"], reviewed_turn)
+        self.assertEqual(turn_beat["what_happens"], authored_turn)
 
     def test_rich_story_duration_contract_does_not_pad_semantic_scenes(self) -> None:
         module = load_frontend_run_module()
@@ -2605,20 +1349,20 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             },
         }
 
-        errors = module._reviewed_story_duration_contract_errors(
+        errors = module._story_duration_contract_errors(
             story,
             target_duration_seconds=600,
         )
 
         self.assertEqual(errors, [])
 
-    def test_reviewed_story_scene_overview_stays_out_of_drawable_evidence(self) -> None:
+    def test_story_scene_overview_stays_out_of_drawable_evidence(self) -> None:
         module = load_frontend_run_module()
         profile = module._story_profile(
-            "桃太郎", "桃太郎", variant_seed="reviewed-scene-overview"
+            "桃太郎", "桃太郎", variant_seed="story-scene-overview"
         )
         overview = "炉を掃除する → 籠を置かれる → 一人だけ台所に残される"
-        profile["reviewed_story_scenes"] = [
+        profile["story_scenes"] = [
             {
                 "scene_id": 1,
                 "visualizable_action": overview,
@@ -2630,17 +1374,17 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             "research_refs": [],
         }
 
-        reviewed = module._apply_reviewed_story_scene_to_blueprint(
+        authored = module._apply_story_scene_to_blueprint(
             blueprint,
             profile=profile,
             idx=1,
         )
 
-        self.assertEqual(reviewed["visible_evidence"], blueprint["visible_evidence"])
-        self.assertEqual(reviewed["review_only_visualizable_action"], overview)
-        self.assertNotIn("→", " / ".join(reviewed["visible_evidence"]))
+        self.assertEqual(authored["visible_evidence"], blueprint["visible_evidence"])
+        self.assertEqual(authored["story_overview_visualizable_action"], overview)
+        self.assertNotIn("→", " / ".join(authored["visible_evidence"]))
 
-    def test_reviewed_story_time_of_day_contract_blocks_missing_or_non_string_scene_values(self) -> None:
+    def test_story_time_of_day_contract_blocks_missing_or_non_string_scene_values(self) -> None:
         module = load_frontend_run_module()
         story = minimal_authored_story_for_time_contract()
 
@@ -2648,7 +1392,7 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         story["script"]["scenes"][1]["time_of_day"] = ["夜"]
 
         with self.assertRaisesRegex(RuntimeError, r"scene\[1\]\.time_of_day.*scene\[2\]\.time_of_day"):
-            module._validate_reviewed_story_time_of_day_contract(story)
+            module._validate_story_time_of_day_contract(story)
 
     def test_blank_scene_time_of_day_never_becomes_an_unknown_prompt_placeholder(self) -> None:
         module = load_frontend_run_module()
@@ -2664,14 +1408,14 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             for dimension in ("光源", "明るさ", "影", "色温度"):
                 self.assertIn(dimension, basis, (time_of_day, basis))
 
-    def test_reviewed_story_time_of_day_contract_requires_visual_basis(self) -> None:
+    def test_story_time_of_day_contract_requires_visual_basis(self) -> None:
         module = load_frontend_run_module()
         story = minimal_authored_story_for_time_contract()
 
         story["script"]["scenes"][0]["time_of_day_visual_basis"] = ""
 
         with self.assertRaisesRegex(RuntimeError, r"scene\[1\]\.time_of_day_visual_basis"):
-            module._validate_reviewed_story_time_of_day_contract(story)
+            module._validate_story_time_of_day_contract(story)
 
     def test_scaffold_not_yet_never_copies_next_positive_first_frame_brief(self) -> None:
         module = load_frontend_run_module()
@@ -2815,7 +1559,6 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
             object_ids=[],
             location_ids=["opaque_gate_id"],
             references=[],
-            review_metadata={},
         )
 
         self.assertEqual(payload["policy_version"], "image_api_prompt_v2")
@@ -2865,39 +1608,6 @@ class TestTocImmersiveFrontendRun(unittest.TestCase):
         self.assertIn("安堵", behavior["face"])
         self.assertNotIn("まだ結果へ到達していない", behavior["feet"])
         self.assertIn("重心は安定", behavior["feet"])
-
-    def test_asset_plan_projection_keeps_prompt_review_contracts(self) -> None:
-        module = load_frontend_run_module()
-        profile = {
-            "protagonist_name": "主人公",
-            "artifact_name": "鍵",
-            "artifact_role": "証拠",
-            "artifact_visual": "古い鍵",
-        }
-        manifest = {
-            "assets": {
-                "character_bible": [
-                    {
-                        "character_id": "siblings",
-                        "reference_images": ["assets/characters/siblings.png"],
-                        "fixed_prompts": ["姉妹"],
-                        "cinematic": {"role": "対立者", "visual_subject": "二人の姉妹"},
-                        "subject_contract": {"identity_scope": "ensemble", "subject_count": 2, "member_ids": ["older", "younger"]},
-                        "appearance_contract": {"social_position": "裕福な家の姉妹", "materials": "絹"},
-                        "reuse_contract": {"mode": "neutral_anchor"},
-                    }
-                ],
-                "object_bible": [],
-                "location_bible": [],
-            },
-            "scenes": [{"cuts": [{"selector": "scene01_cut01", "image_generation": {"character_ids": ["siblings"]}}]}],
-        }
-
-        _inventory, plan = module._build_asset_artifacts_from_manifest(profile=profile, manifest=manifest)
-        entry = plan["assets"][0]
-        self.assertEqual(entry["subject_contract"]["subject_count"], 2)
-        self.assertEqual(entry["appearance_contract"]["materials"], "絹")
-        self.assertEqual(entry["reuse_contract"], {"mode": "neutral_anchor"})
 
     def test_last_frame_boundary_validation_rejects_route_authorization_and_state_mismatches(self) -> None:
         module = load_frontend_run_module()

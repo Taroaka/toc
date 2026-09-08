@@ -149,18 +149,18 @@ class TestAudioDurationGate(unittest.TestCase):
 
             self.assertEqual(returncode, 2)
             self.assertIn("below minimum 240", output)
-            self.assertTrue((run_dir / "logs" / "review" / "duration_scene.subagent_prompt.md").exists())
-            self.assertTrue((run_dir / "logs" / "review" / "duration_narration.subagent_prompt.md").exists())
+            self.assertFalse((run_dir / "logs" / "review").exists())
+            self.assertFalse((run_dir / "logs" / "eval").exists())
 
             state = parse_state_file(run_dir / "state.txt")
-            self.assertEqual(state.get("review.duration_fit.status"), "changes_requested")
-            self.assertEqual(state.get("review.duration_fit.target_seconds"), "300")
-            self.assertEqual(state.get("review.duration_fit.minimum_seconds"), "240")
-            self.assertEqual(state.get("review.duration_fit.actual_seconds"), "239.7")
-            self.assertAlmostEqual(float(state.get("review.duration_fit.ratio") or "0"), 0.799)
-            self.assertEqual(state.get("review.duration_fit.measurement_complete"), "true")
-            self.assertEqual(state.get("review.duration_fit.audio_timeline_seconds"), "239.7")
-            self.assertEqual(state.get("review.duration_fit.video_timeline_seconds"), "600")
+            self.assertEqual(state.get("runtime.duration_fit.status"), "failed")
+            self.assertEqual(state.get("runtime.duration_fit.target_seconds"), "300")
+            self.assertEqual(state.get("runtime.duration_fit.minimum_seconds"), "240")
+            self.assertEqual(state.get("runtime.duration_fit.actual_seconds"), "239.7")
+            self.assertAlmostEqual(float(state.get("runtime.duration_fit.ratio") or "0"), 0.799)
+            self.assertEqual(state.get("runtime.duration_fit.measurement_complete"), "true")
+            self.assertEqual(state.get("runtime.duration_fit.audio_timeline_seconds"), "239.7")
+            self.assertEqual(state.get("runtime.duration_fit.video_timeline_seconds"), "600")
             self.assertEqual(state.get("slot.p740.status"), "failed")
             self.assertEqual(state.get("slot.p750.status"), "blocked")
 
@@ -176,10 +176,10 @@ class TestAudioDurationGate(unittest.TestCase):
                 self.assertEqual(returncode, 0)
                 self.assertIn("meets minimum 240", output)
                 state = parse_state_file(run_dir / "state.txt")
-                self.assertEqual(state.get("review.duration_fit.status"), "passed")
+                self.assertEqual(state.get("runtime.duration_fit.status"), "passed")
                 self.assertEqual(state.get("slot.p740.status"), "done")
                 self.assertEqual(state.get("slot.p750.status"), "pending")
-                self.assertAlmostEqual(float(state.get("review.duration_fit.ratio") or "0"), actual / 300)
+                self.assertAlmostEqual(float(state.get("runtime.duration_fit.ratio") or "0"), actual / 300)
 
     def test_incomplete_measurement_fails_even_when_metadata_claims_long_runtime(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_audio_duration_gate_") as td:
@@ -192,9 +192,9 @@ class TestAudioDurationGate(unittest.TestCase):
             self.assertEqual(returncode, 2)
             self.assertIn("measurement is incomplete", output)
             state = parse_state_file(run_dir / "state.txt")
-            self.assertEqual(state.get("review.duration_fit.measurement_complete"), "false")
-            self.assertEqual(state.get("review.duration_fit.actual_seconds"), "0")
-            self.assertIn("manifest:scenes", state.get("review.duration_fit.missing_items") or "")
+            self.assertEqual(state.get("runtime.duration_fit.measurement_complete"), "false")
+            self.assertEqual(state.get("runtime.duration_fit.actual_seconds"), "0")
+            self.assertIn("manifest:scenes", state.get("runtime.duration_fit.missing_items") or "")
             self.assertEqual(state.get("slot.p740.status"), "failed")
 
 

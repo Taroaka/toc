@@ -1,213 +1,87 @@
 # /toc-immersive-ride
 
-ToC（TikTok Story Creator）で「没入型（実写シネマティック体験）」動画を単発で生成するコマンド。
+ToC の没入型 cinematic story run を topic/source から作る command。
 
-## 使い方（想定）
+## 使い方
 
 ```text
 /toc-immersive-ride --topic "桃太郎"
-```
-
-哲学的な概念を「雲上の島を歩いて理解を深める」パターンで作る場合:
-
-```text
 /toc-immersive-ride --topic "自由意志" --experience cloud_island_walk
-```
-
-台本/マニフェストまでで止めたい場合:
-
-```text
-/toc-immersive-ride --topic "桃太郎" --stage script
-```
-
-p番号で止めたい場合（`p` なしの数字も可）:
-
-```text
 /toc-immersive-ride --topic "桃太郎" --stage p300
-/toc-immersive-ride --topic "桃太郎" --stage 300
 ```
 
-## コンセプト（experience別）
+## Experiences
 
-共通:
+- `cinematic_story`: scene intent に応じた POV/三人称。1 cut 内は視点を固定する。
+- `cloud_island_walk`: 雲上の島、道/階段/橋、物理 metaphor を使って概念を示す。
+- `world_walk`: existing run の asset を観察者 POV で歩き、source character は遠景で扱う。
+- `ride_action_boat`: legacy alias、内部では `cinematic_story`。
 
-- 視点は scene の意図に応じて（POV/三人称）。ただし 1カット内で視点ブレさせない
-- 実写風シネマティック（photorealistic / cinematic / practical effects）
-- ガイドは **音声（ナレーション）として必須**（視覚的に登場させない）
+共通で実写 cinematic、画面内 text/logo/watermark なし、stable character/object/location
+references、1 cut 1 primary intent を使う。
 
-`cinematic_story`:
-
-- 統一要素:
-  - 視点は必要に応じて（POV固定にしない）
-  - ボート/真鍮バー/手元アンカーなどの “固定デバイス” は使わない
-  - 物語キャラクター / 主役級アイテム（例: 玉手箱）をアンカーにして連続性を作る
-  - 物語キャラクター（毎scene必ず登場）
-  - 音声は全編通し原稿を先に作り、narration spanを1つ以上のcutへanchorする。spanは複数cutをまたいでよい
-
-`cloud_island_walk`（default）:
-
-- 「雲の上に浮かぶ島（概念の楽園）」に到着し、歩みを進めるほど理解が深まる構成
-- 統一要素（推奨）:
-  - 島の各ゾーンを“概念の比喩（物理メタファ）”として設計する（文字で説明しない）
-  - 道/階段/橋など「前進の導線」が常に画面にある（scene間の連続性を作る）
-  - POV の連続性は構図で固定する（地平線の安定、path/leading lines をセンター、一定のカメラ高さ）
-
-`world_walk`:
-
-- 既存 run の `story.md` / `assets/` を参照し、「世界観を散歩してみた」形式にする
-- 視点は観察者POV。主人公本人の主観視点にせず、少し遠目の中景〜遠景で見る
-- 序盤は物語が進まない asset 内散歩、中盤以降は参照キャラが遠景に現れて物語が別導線で始まる構成
-- 派手な演出、急接近、観察者が物語へ介入する構図は禁止
-
-## 期待される出力（概要）
-
-`output/<topic>_<timestamp>/` に以下が生成される:
-
-- `state.txt`（追記型）
-- `logs/grounding/<stage>.json`
-- `research.md`
-- `story.md`
-- `visual_value.md`
-- `script.md`
-- `video_manifest.md`
-- `assets/**`
-- `video.mp4`（完成動画。1280x720 / 24fps）
-- 成果物（`research.md` / `story.md` / `visual_value.md` / `script.md` / `video_manifest.md` / `scene_conte.md` 等）の本文は **日本語**で記述する（ユーザーが直接修正する前提）
-
-## 実行フロー（内部の意図）
+## Arguments
 
 ```text
-topic
-  → Deep Research（deep-researcher）
-  → Story（director）
-  → Visual Value（visual-value-ideator）
-  → Script + Manifest（immersive-scriptwriter）
-  → Generate assets（API）
-  → Render final video（ffmpeg）
+--topic <topic>                         required
+--source-run output/<run>               required for world_walk
+--stage research|story|visual_value|script|asset|scene_implementation|narration|video_generation|render|video
+--experience cinematic_story|cloud_island_walk|world_walk|ride_action_boat
+--video-tool kling|kling-omni|seedance|veo
+--dry-run
 ```
 
-各 stage 開始前に `python scripts/resolve-stage-grounding.py --stage research|story|script|image_prompt|video_generation --run-dir output/<topic>_<timestamp> --flow immersive` を実行し、その直後に `python scripts/audit-stage-grounding.py --stage <stage> --run-dir output/<topic>_<timestamp>` を実行する。`stage.<name>.grounding.status=ready` と `stage.<name>.audit.status=passed` を確認してから進める。
+Coarse stage targets resolve to active slots:
 
-## 方針メモ（創造と選択 / 混成承認）
-
-- Research は多様性（登場人物/世界観/解釈）を厚めに集め、Story でスコアが高い案を **選択**する
-- Story の後に `visual_value.md` を作り、動画生成AIで最も価値が出る中盤パートを抽出してから Script へ渡す
-- 価値パートは原則として `20% - 80%` に置き、`4-6` カット、各 `4` 秒、ナレーションなしを基本にする
-- Hero's Journey への当てはめは必須ではない（フレームワークは道具）
-- 複数ソースの矛盾を、同一シーン/設定として **混成（ハイブリッド）**しない（破綻しやすい）
-  - どうしても混成がスコアに効く場合は、確定前にユーザー承認を取る（衝突点・混ぜたい要素・リスクと安全策を提示して Yes/No）
-
-## 引数
-
-$ARGUMENTS:
-- `--topic "<topic>"` (required)
-- `--stage video|script|research|story|visual_value|narration|asset|scene_implementation|video_generation|render|p100|100|p200|200|p300|300|p400|400|p450|450|p500|500|p600|600|p700|700|p800|800|p900|900` (optional, default: `video`)
-  - `video`: 完成動画まで生成する（API + ffmpeg を含む）
-  - `script`: `research.md` / `story.md` / `script.md` / `video_manifest.md` まで作って止める
-  - `p100` / `100` / `research`: `research.md` まで
-  - `p200` / `200` / `story`: `story.md` まで
-  - `p300` / `300` / `visual_value`: `visual_value.md` まで
-  - `p400` / `400`: `script.md` まで
-  - `p450` / `450` / `script`: skeleton `video_manifest.md` まで
-  - `p500` / `500` / `asset`: reusable asset stage まで
-  - `p600` / `600` / `scene_implementation`: production manifest / image request・scene image stage まで
-  - `p700` / `700` / `narration`: 全編narration authoring / audio QA・human handoff まで
-  - `p800` / `800` / `video_generation`: video request / clip generation stage まで
-  - `p900` / `900` / `render` / `video`: final render / QA まで
-- `--experience cinematic_story|cloud_island_walk|world_walk|ride_action_boat` (optional, default: `cloud_island_walk`)
-  - `cinematic_story`: 物語を映画的に見せる（ボート/真鍮バーの固定仕様は使わない）
-  - `cloud_island_walk`: 雲上の島を歩いて理解を深める（哲学/概念の比喩）パターン
-  - `world_walk`: 既存 asset 内を観察者POVで散歩し、物語を遠目に見かけるパターン
-  - `ride_action_boat`: legacy 名（互換用。内部的には `cinematic_story` 扱い）
-- `--source-run output/<topic>_<timestamp>` (`world_walk` の場合 required)
-- `--video-tool kling|kling-omni|seedance|veo` (optional, default: `kling-omni`)
-  - `kling`: `video_manifest.md` の `scenes[].video_generation.tool` を `kling_3_0` にする
-  - `kling-omni`: `video_manifest.md` の `scenes[].video_generation.tool` を `kling_3_0_omni` にする
-  - `seedance`: `video_manifest.md` の `scenes[].video_generation.tool` を `seedance` にする
-  - `veo`: 安全のためこのrepoでは無効化（`kling_3_0_omni` に置換する）
-
-## 実行手順（このコマンドが実行すること）
-
-`--stage` は inclusive stop target として扱う。`300` は `p300`、`900` は `p900` のように正規化し、指定した p番号より後段の stage は開始しない。
-
-1) run dir を作成する（`output/<topic>_<timestamp>/`）
-   - `<timestamp>` は `YYYYMMDD_HHMM` を使う
-2) run dir に `state.txt`（追記型）を作成し、`runtime.stage=init` を追記する
-3) Deep Research（エージェント: `deep-researcher`）
-   - 出力先は run dir の `research.md` とする（`output/research/` だけに出して終わらない）
-   - `--stage p100|100|research` の場合はここで停止する
-4) Story（エージェント: `director`）
-   - 入力: `research.md`
-   - 出力: `story.md`
-   - `--stage p200|200|story` の場合はここで停止する
-5) Visual Value（エージェント: `visual-value-ideator`）
-   - 入力: `research.md` + `story.md`
-   - 出力: `visual_value.md`
-   - `--stage p300|300|visual_value` の場合はここで停止する
-6) Script + Manifest（エージェント: `immersive-scriptwriter`）
-   - 入力: `story.md` + `visual_value.md`（必要なら `research.md` も参照）
-   - 出力: `script.md` と `video_manifest.md`
-   - `--stage p400|400` の場合は `script.md` までで停止する
-   - `--stage p450|450|script` の場合は skeleton `video_manifest.md` までで停止する
-7) `--stage p500|500|asset` 以降の場合は reusable asset stage まで進め、p500 指定なら停止する
-8) `--stage p600|600|scene_implementation` 以降の場合は production manifest / image request・scene image stage まで進め、p600 指定なら停止する
-9) `--stage p700|700|narration` 以降の場合は確定visualをgroundingし、全編audio story→通し原稿→span/cut projection→p720/p730/p740/p750 handoffまで進め、p700 指定なら停止する
-10) `--stage p800|800|video_generation` 以降の場合は video request / clip generation stage まで進め、p800 指定なら停止する
-11) `--stage video|p900|900|render` のときのみ、素材生成→結合を実行して `video.mp4` を完成させる
-   - `scripts/toc-immersive-ride-generate.sh --run-dir output/<topic>_<timestamp>`
-12) `state.txt` に最終状態（`runtime.stage=done` と成果物パス）を追記する
-   - `runtime.render.status=started|success|failed`
-   - `artifact.video=output/<topic>_<timestamp>/video.mp4`
-   - `review.video.status=pending`（人間が最終判定で `approved` を付ける）
-
-人間の承認（例）:
-
-```bash
-python scripts/toc-state.py approve-video --run-dir output/<topic>_<timestamp> --note "OK"
+```text
+p100→p120  p200→p220  p300→p330  p400→p450  p500→p570
+p600→p680  p700→p750  p800→p840  p900→p920
 ```
 
-## 実装ヘルパ（ローカルスクリプト）
+p400 authoring creates scene/cut contracts and skeleton manifest. p500 asset, p600 image, p700
+narration, p800 video, and p900 render follow.
 
-台本/マニフェスト確定後の「生成→結合」一括実行:
+## Execution flow
 
-```bash
-scripts/toc-immersive-ride-generate.sh --run-dir output/<topic>_<timestamp>
+```text
+source context
+  → research.md
+  → story.md
+  → visual_value.md
+  → script.md + video_manifest.md (skeleton)
+  → asset plan/request/output
+  → image request/output
+  → narration/TTS and measured duration
+  → motion request/output
+  → normalized render and ordinary QA
 ```
 
-メモ:
-- 生成のシームレス性を上げるため、`last_frame` 制約 + chaining（前動画終盤フレームを次の first frame に使用）+ ネガティブプロンプトを併用する
-- 音声（ナレーション）はデフォルト必須。意図的にサイレントで進める場合は `scripts/generate-assets-from-manifest.py --skip-audio` を使う（その場合はサイレント動画として書き出す）
-- ただし `visual_value.md` に基づく silent cut は例外で、`audio.narration.tool: "silent"` と `text: ""` を使って部分的に無音へできる
-- 後から中間scene（例: 35）を差し込めるように、`scene_id` は **10刻み**（例: 10,20,30...）を推奨（後段はmanifest順を正とする）
-- コスト/反復のため、画像は `--image-batch-size 10 --image-batch-index 1` のように **10枚ずつ**生成して進められる
+Use `prepare-stage-context.py` for required docs/templates/inputs and read the returned readset in
+`global_docs → stage_docs → templates → inputs` order. Before each provider call validate schema,
+types, IDs, references, request snapshot, hashes, file/decode, duration, streams, and provenance.
 
-## 重要な原則（プロンプト要件）
+## Output
 
-### DO
+```text
+output/<topic>_<timestamp>/
+  state.txt
+  p000_index.md
+  research.md
+  story.md
+  visual_value.md
+  script.md
+  video_manifest.md
+  assets/
+  audio/
+  video.mp4
+  logs/grounding/
+  logs/orchestration/
+  logs/validation/
+```
 
-- 全プロンプトに必ず入れる（invariants）:
-  - `視点（POV/三人称）`（必要なら明示し、1カット内でブレない）
-  - `No on-screen text`（映像だけで伝える）
-- 参照画像を全生成に含める（キャラクター・重要小道具。手元/乗り物アンカーは前提にしない）
-- scene間の連続性（照明・雰囲気・位置関係の自然な遷移）
-- `cloud_island_walk`: 道/橋/階段など「前進の導線」を常に画面内に置く（歩み＝理解の進行）
-- `world_walk`: 観察者POV、少し遠目、物語が進まない asset 内散歩、参照キャラの遠景登場
+## Optional user actions
 
-キャラクター参照（turnaround）:
-- `assets/characters/<id>.png`（または `<id>_front.png`）を1枚用意し、
-  `scripts/toc-immersive-ride-generate.sh`（内部で `--character-reference-views front,side,back --character-reference-strip`）で
-  `*_side.png` / `*_back.png` / `*_refstrip.png` を自動生成して動画側の参照に使う。
+Candidate selection, listening, image/narration editing, and change requests are optional. Store each
+choice with actor, timestamp, selectors, and request revision, then rerun ordinary checks.
+Hybridization of contradictory source variants and publication are separate explicit user actions.
 
-### DON'T
-
-- `animated / animation / cartoon / anime / illustrated / drawing`
-- `Studio Ghibli style`
-- 視点のブレ（同一カット内でカメラ位置/高さが不自然に変わる）
-- `cloud_island_walk` での禁止: `third-person / over-the-shoulder / selfie`（外側カメラへの切替）
-- `world_walk` での禁止: 主人公本人の主観視点、急接近、派手な演出、観察者が物語へ介入する構図
-
-## 参照
-
-- 仕様（正本）: `docs/implementation/immersive-ride-entrypoint.md`
-- 動画生成の契約: `docs/implementation/video-integration.md`
-- 実行全体: `docs/how-to-run.md`

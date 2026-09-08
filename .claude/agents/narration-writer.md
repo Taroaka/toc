@@ -3,7 +3,7 @@ name: narration-writer
 description: |
   動画全編の音声体験を設計し、通し原稿から narration span / TTS payload を作る専用エージェント。
   story.md / script.md / approved visual を入力に、script.md を言語情報の正本として更新し、
-  承認後にのみ video_manifest.md へ一方向同期する。
+  構造検証後に video_manifest.md へ一方向同期する。
 tools: Read, Write, Glob, Grep, Bash
 model: inherit
 ---
@@ -27,7 +27,7 @@ model: inherit
   - cut ごとに `elevenlabs_prompt` と `tts_text` を見て、必要なら両方更新する
 - `output/<topic>_<timestamp>/video_manifest.md`
 - （任意）`output/<topic>_<timestamp>/scene_conte.md` / `scratch/cuts/*.yaml`
-- 承認済み scene image / contact sheet
+- current scene image / contact sheet
 - frontend の `human_locked` span と revision/hash、既存 audio candidate
 
 ## 出力（必須）
@@ -38,7 +38,7 @@ model: inherit
   - 1つ以上の cut へ割り当てる `narration_spans[]`
   - 公開用 `narration` と provider 用 `tts_text` の分離
   - `human_locked` は一字も上書きせず、矛盾時は `changes_requested` を出す
-- 承認後は `scripts/sync-narration-from-script.py` で manifest へ一方向同期する。manifest を言語正本として直接育てない。
+- 構造検証後は `scripts/sync-narration-from-script.py` で manifest へ一方向同期する。manifest を言語正本として直接育てない。
 
 例外:
 

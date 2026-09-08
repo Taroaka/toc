@@ -19,11 +19,10 @@ from pathlib import Path
 from contextlib import suppress
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from typing import Any, Iterable
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import yaml
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -53,7 +52,6 @@ from server.codex_app_server import (
     wait_for_unclaimed_generated_image_after,
 )
 from server.image_gen_app import (
-    _toc_immersive_command,
     _toc_run_command,
     _toc_world_walk_command,
     _validate_created_run,
@@ -61,16 +59,8 @@ from server.image_gen_app import (
     _validate_materialized_p650_run,
     _validate_p650_run,
 )
-from toc.semantic_review import FOUNDATION_SEMANTIC_CRITERIA
 from toc.video_provider_capabilities import resolve_video_provider_capabilities
-from toc.harness import load_structured_document
 from toc.grounding import build_stage_grounding_readset, resolve_stage_grounding
-from toc.semantic_review_loop import semantic_repair_relpaths
-from toc.review_loop import (
-    build_review_input_snapshot,
-    review_input_snapshot_issues,
-    write_review_input_snapshot,
-)
 from toc.runtime_locks import FileLockUnavailable, sync_file_lock
 from toc.run_root_binding import bind_run_root, RunRootBindingError
 from toc.image_request_snapshot import (
@@ -98,14 +88,6 @@ def load_headless_create_module():
     return module
 
 
-def load_frontend_runner_module():
-    path = Path(__file__).resolve().parents[1] / "scripts" / "toc-immersive-frontend-run.py"
-    spec = importlib.util.spec_from_file_location("toc_immersive_frontend_run_api_integration", path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def write_test_png(path: Path, color: tuple[int, int, int] = (120, 80, 40), size: tuple[int, int] = (320, 180)) -> None:
@@ -516,11 +498,6 @@ def mark_manifest_narration_ready(run_dir: Path, *, silent: set[str] | None = No
                         "kind": "intentional_silence",
                         "reason": "test confirmed silence",
                     },
-                    "review": {
-                        "status": "approved",
-                        "human_review_ok": True,
-                        "approved_at": "test",
-                    },
                 }
             )
         else:
@@ -535,11 +512,6 @@ def mark_manifest_narration_ready(run_dir: Path, *, silent: set[str] | None = No
                     "text": f"{selector} narration",
                     "tts_text": f"{selector} narration.",
                     "output": output,
-                    "review": {
-                        "status": "approved",
-                        "human_review_ok": True,
-                        "approved_at": "test",
-                    },
                 }
             )
         audio["narration"] = narration
@@ -606,10 +578,7 @@ class ImageGenParserTests(unittest.TestCase):
             (run_dir / "state.txt").write_text(
                 "\n".join(
                     [
-                        "review.policy.image=optional",
-                        "review.policy.narration=optional",
-                        "eval.p400_readiness.status=approved",
-                        "review.duration_fit.status=passed",
+                        "runtime.stage=video_generation",
                         "",
                     ]
                 ),
@@ -636,7 +605,7 @@ class ImageGenParserTests(unittest.TestCase):
     def test_toc_run_command_quotes_topic_and_run_dir(self) -> None:
         command = _toc_run_command(topic='桃太郎 "鬼"', run_id="桃太郎_20260509_1200")
 
-        self.assertEqual(command, '/toc-run "桃太郎 \\"鬼\\"" --dry-run --review-policy drafts --run-dir "output/桃太郎_20260509_1200"')
+        self.assertEqual(command, '/toc-run "桃太郎 \\"鬼\\"" --dry-run --run-dir "output/桃太郎_20260509_1200"')
 
     def test_toc_run_command_keeps_source_as_single_quoted_argument(self) -> None:
         topic = '桃太郎\n/other-command --run-dir output/evil \\\\ "quoted"'
@@ -644,7 +613,6 @@ class ImageGenParserTests(unittest.TestCase):
         encoded_topic = command.removeprefix("/toc-run ").split(" --dry-run ", 1)[0]
 
         self.assertEqual(json.loads(encoded_topic), topic)
-        self.assertIn("--review-policy drafts", command)
         self.assertIn("--run-dir \"output/桃太郎_20260509_1200\"", command)
 
 
@@ -766,16 +734,6 @@ class ImageGenParserTests(unittest.TestCase):
             ):
                 image_gen_app._validate_generated_outputs(run_dir, "asset")
 
-    def test_validate_p650_run_rejects_draft_freeze_state(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            run_dir = write_valid_p650_artifacts(root, "桃太郎_20260509_1200")
-            with (run_dir / "state.txt").open("a", encoding="utf-8") as state_file:
-                state_file.write("generation.image_prompt.request_freeze.status=draft\n")
-
-            with patch("server.image_gen_app.ROOT", root):
-                with self.assertRaisesRegex(RuntimeError, "request freeze is not frozen"):
-                    _validate_p650_run("桃太郎_20260509_1200")
 
     def test_validate_materialized_p650_run_allows_no_assets_without_review_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -825,15 +783,21 @@ class ImageGenParserTests(unittest.TestCase):
                     root = Path(tmp)
                     run_id = "桃太郎_20260509_1200"
                     run_dir = write_valid_p650_artifacts(root, run_id)
+                    legacy_review_state = {
+                        "runtime.review_mode": mode,
+                        "runtime.review_policy": mode,
+                    }
+                    if record != "absent":
+                        legacy_review_state.update(
+                            {
+                                "review.semantic.story.status": record,
+                                "review.semantic.story.score": "0",
+                                "gate.story_review": "required",
+                            }
+                        )
                     image_gen_app.append_state_snapshot(
                         run_dir / "state.txt",
-                        {
-                            "runtime.review_mode": mode,
-                            "runtime.review_policy": mode,
-                            "review.semantic.story.status": record if record != "absent" else "",
-                            "review.semantic.story.score": "0",
-                            "gate.story_review": "required",
-                        },
+                        legacy_review_state,
                     )
                     create_input = run_dir / "logs" / "orchestration" / "create_input.json"
                     create_input.parent.mkdir(parents=True, exist_ok=True)
@@ -880,7 +844,10 @@ class ImageGenParserTests(unittest.TestCase):
                 )
 
                 with patch("server.image_gen_app.ROOT", root):
-                    with self.assertRaisesRegex(RuntimeError, "request Markdown/snapshot mismatch"):
+                    with self.assertRaisesRegex(
+                        ImageRequestSnapshotError,
+                        "source_artifact_sha256 mismatch",
+                    ):
                         _validate_materialized_p650_run(run_id)
 
 
@@ -968,10 +935,13 @@ class ImageGenParserTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = write_valid_p650_artifacts(root, "桃太郎_20260509_1200")
-            with (run_dir / "state.txt").open("a", encoding="utf-8") as state_file:
-                state_file.write(
-                    "runtime.scaffold.content_status=placeholder\nslot.p120.status=pending\n"
-                )
+            image_gen_app.append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "runtime.scaffold.content_status": "placeholder",
+                    "slot.p120.status": "pending",
+                },
+            )
 
             with patch("server.image_gen_app.ROOT", root):
                 with self.assertRaisesRegex(RuntimeError, "placeholder|pending"):
@@ -981,16 +951,20 @@ class ImageGenParserTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = write_valid_p650_artifacts(root, "桃太郎_20260509_1200")
-            state = (run_dir / "state.txt").read_text(encoding="utf-8")
-            (run_dir / "state.txt").write_text(
-                "runtime.scaffold.content_status=placeholder\n"
-                "artifact.research.status=scaffold\n"
-                "---\n"
-                + state,
-                encoding="utf-8",
+            image_gen_app.append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "runtime.scaffold.content_status": "placeholder",
+                    "artifact.research.status": "scaffold",
+                },
             )
-            with (run_dir / "state.txt").open("a", encoding="utf-8") as state_file:
-                state_file.write("artifact.research.status=authored\n")
+            image_gen_app.append_state_snapshot(
+                run_dir / "state.txt",
+                {
+                    "runtime.scaffold.content_status": "authored",
+                    "artifact.research.status": "authored",
+                },
+            )
 
             with patch("server.image_gen_app.ROOT", root):
                 _validate_p650_run("桃太郎_20260509_1200")
@@ -1016,27 +990,17 @@ class ImageGenParserTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "missing fixed slot states .*p410"):
                     _validate_p650_run("桃太郎_20260509_1200")
 
-    def test_validate_p650_run_rejects_pending_optional_fixed_slot(self) -> None:
+    def test_validate_p650_run_rejects_pending_fixed_slot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = write_valid_p650_artifacts(root, "桃太郎_20260509_1200")
             state = (run_dir / "state.txt").read_text(encoding="utf-8")
-            (run_dir / "state.txt").write_text(state.replace("slot.p430.status=skipped", "slot.p430.status=pending"), encoding="utf-8")
+            (run_dir / "state.txt").write_text(state.replace("slot.p550.status=done", "slot.p550.status=pending"), encoding="utf-8")
 
             with patch("server.image_gen_app.ROOT", root):
-                with self.assertRaisesRegex(RuntimeError, "incomplete fixed slot states .*p430=pending"):
+                with self.assertRaisesRegex(RuntimeError, "incomplete fixed slot states .*p550=pending"):
                     _validate_p650_run("桃太郎_20260509_1200")
 
-    def test_validate_p650_run_rejects_awaiting_approval_for_generation_ready_slot(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            run_dir = write_valid_p650_artifacts(root, "桃太郎_20260509_1200")
-            state = (run_dir / "state.txt").read_text(encoding="utf-8")
-            (run_dir / "state.txt").write_text(state.replace("slot.p650.status=done", "slot.p650.status=awaiting_approval"), encoding="utf-8")
-
-            with patch("server.image_gen_app.ROOT", root):
-                with self.assertRaisesRegex(RuntimeError, "invalid awaiting_approval fixed slots .*p650"):
-                    _validate_p650_run("桃太郎_20260509_1200")
 
 
 
@@ -1088,10 +1052,6 @@ class ImageGenParserTests(unittest.TestCase):
             manifest_path = run_dir / "video_manifest.md"
             manifest_text = manifest_path.read_text(encoding="utf-8")
             manifest_data = yaml.safe_load(image_gen_app._extract_manifest_yaml_text(manifest_text)) or {}
-            review_only_scene_action = "REVIEW-ONLY-STORYBOARD-SCENE-OVERVIEW"
-            manifest_data["scenes"][0]["scene_intent"] = {
-                "review_only_visualizable_action": review_only_scene_action,
-            }
             for cut_index, cut in enumerate(
                 manifest_data["scenes"][0]["cuts"],
                 start=1,
@@ -1169,27 +1129,6 @@ class ImageGenParserTests(unittest.TestCase):
             render_units[0]["video_generation"]["motion_prompt"],
             render_units[0]["video_generation"]["api_prompt_payload"]["prompt"],
         )
-        for unit in render_units:
-            payload = unit["video_generation"]["api_prompt_payload"]
-            self.assertTrue(
-                any(
-                    source.get("value") == review_only_scene_action
-                    for source in payload["projection_review_contract"][
-                        "review_only_sources"
-                    ]
-                ),
-                payload["projection_review_contract"]["review_only_sources"],
-            )
-            self.assertNotIn(review_only_scene_action, payload["prompt"])
-            self.assertNotIn(review_only_scene_action, payload["negative_prompt"])
-            self.assertNotIn(
-                review_only_scene_action,
-                json.dumps(
-                    payload["video_prompt_ir"],
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ),
-            )
         self.assertIn("## scene10_unit1", request_text)
         self.assertIn("## scene10_unit2", request_text)
         self.assertIn("- duration_seconds: `12`", request_text)
@@ -1210,19 +1149,8 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertIn("assets/scenes/scene10/scene10_unit1.mp4", clips_text)
         self.assertIn("assets/scenes/scene10/scene10_unit2.mp4", clips_text)
         self.assertEqual(state["runtime.create_mode"], "scene_storyboard")
-        self.assertEqual(state["review.frontend.storyboard.status"], "ready")
-        self.assertEqual(state["stage.video_generation.status"], "in_progress")
-        self.assertEqual(state["slot.p830.status"], "in_progress")
-        self.assertEqual(state["review.video_prompt.status"], "pending")
-        self.assertEqual(state["gate.video_prompt_review"], "required")
-        self.assertEqual(
-            state["review.video_prompt.item.scene10_unit1.status"],
-            "pending",
-        )
-        self.assertEqual(
-            state["review.video_prompt.item.scene10_unit2.status"],
-            "pending",
-        )
+        self.assertEqual(state["stage.video_generation.status"], "ready")
+        self.assertEqual(state["slot.p830.status"], "done")
 
     def test_storyboard_materializer_rejects_missing_or_invalid_canonical_cut_fields(
         self,
@@ -1305,12 +1233,6 @@ class ImageGenParserTests(unittest.TestCase):
                 original_text,
                 manifest,
             )
-            projection_before = (
-                image_gen_app.video_manifest_review_projection_sha256(
-                    manifest_path
-                )
-            )
-
             with patch("server.image_gen_app.ROOT", root):
                 image_gen_app._materialize_scene_storyboard_video_requests(
                     run_id
@@ -1326,12 +1248,6 @@ class ImageGenParserTests(unittest.TestCase):
             self.assertTrue(
                 materialized["scenes"][0]["render_units"]
             )
-            self.assertEqual(
-                image_gen_app.video_manifest_review_projection_sha256(
-                    manifest_path
-                ),
-                projection_before,
-            )
 
     def test_scene_storyboard_p680_finalizer_uses_strict_transaction_order(
         self,
@@ -1339,7 +1255,12 @@ class ImageGenParserTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_id = "storyboard_finalizer"
-            (root / "output" / run_id).mkdir(parents=True)
+            run_dir = root / "output" / run_id
+            run_dir.mkdir(parents=True)
+            (run_dir / "video_manifest.md").write_text(
+                "```yaml\nscenes: []\n```\n",
+                encoding="utf-8",
+            )
             events: list[str] = []
 
             with (
@@ -1354,12 +1275,6 @@ class ImageGenParserTests(unittest.TestCase):
                     "server.image_gen_app._scene_storyboard_materialization_is_current",
                     side_effect=lambda *_args, **_kwargs: (
                         events.append("currentness") or False
-                    ),
-                ),
-                patch(
-                    "server.image_gen_app.video_manifest_review_projection_sha256",
-                    side_effect=lambda *_args, **_kwargs: (
-                        events.append("projection") or "stable"
                     ),
                 ),
                 patch(
@@ -1383,9 +1298,7 @@ class ImageGenParserTests(unittest.TestCase):
                 [
                     "generic",
                     "currentness",
-                    "projection",
                     "materialize",
-                    "projection",
                     "specialized",
                     "generic",
                 ],
@@ -1499,9 +1412,7 @@ class ImageGenParserTests(unittest.TestCase):
                 manifest["scenes"][0]["cuts"][0].setdefault(
                     "cut_contract",
                     {},
-                )["reviewed_motion_fact"] = (
-                    "changed after storyboard materialization"
-                )
+                )["motion_fact"] = "changed after storyboard materialization"
                 image_gen_app._write_manifest_data(
                     manifest_path,
                     original_text,
@@ -2528,7 +2439,6 @@ class ImageGenParserTests(unittest.TestCase):
                             "/api/image-gen/video-prompts/create",
                             json={
                                 "run_id": "sample_run",
-                                "approve_for_generation": True,
                                 "replace_all": False,
                                 "items": [
                                     {
@@ -2588,10 +2498,6 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertIn(
             "参照画像1は開始状態の基準",
             unit_video["api_prompt_payload"]["prompt"],
-        )
-        self.assertEqual(
-            state["review.video_prompt.item.scene10_unit1.status"],
-            "approved",
         )
 
     def test_video_items_exposes_render_units_instead_of_ignored_source_cuts(self) -> None:
@@ -2919,14 +2825,6 @@ class ImageGenParserTests(unittest.TestCase):
             cut = manifest["scenes"][0]["cuts"][0]
             cut["render"] = {"video_duration_seconds": 8}
             cut["video_generation"] = {"duration_seconds": 8}
-            manifest["narration_workflow"] = {
-                "final_audio_review": {
-                    "status": "approved",
-                    "approved_timeline_hash": image_gen_app._manifest_narration_timeline_hash(
-                        manifest
-                    ),
-                }
-            }
             image_gen_app._write_manifest_data(manifest_path, original, manifest)
 
             with self.assertRaisesRegex(ValueError, "canonical render timeline duration 8s"):
@@ -2952,7 +2850,7 @@ class ImageGenParserTests(unittest.TestCase):
             )
             self.assertEqual(unchanged[0].video_duration_seconds, 8)
 
-    def test_unapproved_video_materialization_synchronizes_render_duration(self) -> None:
+    def test_video_materialization_synchronizes_render_duration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = write_valid_p650_artifacts(root, "sample_run")
@@ -3009,7 +2907,6 @@ class ImageGenParserTests(unittest.TestCase):
                                 "title": "桃太郎",
                                 "source": "桃太郎",
                                 "target_duration_seconds": 1200,
-                                "review_mode": "preapproved",
                             },
                         )
 
@@ -3018,13 +2915,11 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["createMode"], "scene_storyboard")
         self.assertEqual(payload["targetDurationSeconds"], 1200)
-        self.assertEqual(payload["reviewMode"], "preapproved")
         self.assertTrue(payload["runId"].startswith("桃太郎_storyboard_"))
         self.assertEqual(payload["path"], f"output/{payload['runId']}")
         self.assertEqual(scheduled[0]["run_id"], payload["runId"])
         self.assertEqual(scheduled[0]["create_mode"], "scene_storyboard")
         self.assertEqual(scheduled[0]["target_duration_seconds"], 1200)
-        self.assertEqual(scheduled[0]["review_mode"], "preapproved")
         self.assertTrue(scheduled[0]["generate_images"])
         create_start = next(call for call in debug_log.call_args_list if call.kwargs.get("operation") == "create_job_start")
         self.assertEqual(create_start.kwargs["request"]["targetDurationSeconds"], 1200)
@@ -3402,7 +3297,7 @@ class ImageGenParserTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
             (run_dir / "state.txt").write_text(
-                "topic=ガリバー旅行記\nstatus=SCRIPT\nruntime.stage=toc_run_scaffolded\ngate.video_review=required\n",
+                "topic=ガリバー旅行記\nstatus=SCRIPT\nruntime.stage=toc_run_scaffolded\n",
                 encoding="utf-8",
             )
             (run_dir / "p000_index.md").write_text(
@@ -3451,8 +3346,6 @@ class ImageGenParserTests(unittest.TestCase):
         self.assertEqual(progress["doneCount"], 5)
         self.assertEqual(progress["totalCount"], 6)
         self.assertEqual(progress["percent"], 69)
-        self.assertEqual(progress["pendingGates"], ["video_review"])
-        self.assertEqual(progress["reviewMode"], "standard")
         self.assertEqual(progress["slots"][1]["code"], "p550")
         self.assertEqual(progress["slots"][1]["state"], "pending")
         self.assertIn("asset_generation_requests.md", progress["slots"][1]["plannedArtifacts"])
@@ -3605,9 +3498,8 @@ cinematic character portrait
                     [
                         "topic=シンデレラ",
                         "status=FAILED",
-                        "runtime.stage=semantic_review_failed_before_media_generation",
+                        "runtime.stage=scene_authoring_failed_before_media_generation",
                         "slot.p410.status=failed",
-                        "slot.p640.status=awaiting_approval",
                         "slot.p650.status=pending",
                         "slot.p660.status=pending",
                     ]
@@ -3627,7 +3519,7 @@ cinematic character portrait
 | `p000` | Run Entrance | `always_available` |
 | `p100` | Research | `done` |
 | `p400` | Script / Narration Text / Human Changes | `done` |
-| `p600` | Scene Implementation / Image Stage | `awaiting_approval` |
+| `p600` | Scene Implementation / Image Stage | `pending` |
 | `p800` | Video Stage | `not_started` |
 
 ## Fixed Slot Contract
@@ -3635,17 +3527,12 @@ cinematic character portrait
 | Slot | Stage | Default Requirement | Purpose | Planned Artifacts |
 | --- | --- | --- | --- | --- |
 | `p410` | Script / Narration Text / Human Changes | `required` | Scene Completion | - |
-| `p640` | Scene Implementation / Image Stage | `optional` | Judgment Review | - |
 | `p650` | Scene Implementation / Image Stage | `optional` | Generation Ready | `image_generation_requests.md` |
 | `p660` | Scene Implementation / Image Stage | `optional` | Image Generation | - |
 
 #### p410 Scene Completion
 
 - status: `done`
-
-#### p640 Judgment Review
-
-- status: `awaiting_approval`
 
 #### p650 Generation Ready
 
@@ -3673,10 +3560,9 @@ cinematic character portrait
                     [
                         "topic=シンデレラ",
                         "status=SCRIPT",
-                        "runtime.stage=image_prompt_semantic_review",
+                        "runtime.stage=scene_images_generating",
                         "slot.p410.status=done",
-                        "slot.p640.status=in_progress",
-                        "slot.p650.status=pending",
+                        "slot.p650.status=in_progress",
                     ]
                 )
                 + "\n",
@@ -3694,7 +3580,7 @@ cinematic character portrait
 | `p000` | Run Entrance | `always_available` |
 | `p100` | Research | `done` |
 | `p400` | Script / Narration Text / Human Changes | `done` |
-| `p600` | Scene Implementation / Image Stage | `done` |
+| `p600` | Scene Implementation / Image Stage | `in_progress` |
 | `p800` | Video Stage | `not_started` |
 
 ## Fixed Slot Contract
@@ -3702,16 +3588,11 @@ cinematic character portrait
 | Slot | Stage | Default Requirement | Purpose | Planned Artifacts |
 | --- | --- | --- | --- | --- |
 | `p410` | Script / Narration Text / Human Changes | `required` | Scene Completion | - |
-| `p640` | Scene Implementation / Image Stage | `optional` | Judgment Review | - |
 | `p650` | Scene Implementation / Image Stage | `optional` | Generation Ready | `image_generation_requests.md` |
 
 #### p410 Scene Completion
 
 - status: `done`
-
-#### p640 Judgment Review
-
-- status: `awaiting_approval`
 
 #### p650 Generation Ready
 
@@ -3722,9 +3603,9 @@ cinematic character portrait
 
             progress = image_gen.read_run_progress(run_dir)
 
-        self.assertEqual(progress["currentStage"]["code"], "p640")
+        self.assertEqual(progress["currentStage"]["code"], "p650")
         self.assertEqual(progress["currentStage"]["state"], "in_progress")
-        self.assertEqual(next(slot for slot in progress["slots"] if slot["code"] == "p640")["state"], "in_progress")
+        self.assertEqual(next(slot for slot in progress["slots"] if slot["code"] == "p650")["state"], "in_progress")
         self.assertEqual(next(stage for stage in progress["stages"] if stage["code"] == "p600")["state"], "in_progress")
 
     def test_read_run_progress_stops_at_pending_frontier_before_stale_later_failure(
@@ -4189,7 +4070,15 @@ cinematic character portrait
     def test_codex_app_server_rejects_silent_fallback_home_when_default_home_unwritable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with (
-                patch.dict(os.environ, {"TMPDIR": tmp}, clear=False),
+                patch.dict(
+                    os.environ,
+                    {
+                        "TMPDIR": tmp,
+                        "CODEX_HOME": "",
+                        "TOC_CODEX_HOME_FALLBACK_ALLOWED": "",
+                    },
+                    clear=False,
+                ),
                 patch("server.codex_app_server.tempfile.gettempdir", return_value=tmp),
                 patch("server.codex_app_server._is_writable_directory", return_value=False),
             ):
@@ -4348,12 +4237,17 @@ cinematic character portrait
                 await feeder
             return time.monotonic() - started
 
-        elapsed = asyncio.run(run_case())
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"CODEX_HOME": tmp}, clear=False):
+                elapsed = asyncio.run(run_case())
         self.assertLess(elapsed, 2.5)
 
     def test_codex_app_server_direct_instantiation_guard_for_runtime_callers(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        checked_files = [root / "server" / "image_gen_app.py", root / "scripts" / "run-semantic-review.py", root / "scripts" / "generate-assets-from-manifest.py"]
+        checked_files = [
+            root / "server" / "image_gen_app.py",
+            root / "scripts" / "generate-assets-from-manifest.py",
+        ]
         offenders = []
         for path in checked_files:
             if "CodexAppServerClient(" in path.read_text(encoding="utf-8"):
@@ -4500,215 +4394,9 @@ cinematic character portrait
         self.assertEqual(job["status"], "completed")
         self.assertEqual(posted_payloads[0]["target_duration_seconds"], 1200)
 
-    def test_headless_create_route_propagates_preapproved_review_mode(self) -> None:
-        module = load_headless_create_module()
-        posted_payloads: list[dict[str, Any]] = []
 
-        class FakeResponse:
-            def __init__(self, payload: dict[str, Any]):
-                self.payload = payload
 
-            def raise_for_status(self) -> None:
-                return None
 
-            def json(self) -> dict[str, Any]:
-                return self.payload
-
-        class FakeClient:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_args):
-                return None
-
-            async def post(self, _path: str, *, json: dict[str, Any]):
-                posted_payloads.append(json)
-                return FakeResponse(
-                    {
-                        "jobId": "job-review-mode",
-                        "runId": "headless-review-mode-test",
-                        "path": "output/headless-review-mode-test",
-                        "status": "running",
-                    }
-                )
-
-            async def get(self, _path: str):
-                return FakeResponse(
-                    {
-                        "jobId": "job-review-mode",
-                        "runId": "headless-review-mode-test",
-                        "path": "output/headless-review-mode-test",
-                        "status": "completed",
-                    }
-                )
-
-        with patch.object(module.httpx, "AsyncClient", return_value=FakeClient()):
-            job = asyncio.run(
-                module.create_run_via_frontend_route(
-                    title="桃太郎",
-                    source="鬼退治",
-                    generate_images=False,
-                    review_mode="preapproved",
-                    timeout_seconds=1,
-                    poll_interval=0,
-                    base_url="http://toc.test",
-                )
-            )
-
-        self.assertEqual(job["status"], "completed")
-        self.assertEqual(posted_payloads[0]["review_mode"], "preapproved")
-
-    def test_headless_create_route_defaults_to_standard_review_mode(self) -> None:
-        module = load_headless_create_module()
-        posted_payloads: list[dict[str, Any]] = []
-
-        class FakeResponse:
-            def __init__(self, payload: dict[str, Any]):
-                self.payload = payload
-
-            def raise_for_status(self) -> None:
-                return None
-
-            def json(self) -> dict[str, Any]:
-                return self.payload
-
-        class FakeClient:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_args):
-                return None
-
-            async def post(self, _path: str, *, json: dict[str, Any]):
-                posted_payloads.append(json)
-                return FakeResponse(
-                    {
-                        "jobId": "job-review-default",
-                        "runId": "headless-review-default-test",
-                        "path": "output/headless-review-default-test",
-                        "status": "running",
-                    }
-                )
-
-            async def get(self, _path: str):
-                return FakeResponse(
-                    {
-                        "jobId": "job-review-default",
-                        "runId": "headless-review-default-test",
-                        "path": "output/headless-review-default-test",
-                        "status": "completed",
-                    }
-                )
-
-        with patch.object(module.httpx, "AsyncClient", return_value=FakeClient()):
-            asyncio.run(
-                module.create_run_via_frontend_route(
-                    title="桃太郎",
-                    source="鬼退治",
-                    generate_images=False,
-                    timeout_seconds=1,
-                    poll_interval=0,
-                    base_url="http://toc.test",
-                )
-            )
-
-        self.assertEqual(posted_payloads[0]["review_mode"], "standard")
-
-    def test_headless_create_route_rejects_post_review_mode_substitution(self) -> None:
-        module = load_headless_create_module()
-
-        class FakeResponse:
-            def raise_for_status(self) -> None:
-                return None
-
-            def json(self) -> dict[str, Any]:
-                return {
-                    "jobId": "job-review-mode-post-mismatch",
-                    "runId": "headless-review-mode-post-mismatch",
-                    "path": "output/headless-review-mode-post-mismatch",
-                    "status": "running",
-                    "reviewMode": "standard",
-                }
-
-        class FakeClient:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_args):
-                return None
-
-            async def post(self, _path: str, *, json: dict[str, Any]):
-                return FakeResponse()
-
-        with patch.object(module.httpx, "AsyncClient", return_value=FakeClient()):
-            with self.assertRaisesRegex(RuntimeError, "reviewMode"):
-                asyncio.run(
-                    module.create_run_via_frontend_route(
-                        title="桃太郎",
-                        source="鬼退治",
-                        generate_images=False,
-                        review_mode="preapproved",
-                        timeout_seconds=1,
-                        poll_interval=0,
-                        base_url="http://toc.test",
-                    )
-                )
-
-    def test_headless_create_route_rejects_polled_review_mode_substitution(self) -> None:
-        module = load_headless_create_module()
-
-        class FakeResponse:
-            def __init__(self, payload: dict[str, Any]):
-                self.payload = payload
-
-            def raise_for_status(self) -> None:
-                return None
-
-            def json(self) -> dict[str, Any]:
-                return self.payload
-
-        class FakeClient:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_args):
-                return None
-
-            async def post(self, _path: str, *, json: dict[str, Any]):
-                return FakeResponse(
-                    {
-                        "jobId": "job-review-mode-poll-mismatch",
-                        "runId": "headless-review-mode-poll-mismatch",
-                        "path": "output/headless-review-mode-poll-mismatch",
-                        "status": "running",
-                        "reviewMode": "preapproved",
-                    }
-                )
-
-            async def get(self, _path: str):
-                return FakeResponse(
-                    {
-                        "jobId": "job-review-mode-poll-mismatch",
-                        "runId": "headless-review-mode-poll-mismatch",
-                        "path": "output/headless-review-mode-poll-mismatch",
-                        "status": "completed",
-                        "reviewMode": "standard",
-                    }
-                )
-
-        with patch.object(module.httpx, "AsyncClient", return_value=FakeClient()):
-            with self.assertRaisesRegex(RuntimeError, "reviewMode"):
-                asyncio.run(
-                    module.create_run_via_frontend_route(
-                        title="桃太郎",
-                        source="鬼退治",
-                        generate_images=False,
-                        review_mode="preapproved",
-                        timeout_seconds=1,
-                        poll_interval=0,
-                        base_url="http://toc.test",
-                    )
-                )
 
     def test_headless_create_route_uses_storyboard_endpoint_and_contract(self) -> None:
         module = load_headless_create_module()
@@ -4778,7 +4466,6 @@ cinematic character portrait
                         "title": "桃太郎",
                         "source": "鬼退治",
                         "target_duration_seconds": 300,
-                        "review_mode": "standard",
                     },
                 )
             ],
@@ -4803,20 +4490,6 @@ cinematic character portrait
                 )
             )
 
-    def test_headless_create_route_rejects_unknown_review_mode(self) -> None:
-        module = load_headless_create_module()
-        with self.assertRaisesRegex(ValueError, "review_mode must be standard or preapproved"):
-            asyncio.run(
-                module.create_run_via_frontend_route(
-                    title="桃太郎",
-                    source="鬼退治",
-                    generate_images=False,
-                    review_mode="skip_checks",
-                    timeout_seconds=1,
-                    poll_interval=0,
-                    base_url="http://toc.test",
-                )
-            )
 
     def test_headless_create_route_rejects_status_identity_substitution(self) -> None:
         module = load_headless_create_module()
@@ -5040,40 +4713,6 @@ cinematic character portrait
         self.assertEqual(exit_code, 0)
         self.assertEqual(calls[0]["target_duration_seconds"], 900)
 
-    def test_headless_cli_passes_review_mode_to_frontend_route(self) -> None:
-        module = load_headless_create_module()
-        calls: list[dict[str, Any]] = []
-
-        async def fake_create_run(**kwargs: Any) -> dict[str, Any]:
-            calls.append(kwargs)
-            return {"jobId": "job-1", "runId": "run-1", "path": "output/run-1", "status": "completed"}
-
-        with (
-            patch.object(module, "create_run_via_frontend_route", fake_create_run),
-            patch.object(
-                module,
-                "_resolve_completed_run_dir",
-                return_value=Path("output/run-1"),
-            ),
-            patch.object(module, "_write_report", return_value=Path("report.md")),
-            patch.object(
-                sys,
-                "argv",
-                [
-                    "toc-create-run-headless.py",
-                    "--title",
-                    "桃太郎",
-                    "--review-mode",
-                    "preapproved",
-                    "--assert-profile",
-                    "none",
-                ],
-            ),
-        ):
-            exit_code = module.main()
-
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(calls[0]["review_mode"], "preapproved")
 
     def test_headless_cli_passes_storyboard_mode_to_frontend_route(self) -> None:
         module = load_headless_create_module()
@@ -6006,7 +5645,6 @@ legacy prompt must not be used for v1
 - execution_lane: `bootstrap_builtin`
 - reference_count: `0`
 - references: `[]`
-- review_status: `approved`
 - output: `assets/characters/cinderella_common.png`
 
 ```text
@@ -6022,7 +5660,6 @@ legacy prompt must not be used for v1
 - reference_count: `1`
 - references:
   - `assets/characters/cinderella_common.png`
-- review_status: `approved`
 - output: `assets/characters/cinderella_ball_gown.png`
 
 ```text
@@ -6389,7 +6026,6 @@ old provider prompt
             object_ids=[],
             location_ids=["room-1"],
             references=["assets/characters/hero-1.png"],
-            review_metadata={"shot_design_contract": {"status": "approved"}},
         )
         manifest = {
             "scenes": [
@@ -6433,14 +6069,6 @@ old provider prompt
             "主人公が扉へ手を伸ばす",
         )
         self.assertEqual(image_generation["api_prompt_payload"], compiled["scene10_cut1"])
-        self.assertEqual(
-            image_generation["api_prompt_payload"]["shot_design_contract"]["shot_role"],
-            "character_action",
-        )
-        self.assertNotIn(
-            "status",
-            image_generation["api_prompt_payload"]["shot_design_contract"],
-        )
         self.assertEqual(
             image_generation["debug_prompt_source"]["first_frame_visual_plan"],
             image_generation["first_frame_visual_plan"],
@@ -6849,6 +6477,14 @@ scene one
 
 
 class ImageGenApiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        image_gen_app._create_jobs.clear()
+        image_gen_app._run_write_locks.clear()
+
+    def tearDown(self) -> None:
+        image_gen_app._create_jobs.clear()
+        image_gen_app._run_write_locks.clear()
+
     def test_current_process_stops_at_failed_slot_and_ignores_stale_later_terminals(
         self,
     ) -> None:
@@ -6860,72 +6496,32 @@ class ImageGenApiTests(unittest.TestCase):
             statuses = {
                 "p110": "done",
                 "p120": "done",
-                "p130": "done",
                 "p210": "done",
                 "p220": "done",
-                "p230": "done",
                 "p310": "done",
-                "p320": "done",
                 "p330": "done",
                 "p410": "failed",
-                # These terminal values are stale materialization state and must
-                # not make the failed run look as though it reached p640.
                 "p420": "done",
-                "p430": "awaiting_approval",
                 "p440": "done",
                 "p450": "done",
                 "p510": "done",
                 "p520": "done",
                 "p530": "done",
-                "p540": "awaiting_approval",
                 "p550": "done",
                 "p560": "done",
-                "p570": "awaiting_approval",
+                "p570": "done",
                 "p610": "done",
                 "p620": "done",
-                "p630": "awaiting_approval",
-                "p640": "awaiting_approval",
+                "p650": "done",
+                "p660": "done",
+                "p670": "done",
+                "p680": "done",
             }
             (run_dir / "state.txt").write_text(
                 "\n".join(
                     [
                         *(f"slot.{slot}.status={status}" for slot, status in statuses.items()),
                         "runtime.failure.stage=scene_set",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-
-            with patch("server.image_gen_app.ROOT", root):
-                current = image_gen_app._current_process_number_for_run(run_id)
-
-        self.assertEqual(current, 410)
-
-    def test_current_process_uses_explicit_runtime_failure_stage_mapping(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            run_id = "シンデレラ_20260728_2211"
-            run_dir = root / "output" / run_id
-            run_dir.mkdir(parents=True)
-            (run_dir / "state.txt").write_text(
-                "\n".join(
-                    [
-                        "slot.p110.status=done",
-                        "slot.p120.status=done",
-                        "slot.p130.status=done",
-                        "slot.p210.status=done",
-                        "slot.p220.status=done",
-                        "slot.p230.status=done",
-                        "slot.p310.status=done",
-                        "slot.p320.status=done",
-                        "slot.p330.status=done",
-                        # A transport failure may record the runtime stage before
-                        # its corresponding slot failure snapshot is appended.
-                        "runtime.failure.stage=scene_detail",
-                        "slot.p640.status=awaiting_approval",
                         "",
                     ]
                 ),
@@ -6948,8 +6544,7 @@ class ImageGenApiTests(unittest.TestCase):
                     [
                         "slot.p110.status=done",
                         "slot.p120.status=pending",
-                        "slot.p130.status=done",
-                        "slot.p640.status=awaiting_approval",
+                        "slot.p650.status=done",
                         "",
                     ]
                 ),
@@ -6970,7 +6565,7 @@ class ImageGenApiTests(unittest.TestCase):
             p680_run_id = "浦島太郎_20260728_2211"
             for run_id, final_slot, final_status in (
                 (p650_run_id, "p650", "done"),
-                (p680_run_id, "p680", "awaiting_approval"),
+                (p680_run_id, "p680", "done"),
             ):
                 run_dir = root / "output" / run_id
                 run_dir.mkdir(parents=True)
@@ -6983,11 +6578,7 @@ class ImageGenApiTests(unittest.TestCase):
                                 + (
                                     final_status
                                     if slot == final_slot
-                                    else (
-                                        "awaiting_approval"
-                                        if slot in image_gen_app.SLOT_AWAITING_APPROVAL_ALLOWED
-                                        else "done"
-                                    )
+                                    else "done"
                                 )
                                 for slot in image_gen_app.P680_FIXED_SLOTS[: final_index + 1]
                             ),
@@ -7018,11 +6609,7 @@ class ImageGenApiTests(unittest.TestCase):
                     [
                         *(
                             f"slot.{slot}.status="
-                            + (
-                                "awaiting_approval"
-                                if slot in image_gen_app.SLOT_AWAITING_APPROVAL_ALLOWED
-                                else "done"
-                            )
+                            + "done"
                             for slot in image_gen_app.P680_FIXED_SLOTS[: p650_index + 1]
                         ),
                         # state.txt is append-only, so an older failed attempt
@@ -7051,11 +6638,7 @@ class ImageGenApiTests(unittest.TestCase):
                     [
                         *(
                             f"slot.{slot}.status="
-                            + (
-                                "awaiting_approval"
-                                if slot in image_gen_app.SLOT_AWAITING_APPROVAL_ALLOWED
-                                else "done"
-                            )
+                            + "done"
                             for slot in image_gen_app.P680_FIXED_SLOTS[:-1]
                         ),
                         "slot.p680.status=failed",
@@ -7070,55 +6653,6 @@ class ImageGenApiTests(unittest.TestCase):
 
         self.assertEqual(current, 670)
 
-    def test_video_prompt_currentness_rejects_blocking_compiler_quality_issues(self) -> None:
-        item = image_gen_app.FrontendReviewItem(
-            item_id="scene10_cut1",
-            kind="scene",
-        )
-        payload = {
-            "quality_issues": [
-                {
-                    "code": "video_motion_abstract_primary",
-                    "blocking": True,
-                },
-                {
-                    "code": "non_blocking_note",
-                    "blocking": False,
-                },
-                {
-                    "code": "   ",
-                    "blocking": True,
-                },
-            ]
-        }
-        target = {"cut": {"video_generation": {"api_prompt_payload": payload}}}
-
-        self.assertEqual(
-            image_gen_app._blocking_video_prompt_quality_issue_codes(payload),
-            [
-                "video_motion_abstract_primary",
-                "video_motion_blocking_quality_issue",
-            ],
-        )
-
-        with (
-            patch(
-                "server.image_gen_app._read_manifest_data",
-                return_value=(Path("video_manifest.md"), "", {}),
-            ),
-            patch(
-                "server.image_gen_app._compile_frontend_video_prompt_payload",
-                return_value=(target, payload),
-            ),
-        ):
-            with self.assertRaisesRegex(
-                ValueError,
-                r"scene10_cut1.*video_motion_abstract_primary.*video_motion_blocking_quality_issue",
-            ):
-                image_gen_app._assert_video_materialization_current_for_approval(
-                    Path("."),
-                    [item],
-                )
 
     def test_video_prompt_currentness_rejects_obsolete_ir_schema(self) -> None:
         item = image_gen_app.FrontendReviewItem(
@@ -7150,146 +6684,15 @@ class ImageGenApiTests(unittest.TestCase):
             }
         }
 
-        with (
-            patch(
-                "server.image_gen_app._read_manifest_data",
-                return_value=(Path("video_manifest.md"), "", {}),
-            ),
-            patch(
-                "server.image_gen_app._compile_frontend_video_prompt_payload",
-                return_value=(target, current_payload),
-            ),
+        with self.assertRaisesRegex(
+            ValueError,
+            r"scene10_cut1\.video_prompt_ir\.schema_version",
         ):
-            with self.assertRaisesRegex(
-                ValueError,
-                r"scene10_cut1\.video_prompt_ir\.schema_version",
-            ):
-                image_gen_app._assert_video_materialization_current_for_approval(
-                    Path("."),
-                    [item],
-                )
+            image_gen_app._assert_current_video_prompt_contract_versions(
+                selector=item.item_id,
+                payload=stored_payload,
+            )
 
-    def test_video_generation_endpoints_reject_nested_blocking_quality_issue(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            run_dir = write_valid_p650_artifacts(root, "sample_run")
-            mark_manifest_narration_ready(run_dir)
-
-            with (
-                patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}),
-                patch("server.image_gen_app.ROOT", root),
-                patch(
-                    "server.image_gen_app._require_narration_ready_for_video",
-                    return_value={"ready": True},
-                ),
-            ):
-                with TestClient(app) as client:
-                    created = client.post(
-                        "/api/image-gen/video-prompts/create",
-                        json={
-                            "run_id": "sample_run",
-                            "approve_for_generation": True,
-                            "items": [
-                                {
-                                    "item_id": "scene10_cut1",
-                                    "kind": "scene",
-                                    "output": "assets/scenes/scene10_cut1.png",
-                                    "video_prompt": REVIEWABLE_VIDEO_PROMPT,
-                                    "video_first_reference": "assets/characters/hero.png",
-                                }
-                            ],
-                        },
-                    )
-                    self.assertEqual(created.status_code, 200, created.text)
-
-                    manifest = yaml.safe_load(
-                        image_gen_app._extract_manifest_yaml_text(
-                            (run_dir / "video_manifest.md").read_text(
-                                encoding="utf-8"
-                            )
-                        )
-                    )
-                    stored_payload = manifest["scenes"][0]["cuts"][0][
-                        "video_generation"
-                    ]["api_prompt_payload"]
-                    blocking_payload = json.loads(json.dumps(stored_payload))
-                    blocking_payload["quality_issues"] = []
-                    blocking_payload.setdefault("video_prompt_ir", {})[
-                        "quality_issues"
-                    ] = [
-                        {
-                            "code": "video_motion_abstract_primary",
-                            "blocking": True,
-                        }
-                    ]
-                    request_item = {
-                        "item_id": "scene10_cut1",
-                        "prompt": REVIEWABLE_VIDEO_PROMPT,
-                        "first_reference": "assets/characters/hero.png",
-                        "candidate_count": 1,
-                    }
-
-                    with (
-                        patch(
-                            "server.image_gen_app._compile_frontend_video_prompt_payload",
-                            return_value=({}, blocking_payload),
-                        ),
-                        patch(
-                            "server.image_gen_app._generate_video_candidates",
-                            new_callable=AsyncMock,
-                        ) as generate,
-                    ):
-                        single = client.post(
-                            "/api/image-gen/video-generate",
-                            json={"run_id": "sample_run", **request_item},
-                        )
-                        bulk = client.post(
-                            "/api/image-gen/video-generate-bulk",
-                            json={
-                                "run_id": "sample_run",
-                                "concurrency": 1,
-                                "items": [request_item],
-                            },
-                        )
-
-                    manifest_path = run_dir / "video_manifest.md"
-                    manifest_text = manifest_path.read_text(encoding="utf-8")
-                    stored_payload["quality_issues"] = []
-                    stored_payload.setdefault("video_prompt_ir", {})[
-                        "quality_issues"
-                    ] = [
-                        {
-                            "code": "video_motion_abstract_end_state",
-                            "blocking": True,
-                        }
-                    ]
-                    image_gen_app._write_manifest_data(
-                        manifest_path,
-                        manifest_text,
-                        manifest,
-                    )
-                    with patch(
-                        "server.image_gen_app._generate_video_candidates",
-                        new_callable=AsyncMock,
-                    ) as persisted_generate:
-                        persisted = client.post(
-                            "/api/image-gen/video-generate",
-                            json={"run_id": "sample_run", **request_item},
-                        )
-
-            self.assertEqual(single.status_code, 409, single.text)
-            self.assertEqual(bulk.status_code, 409, bulk.text)
-            self.assertEqual(persisted.status_code, 409, persisted.text)
-            self.assertIn("scene10_cut1", single.text)
-            self.assertIn("video_motion_abstract_primary", single.text)
-            self.assertIn("scene10_cut1", bulk.text)
-            self.assertIn("video_motion_abstract_primary", bulk.text)
-            self.assertIn("scene10_cut1", persisted.text)
-            self.assertIn("video_motion_abstract_end_state", persisted.text)
-            generate.assert_not_called()
-            persisted_generate.assert_not_called()
 
     def test_video_generation_endpoints_reject_obsolete_projection_and_ir_versions(
         self,
@@ -7487,7 +6890,6 @@ class ImageGenApiTests(unittest.TestCase):
                         json={
                             "source_run_id": "桃太郎_20260509_1100",
                             "target_duration_seconds": 600,
-                            "review_mode": "preapproved",
                         },
                     )
 
@@ -7496,11 +6898,9 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(payload["createMode"], "world_walk")
         self.assertEqual(payload["sourceRunId"], "桃太郎_20260509_1100")
         self.assertEqual(payload["targetDurationSeconds"], 600)
-        self.assertEqual(payload["reviewMode"], "preapproved")
         self.assertTrue(payload["runId"].startswith("桃太郎の世界観を散歩してみた_"))
         self.assertEqual(scheduled[0]["source_run_id"], "桃太郎_20260509_1100")
         self.assertEqual(scheduled[0]["target_duration_seconds"], 600)
-        self.assertEqual(scheduled[0]["review_mode"], "preapproved")
 
     def test_create_world_walk_endpoint_rejects_invalid_or_incomplete_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7618,7 +7018,7 @@ class ImageGenApiTests(unittest.TestCase):
             run_id = "桃太郎_20260509_1200"
             cancelled: list[bool] = []
 
-            async def fake_toc_skill_helper(*, topic, source=None, run_id, stop_target="p680"):
+            async def fake_toc_skill_helper(*, topic, source=None, run_id, stop_target="p680", **_kwargs):
                 write_valid_p650_artifacts(root, run_id)
                 try:
                     await asyncio.Event().wait()
@@ -7652,7 +7052,7 @@ class ImageGenApiTests(unittest.TestCase):
             run_id = "桃太郎_20260509_1200"
             events: list[str] = []
 
-            async def fake_toc_skill_helper(*, topic, source=None, run_id, stop_target="p680"):
+            async def fake_toc_skill_helper(*, topic, source=None, run_id, stop_target="p680", **_kwargs):
                 events.append("started")
                 write_valid_p680_artifacts(root, run_id)
                 await asyncio.sleep(0.02)
@@ -7699,7 +7099,6 @@ class ImageGenApiTests(unittest.TestCase):
 
             generate_images = AsyncMock(side_effect=fake_generate_images)
             upgrade_prompts = AsyncMock(side_effect=fake_upgrade_prompts)
-            validate_review = Mock()
             rebuild_index = AsyncMock()
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
@@ -7709,8 +7108,6 @@ class ImageGenApiTests(unittest.TestCase):
                     patch("server.image_gen_app._run_toc_immersive_frontend_cli_helper", fake_frontend_cli_helper),
                     patch("server.image_gen_app._generate_create_images", generate_images),
                     patch("server.image_gen_app._upgrade_initial_request_prompts", upgrade_prompts),
-                    patch("server.image_gen_app._validate_image_review_ready", validate_review),
-                    patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
                     patch("server.image_gen_app._rebuild_run_index", rebuild_index),
                 ):
                     with TestClient(app) as client:
@@ -7747,7 +7144,6 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(events, [("cli", "p680")])
         generate_images.assert_not_awaited()
         upgrade_prompts.assert_not_awaited()
-        validate_review.assert_not_called()
         rebuild_index.assert_not_awaited()
 
     def test_create_run_endpoint_can_disable_image_generation(self) -> None:
@@ -7768,7 +7164,6 @@ class ImageGenApiTests(unittest.TestCase):
                     patch("server.image_gen.time.strftime", return_value="20260509_1200"),
                     patch("server.image_gen_app._run_toc_skill_helper_until_stop_target", skill_helper),
                     patch("server.image_gen_app._run_toc_immersive_frontend_cli_helper", fake_frontend_cli_helper),
-                    patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
                 ):
                     with TestClient(app) as client:
                         create_response = client.post(
@@ -7802,354 +7197,8 @@ class ImageGenApiTests(unittest.TestCase):
             ],
         )
 
-    def test_create_run_endpoint_materializes_1200_second_duration_contract(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-        output_root = repo_root / "output"
-        output_root.mkdir(exist_ok=True)
-        runner = load_frontend_runner_module()
 
-        def write_passing_foundation_review(run_dir: Path, stage: str) -> None:
-            write_semantic_review_artifacts(run_dir, stage)
 
-        with tempfile.TemporaryDirectory(prefix="frontend_create_1200_", dir=output_root) as tmp:
-            run_dir = Path(tmp)
-            run_id = run_dir.name
-            helper_calls: list[dict[str, object]] = []
-            helper_errors: list[str] = []
-            run_stat = os.stat(run_dir, follow_symlinks=False)
-            reserved_identity = (run_stat.st_dev, run_stat.st_ino)
-            reservation = image_gen_app._retain_frontend_create_run(
-                run_dir,
-                expected_identity=reserved_identity,
-            )
-
-            async def write_passing_semantic_review(
-                _job_id: str,
-                *,
-                run_dir: Path,
-                stage: str,
-                image_prompt_provider_ready: bool = True,
-            ) -> None:
-                write_passing_foundation_review(run_dir, stage)
-                if stage == "image_prompt":
-                    snapshot = load_request_snapshot(
-                        run_dir / "image_generation_request_snapshot.json",
-                        run_dir=run_dir,
-                        verify_references=image_prompt_provider_ready,
-                    )
-                    freeze_updates = {
-                        "review.image_prompt.request_freeze.status": (
-                            "frozen" if image_prompt_provider_ready else "reviewed_draft"
-                        ),
-                        "review.image_prompt.request_freeze.reviewed_request_revision": (
-                            snapshot.request_revision
-                        ),
-                    }
-                    if image_prompt_provider_ready:
-                        freeze_updates[
-                            "review.image_prompt.request_freeze.request_revision"
-                        ] = snapshot.request_revision
-                    image_gen_app.append_state_snapshot(
-                        run_dir / "state.txt",
-                        freeze_updates,
-                    )
-
-            async def write_passing_pre_asset_fixed_point(
-                _job_id: str,
-                *,
-                run_dir: Path,
-            ) -> None:
-                for stage in image_gen_app.PRE_ASSET_SEMANTIC_STAGES:
-                    write_passing_foundation_review(run_dir, stage)
-
-            async def materializing_frontend_helper(**kwargs):
-                helper_calls.append(kwargs)
-
-                def materialize() -> None:
-                    runner.materialize_run(
-                        str(kwargs["topic"]),
-                        str(kwargs["source"]),
-                        run_dir,
-                        str(kwargs["stop_target"]),
-                        target_duration_seconds=int(kwargs["target_duration_seconds"]),
-                        foundation_review_runner=write_passing_foundation_review,
-                    )
-                    runner.write_run_index(run_dir)
-
-                try:
-                    await asyncio.to_thread(materialize)
-                    await asyncio.to_thread(runner.prepare_grounding, run_dir)
-                    await asyncio.to_thread(
-                        runner._refresh_downstream_review_artifacts,
-                        run_dir,
-                    )
-                    await runner.run_pre_media_semantic_pipeline(
-                        run_dir,
-                        image_prompt_provider_ready=False,
-                    )
-                except subprocess.CalledProcessError as exc:
-                    helper_errors.append(str(exc.stderr or exc.stdout or exc))
-                    raise
-                except Exception as exc:
-                    helper_errors.append(f"{type(exc).__name__}: {exc}")
-                    raise
-                return "materialized 1200-second run"
-
-            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with (
-                    patch(
-                        "server.image_gen_app._reserve_frontend_create_run_dir",
-                        return_value=reservation,
-                    ),
-                    patch(
-                        "server.image_gen_app._run_toc_immersive_frontend_cli_helper",
-                        materializing_frontend_helper,
-                    ),
-                    patch(
-                        "server.image_gen_app._run_semantic_review",
-                        side_effect=write_passing_semantic_review,
-                    ),
-                    patch(
-                        "server.image_gen_app._run_pre_asset_semantic_fixed_point",
-                        side_effect=write_passing_pre_asset_fixed_point,
-                    ),
-                    patch("server.image_gen_app._create_process_record_best_effort", return_value=None),
-                    patch("server.image_gen_app._update_process_record_best_effort", return_value=None),
-                ):
-                    with TestClient(app) as client:
-                        create_response = client.post(
-                            "/api/image-gen/runs/create",
-                            json={
-                                "title": "シンデレラ",
-                                "source": "シンデレラ",
-                                "generate_images": False,
-                                "target_duration_seconds": 1200,
-                            },
-                        )
-                        create_payload = create_response.json()
-                        final_payload: dict[str, Any] = {}
-                        deadline = time.monotonic() + (20 * 60)
-                        while time.monotonic() < deadline:
-                            final_payload = client.get(
-                                f"/api/image-gen/runs/create/{create_payload['jobId']}"
-                            ).json()
-                            if final_payload.get("status") in {"completed", "failed"}:
-                                break
-                            time.sleep(0.05)
-                        else:
-                            self.fail("1200-second create integration did not finish within 20 minutes")
-
-            if final_payload.get("status") == "failed":
-                events_path = run_dir / "logs" / "app_server" / "events.jsonl"
-                if events_path.exists():
-                    event_lines = [
-                        line for line in events_path.read_text(encoding="utf-8").splitlines()
-                        if line.strip()
-                    ]
-                    for line in event_lines:
-                        try:
-                            event = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if (
-                            event.get("operation") == "create_job_step"
-                            and event.get("status") == "failed"
-                            and event.get("error")
-                        ):
-                            helper_errors.append(str(event["error"]))
-                    if event_lines:
-                        helper_errors.append(event_lines[-1])
-                state_path = run_dir / "state.txt"
-                if state_path.exists():
-                    helper_errors.append(
-                        "state.last_error="
-                        + str(image_gen_app.parse_state_file(state_path).get("last_error") or "")
-                    )
-
-            self.assertEqual(
-                final_payload.get("status"),
-                "completed",
-                {"payload": final_payload, "helper_errors": helper_errors},
-            )
-            _research_text, research = load_structured_document(run_dir / "research.md")
-            _story_text, story = load_structured_document(run_dir / "story.md")
-            _script_text, script = load_structured_document(run_dir / "script.md")
-            _manifest_text, manifest = load_structured_document(run_dir / "video_manifest.md")
-            state = image_gen_app.parse_state_file(run_dir / "state.txt")
-
-            self.assertEqual(create_response.status_code, 200)
-            self.assertEqual(create_payload["targetDurationSeconds"], 1200)
-            self.assertEqual(final_payload.get("status"), "completed", final_payload)
-            self.assertEqual(len(helper_calls), 1)
-            self.assertEqual(helper_calls[0]["target_duration_seconds"], 1200)
-            self.assertTrue(helper_calls[0]["materialize_only"])
-            self.assertEqual(state["runtime.target_video_seconds"], "1200")
-            self.assertEqual(state["runtime.duration_plan.minimum_scene_count"], "30")
-            self.assertNotIn(
-                "runtime.duration_plan.minimum_cut_count",
-                state,
-            )
-            self.assertEqual(state["runtime.duration_plan.minimum_narration_seconds"], "840")
-            self.assertEqual(research["metadata"]["target_duration_seconds"], 1200)
-            self.assertEqual(story["story_metadata"]["target_duration_seconds"], 1200)
-            self.assertEqual(script["script_metadata"]["target_duration_seconds"], 1200)
-            self.assertEqual(manifest["video_metadata"]["target_duration_seconds"], 1200)
-            self.assertGreaterEqual(len(story["script"]["scenes"]), 30)
-            self.assertGreaterEqual(len(script["scenes"]), 30)
-            self.assertGreaterEqual(len(manifest["scenes"]), 30)
-            semantic_minimum_cut_count = 0
-            allocated_scene_seconds = 0
-            allocated_target_seconds = 0
-            for scene in manifest["scenes"]:
-                coverage = scene["scene_cut_coverage_plan"]
-                minimums = coverage["min_cut_count"]
-                semantic_minimum = minimums["selected"]
-                obligation_minimum = minimums[
-                    "by_distinct_semantic_obligations"
-                ]
-                event_minimum = minimums["by_event_beats"]
-                self.assertIs(type(semantic_minimum), int)
-                self.assertIs(type(obligation_minimum), int)
-                self.assertIs(type(event_minimum), int)
-                self.assertEqual(
-                    semantic_minimum,
-                    max(obligation_minimum, event_minimum),
-                )
-                self.assertEqual(
-                    coverage["minimum_cut_count"],
-                    semantic_minimum,
-                )
-                self.assertEqual(
-                    coverage["selected_cut_count"],
-                    len(scene["cuts"]),
-                )
-                self.assertGreaterEqual(len(scene["cuts"]), semantic_minimum)
-                semantic_minimum_cut_count += semantic_minimum
-
-                scene_target_seconds = scene["target_duration_seconds"]
-                scene_estimated_seconds = scene["estimated_duration_seconds"]
-                self.assertIs(type(scene_target_seconds), int)
-                self.assertIs(type(scene_estimated_seconds), int)
-                cut_video_seconds: list[int] = []
-                for cut in scene["cuts"]:
-                    cut_duration_seconds = cut["duration_seconds"]
-                    provider_duration_seconds = cut["video_generation"][
-                        "duration_seconds"
-                    ]
-                    self.assertIs(type(cut_duration_seconds), int)
-                    self.assertIs(type(provider_duration_seconds), int)
-                    self.assertEqual(
-                        provider_duration_seconds,
-                        cut_duration_seconds,
-                    )
-                    cut_video_seconds.append(cut_duration_seconds)
-                scene_video_seconds = sum(cut_video_seconds)
-                self.assertEqual(
-                    scene_video_seconds,
-                    scene_target_seconds,
-                )
-                self.assertEqual(
-                    scene_estimated_seconds,
-                    scene_target_seconds,
-                )
-                allocated_scene_seconds += scene_video_seconds
-                allocated_target_seconds += scene_target_seconds
-            self.assertEqual(
-                manifest["video_metadata"]["minimum_cut_count"],
-                semantic_minimum_cut_count,
-            )
-            manifest_duration_seconds = manifest["video_metadata"][
-                "duration_seconds"
-            ]
-            self.assertIs(type(manifest_duration_seconds), int)
-            self.assertEqual(
-                manifest_duration_seconds,
-                allocated_scene_seconds,
-            )
-            self.assertEqual(allocated_scene_seconds, allocated_target_seconds)
-            self.assertEqual(manifest_duration_seconds, 1200)
-            self.assertGreaterEqual(
-                sum(scene["narration_target_seconds"] for scene in story["script"]["scenes"]),
-                840,
-            )
-            self.assertEqual(script["script_metadata"]["minimum_narration_seconds"], 840)
-            self.assertEqual(manifest["video_metadata"]["minimum_narration_seconds"], 840)
-
-    def test_create_run_without_images_does_not_complete_without_foundation_semantic_review(self) -> None:
-        for missing_stage in ("research", "story"):
-            with self.subTest(missing_stage=missing_stage), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-
-                async def fake_frontend_cli_helper(**kwargs):
-                    run_dir = write_valid_p650_artifacts(root, str(kwargs["run_id"]))
-                    report_path = run_dir / image_gen_app.semantic_review_relpaths(missing_stage)["report"]
-                    report_path.unlink()
-                    return "materialized without images"
-
-                with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                    with (
-                        patch("server.image_gen_app.ROOT", root),
-                        patch("server.image_gen.time.strftime", return_value="20260509_1200"),
-                        patch(
-                            "server.image_gen_app._run_toc_immersive_frontend_cli_helper",
-                            fake_frontend_cli_helper,
-                        ),
-                    ):
-                        with TestClient(app) as client:
-                            create_response = client.post(
-                                "/api/image-gen/runs/create",
-                                json={
-                                    "title": "シンデレラ",
-                                    "source": "シンデレラ",
-                                    "generate_images": False,
-                                },
-                            )
-                            create_payload = create_response.json()
-                            final_payload = self._poll_create_job(client, create_payload["jobId"])
-
-                self.assertEqual(create_response.status_code, 200)
-                self.assertEqual(final_payload["status"], "failed")
-                self.assertEqual(final_payload["errorCode"], "RuntimeError")
-
-    def test_create_run_without_images_does_not_complete_with_failed_foundation_semantic_review(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-
-            async def fake_frontend_cli_helper(**kwargs):
-                run_dir = write_valid_p650_artifacts(root, str(kwargs["run_id"]))
-                report_path = run_dir / image_gen_app.semantic_review_relpaths("story")["report"]
-                report_path.write_text(
-                    "status: failed\nreviewed_entries: [story_entry_1]\n"
-                    "blocked_entries: [story_entry_1]\nfailed_selectors: [story_entry_1]\n"
-                    "findings: [story foundation is inconsistent]\nnotes: []\n",
-                    encoding="utf-8",
-                )
-                return "materialized without images"
-
-            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with (
-                    patch("server.image_gen_app.ROOT", root),
-                    patch("server.image_gen.time.strftime", return_value="20260509_1200"),
-                    patch(
-                        "server.image_gen_app._run_toc_immersive_frontend_cli_helper",
-                        fake_frontend_cli_helper,
-                    ),
-                ):
-                    with TestClient(app) as client:
-                        create_response = client.post(
-                            "/api/image-gen/runs/create",
-                            json={
-                                "title": "シンデレラ",
-                                "source": "シンデレラ",
-                                "generate_images": False,
-                            },
-                        )
-                        create_payload = create_response.json()
-                        final_payload = self._poll_create_job(client, create_payload["jobId"])
-
-        self.assertEqual(create_response.status_code, 200)
-        self.assertEqual(final_payload["status"], "failed")
-        self.assertEqual(final_payload["errorCode"], "RuntimeError")
 
     def test_create_run_endpoint_passes_title_and_nonblank_source_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -8172,7 +7221,6 @@ class ImageGenApiTests(unittest.TestCase):
 
             generate_images = AsyncMock(side_effect=fake_generate_images)
             upgrade_prompts = AsyncMock(side_effect=fake_upgrade_prompts)
-            validate_review = Mock()
             rebuild_index = AsyncMock()
 
             with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
@@ -8182,8 +7230,6 @@ class ImageGenApiTests(unittest.TestCase):
                     patch("server.image_gen_app._run_toc_immersive_frontend_cli_helper", fake_frontend_cli_helper),
                     patch("server.image_gen_app._generate_create_images", generate_images),
                     patch("server.image_gen_app._upgrade_initial_request_prompts", upgrade_prompts),
-                    patch("server.image_gen_app._validate_image_review_ready", validate_review),
-                    patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
                     patch("server.image_gen_app._rebuild_run_index", rebuild_index),
                 ):
                     with TestClient(app) as client:
@@ -8218,7 +7264,6 @@ class ImageGenApiTests(unittest.TestCase):
         self.assertEqual(events, [("cli", "p680")])
         generate_images.assert_not_awaited()
         upgrade_prompts.assert_not_awaited()
-        validate_review.assert_not_called()
         rebuild_index.assert_not_awaited()
 
 
@@ -8323,11 +7368,10 @@ class ImageGenApiTests(unittest.TestCase):
 
             state = image_gen_app.parse_state_file(run_dir / "state.txt")
 
-        self.assertEqual(state["slot.p680.status"], "awaiting_approval")
+        self.assertEqual(state["slot.p680.status"], "done")
         self.assertEqual(state["image_generation.status"], "completed")
         self.assertEqual(state["image_generation.started"], "true")
         self.assertEqual(state["image_generation.generated_count"], "3")
-        self.assertEqual(state["review.semantic.create_scene_media_generated"], "true")
 
 
 
@@ -8566,257 +7610,7 @@ base b prompt
         self.assertEqual(batch_payload["request"]["parallelismEffective"], 2)
         self.assertEqual(batch_payload["request"]["provenancePolicy"], "request_bound_v2")
 
-    def test_partial_media_truth_state_stays_reset_on_preflight_or_provider_failure(
-        self,
-    ) -> None:
-        for failure_phase in ("preflight", "provider"):
-            with (
-                self.subTest(failure_phase=failure_phase),
-                tempfile.TemporaryDirectory() as tmp,
-            ):
-                run_dir = Path(tmp)
-                blocked = SimpleNamespace(
-                    id="scene10_cut01",
-                    output="assets/scenes/scene10_cut01.png",
-                )
-                survivor = SimpleNamespace(
-                    id="scene10_cut02",
-                    output="assets/scenes/scene10_cut02.png",
-                )
-                projection = {
-                    "request_revision": "revision-1",
-                    "projection_sha256": "sha256:projection",
-                    "blocked_image_item_ids": ["scene10_cut01"],
-                }
-                stale_receipt = (
-                    run_dir
-                    / image_gen_app.PARTIAL_MEDIA_RECEIPT_RELPATH
-                )
-                stale_receipt.parent.mkdir(parents=True)
-                stale_receipt.write_text(
-                    '{"schema_version":"stale"}\n',
-                    encoding="utf-8",
-                )
-                build_groups = (
-                    Mock(side_effect=ValueError("preflight failed"))
-                    if failure_phase == "preflight"
-                    else Mock(return_value=[[survivor]])
-                )
-                generate = AsyncMock(
-                    side_effect=RuntimeError("provider failed")
-                )
 
-                with (
-                    patch(
-                        "server.image_gen_app.load_request_items",
-                        return_value=[blocked, survivor],
-                    ),
-                    patch(
-                        "server.image_gen_app.app_server_disabled",
-                        return_value=False,
-                    ),
-                    patch(
-                        "server.image_gen_app._semantic_blocked_image_item_ids",
-                        return_value={"scene10_cut01"},
-                    ),
-                    patch(
-                        "server.image_gen_app._load_current_partial_media_projection",
-                        return_value=projection,
-                    ),
-                    patch(
-                        "server.image_gen_app._assert_partial_media_blocked_destinations_absent",
-                        Mock(),
-                    ),
-                    patch(
-                        "server.image_gen_app._build_generation_groups",
-                        build_groups,
-                    ),
-                    patch(
-                        "server.image_gen_app._validate_generation_groups",
-                        Mock(),
-                    ),
-                    patch(
-                        "server.image_gen_app._validate_generated_group_outputs",
-                        Mock(),
-                    ),
-                    patch(
-                        "server.image_gen_app._generate_request_item_output",
-                        generate,
-                    ),
-                ):
-                    with self.assertRaisesRegex(
-                        (RuntimeError, ValueError),
-                        f"{failure_phase} failed",
-                    ):
-                        asyncio.run(
-                            image_gen_app._generate_request_outputs_unlocked(
-                                run_dir=run_dir,
-                                kind="scene",
-                            )
-                        )
-
-                state = image_gen_app.parse_state_file(
-                    run_dir / "state.txt"
-                )
-
-            self.assertEqual(
-                state["review.semantic.partial_media.generated"],
-                "false",
-            )
-            self.assertEqual(
-                state[
-                    "review.semantic.partial_media.provider_submitted_image_items"
-                ],
-                "",
-            )
-            self.assertEqual(
-                state["review.semantic.partial_media.reused_image_items"],
-                "",
-            )
-            self.assertEqual(
-                state["review.semantic.partial_media.generated_image_items"],
-                "",
-            )
-            self.assertEqual(
-                state["review.semantic.partial_media.satisfied_image_items"],
-                "",
-            )
-            self.assertFalse(stale_receipt.exists())
-
-    def test_partial_media_receipt_records_provider_and_reused_truth_sets(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            run_dir = Path(tmp)
-            blocked = SimpleNamespace(
-                id="scene10_cut01",
-                output="assets/scenes/scene10_cut01.png",
-            )
-            reused = SimpleNamespace(
-                id="scene10_cut02",
-                output="assets/scenes/scene10_cut02.png",
-            )
-            submitted = SimpleNamespace(
-                id="scene10_cut03",
-                output="assets/scenes/scene10_cut03.png",
-            )
-            projection = {
-                "request_revision": "revision-1",
-                "projection_sha256": "sha256:projection",
-                "blocked_image_item_ids": ["scene10_cut01"],
-            }
-            write_receipt = Mock(
-                return_value={"receipt_sha256": "sha256:receipt"}
-            )
-
-            async def fake_generate(
-                *,
-                run_dir: Path,
-                kind: str,
-                item: Any,
-            ) -> str:
-                self.assertEqual(kind, "scene")
-                output = run_dir / item.output
-                output.parent.mkdir(parents=True, exist_ok=True)
-                output.write_bytes(PNG_BYTES)
-                return (
-                    "reused"
-                    if item.id == "scene10_cut02"
-                    else "provider_submitted"
-                )
-
-            with (
-                patch(
-                    "server.image_gen_app.load_request_items",
-                    return_value=[blocked, reused, submitted],
-                ),
-                patch(
-                    "server.image_gen_app.app_server_disabled",
-                    return_value=False,
-                ),
-                patch(
-                    "server.image_gen_app._semantic_blocked_image_item_ids",
-                    return_value={"scene10_cut01"},
-                ),
-                patch(
-                    "server.image_gen_app._load_current_partial_media_projection",
-                    return_value=projection,
-                ),
-                patch(
-                    "server.image_gen_app._assert_partial_media_blocked_destinations_absent",
-                    Mock(),
-                ),
-                patch(
-                    "server.image_gen_app._build_generation_groups",
-                    return_value=[[reused, submitted]],
-                ),
-                patch(
-                    "server.image_gen_app._validate_generation_groups",
-                    Mock(),
-                ),
-                patch(
-                    "server.image_gen_app._validate_generated_group_outputs",
-                    Mock(),
-                ),
-                patch(
-                    "server.image_gen_app._generate_request_item_output",
-                    fake_generate,
-                ),
-                patch(
-                    "server.image_gen_app.write_partial_media_generation_receipt",
-                    write_receipt,
-                ),
-            ):
-                asyncio.run(
-                    image_gen_app._generate_request_outputs_unlocked(
-                        run_dir=run_dir,
-                        kind="scene",
-                    )
-                )
-
-            state = image_gen_app.parse_state_file(
-                run_dir / "state.txt"
-            )
-            receipt_args = write_receipt.call_args.kwargs
-
-        self.assertEqual(
-            receipt_args["provider_submitted_item_ids"],
-            ["scene10_cut03"],
-        )
-        self.assertEqual(
-            receipt_args["reused_item_ids"],
-            ["scene10_cut02"],
-        )
-        self.assertEqual(
-            receipt_args["generated_item_ids"],
-            ["scene10_cut02", "scene10_cut03"],
-        )
-        self.assertEqual(
-            receipt_args["satisfied_item_ids"],
-            ["scene10_cut02", "scene10_cut03"],
-        )
-        self.assertEqual(
-            state[
-                "review.semantic.partial_media.provider_submitted_image_items"
-            ],
-            "scene10_cut03",
-        )
-        self.assertEqual(
-            state["review.semantic.partial_media.reused_image_items"],
-            "scene10_cut02",
-        )
-        self.assertEqual(
-            state["review.semantic.partial_media.generated_image_items"],
-            "scene10_cut02, scene10_cut03",
-        )
-        self.assertEqual(
-            state["review.semantic.partial_media.satisfied_image_items"],
-            "scene10_cut02, scene10_cut03",
-        )
-        self.assertEqual(
-            state["review.semantic.partial_media.generated"],
-            "true",
-        )
 
 
 
@@ -8947,9 +7741,6 @@ base b prompt
                 with (
                     patch("server.image_gen_app.ROOT", root),
                     patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
-                    patch("server.image_gen_app._validate_p560_asset_quality", Mock()),
-                    patch("server.image_gen_app._run_semantic_review", AsyncMock()),
-                    patch("server.image_gen_app._validate_pre_asset_provider_gate", Mock()),
                 ):
                     with self.assertRaisesRegex(RuntimeError, "scene generation group 1 incomplete|did not return an image"):
                         asyncio.run(image_gen_app._generate_create_images("job-1", run_id=run_id))
@@ -8974,25 +7765,6 @@ base b prompt
         self.assertEqual(final_payload["status"], "failed")
         self.assertEqual(final_payload["error"], "ToC作成に失敗しました")
 
-    def test_create_run_helper_creates_scaffold_with_draft_policy(self) -> None:
-        run_id = "helper_debug_20260509_1200"
-        with patch("server.image_gen_app.ROOT", Path.cwd()):
-            output = asyncio.run(image_gen_app._run_toc_run_helper(topic="helper_debug", run_id=run_id))
-        run_dir = Path.cwd() / "output" / run_id
-        try:
-            state = (run_dir / "state.txt").read_text(encoding="utf-8")
-
-            self.assertIn("Run dir:", output)
-            self.assertTrue((run_dir / "video_manifest.md").exists())
-            self.assertTrue((run_dir / "logs/scene_design/scene_event_input.json").exists())
-            self.assertTrue((run_dir / "logs/grounding/research.readset.json").exists())
-            self.assertIn("Run dir:", (run_dir / "logs/toc_run_cli/stdout.log").read_text(encoding="utf-8"))
-            self.assertEqual((run_dir / "logs/toc_run_cli/stderr.log").read_text(encoding="utf-8"), "")
-            self.assertIn("runtime.review_policy=drafts", state)
-            self.assertFalse((run_dir / "output" / run_id / "state.txt").exists())
-            self.assertFalse((run_dir / "output" / run_id / "logs").exists())
-        finally:
-            shutil.rmtree(run_dir, ignore_errors=True)
 
     def test_create_run_endpoint_reports_failed_when_scaffold_artifacts_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -9111,119 +7883,7 @@ base b prompt
             path = response.json()["candidates"][0]["path"]
             self.assertEqual((run_dir / path).read_bytes(), PNG_BYTES)
 
-    def test_scene_candidate_endpoints_reject_semantically_blocked_items_before_lease(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "output" / "sample_run").mkdir(parents=True)
-            acquire_lease = AsyncMock()
-            create_client = Mock(
-                side_effect=AssertionError(
-                    "blocked scene item must not reach provider setup"
-                )
-            )
-            item = {
-                "run_id": "sample_run",
-                "kind": "scene",
-                "item_id": "scene10_cut1",
-                "prompt": "blocked prompt",
-                "references": [],
-                "candidate_count": 1,
-            }
 
-            with (
-                patch.dict(
-                    os.environ,
-                    {"TOC_SERVER_AUTH_DISABLED": "1"},
-                ),
-                patch("server.image_gen_app.ROOT", root),
-                patch(
-                    "server.image_gen_app._semantic_blocked_image_item_ids",
-                    return_value={"scene10_cut1"},
-                ),
-                patch(
-                    "server.image_gen_app._acquire_run_execution_lease",
-                    acquire_lease,
-                ),
-                patch(
-                    "server.image_gen_app.create_codex_app_server_client",
-                    create_client,
-                ),
-            ):
-                with TestClient(app) as client:
-                    single = client.post(
-                        "/api/image-gen/generate",
-                        json=item,
-                    )
-                    foreground = client.post(
-                        "/api/image-gen/generate-bulk",
-                        json={
-                            "run_id": "sample_run",
-                            "kind": "scene",
-                            "items": [item],
-                            "concurrency": 1,
-                            "background": False,
-                        },
-                    )
-                    background = client.post(
-                        "/api/image-gen/generate-bulk",
-                        json={
-                            "run_id": "sample_run",
-                            "kind": "scene",
-                            "items": [item],
-                            "concurrency": 1,
-                            "background": True,
-                        },
-                    )
-
-        self.assertEqual(single.status_code, 409)
-        self.assertEqual(foreground.status_code, 409)
-        self.assertEqual(background.status_code, 409)
-        acquire_lease.assert_not_awaited()
-        create_client.assert_not_called()
-
-    def test_generate_one_rechecks_semantic_block_before_provider_setup(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            run_dir = Path(tmp) / "output" / "sample_run"
-            run_dir.mkdir(parents=True)
-            request = image_gen_app.GenerateRequest(
-                run_id="sample_run",
-                kind="scene",
-                item_id="scene10_cut1",
-                prompt="blocked prompt",
-                references=[],
-                candidate_count=1,
-            )
-            create_client = Mock(
-                side_effect=AssertionError(
-                    "blocked scene item must not reach provider setup"
-                )
-            )
-
-            with (
-                patch(
-                    "server.image_gen_app._semantic_blocked_image_item_ids",
-                    return_value={"scene10_cut1"},
-                ),
-                patch(
-                    "server.image_gen_app.create_codex_app_server_client",
-                    create_client,
-                ),
-            ):
-                with self.assertRaises(HTTPException) as raised:
-                    asyncio.run(
-                        image_gen_app._generate_one(
-                            run_dir,
-                            request,
-                            1,
-                        )
-                    )
-
-        self.assertEqual(raised.exception.status_code, 409)
-        create_client.assert_not_called()
 
     def test_generate_runs_candidate_count_concurrently(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -9655,310 +8315,8 @@ base b prompt
         self.assertEqual(result["deletedCount"], 0)
         self.assertEqual(result["preservedCount"], 1)
 
-    def test_p680_regeneration_classifier_rejects_stale_or_unowned_plan(
-        self,
-    ) -> None:
-        cases = (
-            (
-                "different_run",
-                "/tmp/different-run",
-                False,
-                "eval_report.json belongs to a different run",
-            ),
-            (
-                "unbound_output",
-                None,
-                False,
-                "regeneration target is not bound to the current requests",
-            ),
-            (
-                "malformed_passed_state",
-                None,
-                "false",
-                "image stage passed state is malformed",
-            ),
-            (
-                "passed_stage_with_regeneration_plan",
-                None,
-                True,
-                "passed image stage contains a regeneration plan",
-            ),
-        )
-        for label, report_run_dir, passed, expected_error in cases:
-            with self.subTest(label=label):
-                with tempfile.TemporaryDirectory() as tmp:
-                    run_dir = Path(tmp)
-                    (run_dir / "eval_report.json").write_text(
-                        json.dumps(
-                            {
-                                "run_dir": (
-                                    report_run_dir
-                                    if report_run_dir is not None
-                                    else str(run_dir.resolve())
-                                ),
-                                "stage_target": "p680",
-                                "stages": {
-                                    "image": {
-                                        "passed": passed,
-                                        "details": {
-                                            "image_regeneration_plan": [
-                                                {
-                                                    "output": "assets/scenes/missing.png",
-                                                    "action": "regenerate_p600_scene",
-                                                    "vector_like_references": [],
-                                                }
-                                            ]
-                                        },
-                                    }
-                                },
-                            }
-                        )
-                        + "\n",
-                        encoding="utf-8",
-                    )
 
-                    classification = (
-                        image_gen_app._classify_p680_regeneration_plan(run_dir)
-                    )
 
-                self.assertEqual(classification.targets, {})
-                self.assertTrue(
-                    any(
-                        expected_error in error
-                        for error in classification.errors
-                    )
-                )
-
-    def test_p680_regeneration_plan_reads_bound_report_during_root_swap_aba(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            run_dir = root / "run"
-            decoy_dir = root / "decoy"
-            parked_dir = root / "parked"
-            run_dir.mkdir()
-            decoy_dir.mkdir()
-            original_output = "assets/scenes/original.png"
-            decoy_output = "assets/scenes/decoy.png"
-            for directory, output in (
-                (run_dir, original_output),
-                (decoy_dir, decoy_output),
-            ):
-                (directory / "eval_report.json").write_text(
-                    json.dumps(
-                        {
-                            "run_dir": str(run_dir.resolve()),
-                            "stage_target": "p680",
-                            "stages": {
-                                "image": {
-                                    "passed": False,
-                                    "details": {
-                                        "image_regeneration_plan": [
-                                            {
-                                                "output": output,
-                                                "action": "regenerate_p600_scene",
-                                                "vector_like_references": [],
-                                            }
-                                        ]
-                                    },
-                                }
-                            },
-                        }
-                    )
-                    + "\n",
-                    encoding="utf-8",
-                )
-            current_request_paths = {
-                "asset": {},
-                "scene": {
-                    original_output: run_dir / original_output,
-                    decoy_output: run_dir / decoy_output,
-                },
-            }
-            run_stat = os.stat(run_dir, follow_symlinks=False)
-            read_calls = 0
-
-            def read_bound_report_during_swap(
-                _bound_run_dir: Path,
-                relative_path: str,
-            ) -> bytes:
-                nonlocal read_calls
-                read_calls += 1
-                binding = image_gen_app.current_run_root_binding()
-                self.assertIsNotNone(binding)
-                os.rename(run_dir, parked_dir)
-                os.rename(decoy_dir, run_dir)
-                descriptor = -1
-                try:
-                    descriptor = os.open(
-                        relative_path,
-                        os.O_RDONLY
-                        | getattr(os, "O_CLOEXEC", 0)
-                        | getattr(os, "O_NOFOLLOW", 0),
-                        dir_fd=binding.descriptor,
-                    )
-                    chunks: list[bytes] = []
-                    while chunk := os.read(descriptor, 1024 * 1024):
-                        chunks.append(chunk)
-                    return b"".join(chunks)
-                finally:
-                    if descriptor >= 0:
-                        os.close(descriptor)
-                    os.rename(run_dir, decoy_dir)
-                    os.rename(parked_dir, run_dir)
-
-            with bind_run_root(
-                run_dir,
-                expected_identity=(run_stat.st_dev, run_stat.st_ino),
-            ):
-                with patch(
-                    "server.image_gen_app.read_run_file_bytes",
-                    side_effect=read_bound_report_during_swap,
-                ) as read_report:
-                    classification = image_gen_app._inspect_p680_regeneration_plan(
-                        run_dir,
-                        current_request_paths=current_request_paths,
-                    )
-
-            self.assertEqual(read_calls, 1)
-            read_report.assert_called_once_with(run_dir, "eval_report.json")
-            self.assertEqual(
-                set(classification.targets),
-                {original_output},
-            )
-            self.assertEqual(classification.errors, ())
-
-    def test_image_resume_refuses_asset_repair_plan_before_deleting_any_outputs(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            run_dir = Path(tmp)
-            bad_scene = run_dir / "assets/scenes/bad_scene.png"
-            dependent_scene = run_dir / "assets/scenes/dependent_scene.png"
-            good_scene = run_dir / "assets/scenes/good_scene.png"
-            bad_reference = run_dir / "assets/characters/bad_reference.png"
-            unrelated_upload = run_dir / "assets/uploads/unrelated.png"
-            for path in (
-                bad_scene,
-                dependent_scene,
-                good_scene,
-                bad_reference,
-                unrelated_upload,
-            ):
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(PNG_BYTES)
-            (run_dir / "asset_generation_requests.md").write_text(
-                """# Asset Generation Requests
-
-## bad_reference
-
-- output: `assets/characters/bad_reference.png`
-
-```text
-bad reference
-```
-""",
-                encoding="utf-8",
-            )
-            (run_dir / "image_generation_requests.md").write_text(
-                """# Image Generation Requests
-
-## bad_scene
-
-- output: `assets/scenes/bad_scene.png`
-- references: `[]`
-
-```text
-bad scene
-```
-
-## dependent_scene
-
-- output: `assets/scenes/dependent_scene.png`
-- references:
-  - `人物参照画像1`: `assets/characters/bad_reference.png`
-  - `ユーザー参照画像`: `assets/uploads/unrelated.png`
-
-```text
-scene using bad reference
-```
-
-## good_scene
-
-- output: `assets/scenes/good_scene.png`
-- references: `[]`
-
-```text
-good scene
-```
-""",
-                encoding="utf-8",
-            )
-            (run_dir / "eval_report.json").write_text(
-                json.dumps(
-                    {
-                        "run_dir": str(run_dir.resolve()),
-                        "stage_target": "p680",
-                        "stages": {
-                            "image": {
-                                "passed": False,
-                                "details": {
-                                    "image_regeneration_plan": [
-                                        {
-                                            "selector": "bad_scene",
-                                            "output": "assets/scenes/bad_scene.png",
-                                            "action": "regenerate_p600_scene",
-                                            "vector_like_references": [],
-                                        },
-                                        {
-                                            "selector": "dependent_scene",
-                                            "output": "assets/scenes/dependent_scene.png",
-                                                "action": "regenerate_p500_reference_first",
-                                                "vector_like_references": [
-                                                    "assets/characters/bad_reference.png",
-                                                ],
-                                            },
-                                        ]
-                                    },
-                            }
-                        },
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-            result = image_gen_app._delete_existing_images_for_image_resume(
-                run_dir
-            )
-
-            self.assertTrue(bad_scene.exists())
-            self.assertTrue(dependent_scene.exists())
-            self.assertTrue(bad_reference.exists())
-            self.assertTrue(good_scene.exists())
-            self.assertTrue(unrelated_upload.exists())
-        self.assertEqual(result["deletedCount"], 0)
-        self.assertTrue(
-            any(
-                "canonical p500" in error.lower()
-                for error in result["errors"]
-            )
-        )
-        self.assertTrue(result["requiresCanonicalP500"])
-        self.assertEqual(
-            result["assetTargets"],
-            ["assets/characters/bad_reference.png"],
-        )
-        self.assertEqual(
-            set(result["regenerationActions"]),
-            {
-                "regenerate_p500_reference_first",
-                "regenerate_p600_scene",
-            },
-        )
-        self.assertEqual(result["preservedCount"], 5)
 
     def test_image_resume_deletes_current_scene_only_regeneration_target(
         self,
@@ -9968,8 +8326,8 @@ good scene
             bad_scene = run_dir / "assets/scenes/bad_scene.png"
             good_scene = run_dir / "assets/scenes/good_scene.png"
             bad_scene.parent.mkdir(parents=True)
-            bad_scene.write_bytes(PNG_BYTES)
-            good_scene.write_bytes(PNG_BYTES)
+            bad_scene.write_bytes(b"stale scene output")
+            write_test_png(good_scene)
             (run_dir / "image_generation_requests.md").write_text(
                 """# Image Generation Requests
 
@@ -9982,39 +8340,7 @@ good scene
 bad scene
 ```
 
-## good_scene
-
-- output: `assets/scenes/good_scene.png`
-- references: `[]`
-
-```text
-good scene
-```
 """,
-                encoding="utf-8",
-            )
-            (run_dir / "eval_report.json").write_text(
-                json.dumps(
-                    {
-                        "run_dir": str(run_dir.resolve()),
-                        "stage_target": "p680",
-                        "stages": {
-                            "image": {
-                                "passed": False,
-                                "details": {
-                                    "image_regeneration_plan": [
-                                        {
-                                            "output": "assets/scenes/bad_scene.png",
-                                            "action": "regenerate_p600_scene",
-                                            "vector_like_references": [],
-                                        }
-                                    ]
-                                },
-                            }
-                        },
-                    }
-                )
-                + "\n",
                 encoding="utf-8",
             )
 
@@ -10035,7 +8361,7 @@ good scene
             output = run_dir / "assets/scenes/bad_scene.png"
             parked_output = run_dir / "assets/scenes/bad_scene.original"
             output.parent.mkdir(parents=True)
-            output.write_bytes(PNG_BYTES)
+            output.write_bytes(b"stale scene output")
             (run_dir / "image_generation_requests.md").write_text(
                 """# Image Generation Requests
 
@@ -10048,30 +8374,6 @@ good scene
 bad scene
 ```
 """,
-                encoding="utf-8",
-            )
-            (run_dir / "eval_report.json").write_text(
-                json.dumps(
-                    {
-                        "run_dir": str(run_dir.resolve()),
-                        "stage_target": "p680",
-                        "stages": {
-                            "image": {
-                                "passed": False,
-                                "details": {
-                                    "image_regeneration_plan": [
-                                        {
-                                            "output": "assets/scenes/bad_scene.png",
-                                            "action": "regenerate_p600_scene",
-                                            "vector_like_references": [],
-                                        }
-                                    ]
-                                },
-                            }
-                        },
-                    }
-                )
-                + "\n",
                 encoding="utf-8",
             )
             original_unlink = (
@@ -10106,7 +8408,7 @@ bad scene
 
             self.assertTrue(replacement_installed)
             self.assertEqual(output.read_bytes(), replacement_bytes)
-            self.assertEqual(parked_output.read_bytes(), PNG_BYTES)
+            self.assertEqual(parked_output.read_bytes(), b"stale scene output")
             self.assertEqual(result["deletedCount"], 0)
             self.assertTrue(
                 any("verified identity" in error for error in result["errors"])
@@ -10126,7 +8428,7 @@ bad scene
             decoy_output = decoy_dir / "assets/scenes/bad_scene.png"
             original_output.parent.mkdir(parents=True)
             decoy_output.parent.mkdir(parents=True)
-            original_output.write_bytes(PNG_BYTES)
+            original_output.write_bytes(b"stale scene output")
             decoy_bytes = b"decoy must survive"
             decoy_output.write_bytes(decoy_bytes)
             (run_dir / "image_generation_requests.md").write_text(
@@ -10141,30 +8443,6 @@ bad scene
 bad scene
 ```
 """,
-                encoding="utf-8",
-            )
-            (run_dir / "eval_report.json").write_text(
-                json.dumps(
-                    {
-                        "run_dir": str(run_dir.resolve()),
-                        "stage_target": "p680",
-                        "stages": {
-                            "image": {
-                                "passed": False,
-                                "details": {
-                                    "image_regeneration_plan": [
-                                        {
-                                            "output": "assets/scenes/bad_scene.png",
-                                            "action": "regenerate_p600_scene",
-                                            "vector_like_references": [],
-                                        }
-                                    ]
-                                },
-                            }
-                        },
-                    }
-                )
-                + "\n",
                 encoding="utf-8",
             )
             original_remove = run_root_binding._remove_name_if_identity
@@ -10214,7 +8492,7 @@ bad scene
             output = run_dir / "assets/scenes/bad_scene.png"
             upload.parent.mkdir(parents=True)
             output.parent.mkdir(parents=True)
-            upload.write_bytes(PNG_BYTES)
+            upload.write_bytes(b"user-upload")
             output.symlink_to(upload)
             (run_dir / "image_generation_requests.md").write_text(
                 """# Image Generation Requests
@@ -10230,34 +8508,11 @@ bad scene
 """,
                 encoding="utf-8",
             )
-            (run_dir / "eval_report.json").write_text(
-                json.dumps(
-                    {
-                        "run_dir": str(run_dir.resolve()),
-                        "stage_target": "p680",
-                        "stages": {
-                            "image": {
-                                "passed": False,
-                                "details": {
-                                    "image_regeneration_plan": [
-                                        {
-                                            "output": "assets/scenes/bad_scene.png",
-                                            "action": "regenerate_p600_scene",
-                                        }
-                                    ]
-                                },
-                            }
-                        },
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
 
             result = image_gen_app._delete_existing_images_for_image_resume(run_dir)
 
             self.assertTrue(output.is_symlink())
-            self.assertEqual(upload.read_bytes(), PNG_BYTES)
+            self.assertEqual(upload.read_bytes(), b"user-upload")
         self.assertEqual(result["deletedCount"], 0)
         self.assertTrue(any("symlink" in error for error in result["errors"]))
 
@@ -10281,29 +8536,6 @@ bad scene
 """,
                 encoding="utf-8",
             )
-            (run_dir / "eval_report.json").write_text(
-                json.dumps(
-                    {
-                        "run_dir": str(run_dir.resolve()),
-                        "stage_target": "p680",
-                        "stages": {
-                            "image": {
-                                "passed": False,
-                                "details": {
-                                    "image_regeneration_plan": [
-                                        {
-                                            "output": "assets/scenes/../uploads/user.png",
-                                            "action": "regenerate_p600_scene",
-                                        }
-                                    ]
-                                },
-                            }
-                        },
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
 
             result = image_gen_app._delete_existing_images_for_image_resume(run_dir)
 
@@ -10319,7 +8551,7 @@ bad scene
             run_dir.mkdir()
             outside.mkdir()
             outside_image = outside / "bad_scene.png"
-            outside_image.write_bytes(PNG_BYTES)
+            outside_image.write_bytes(b"outside-image")
             assets_dir = run_dir / "assets"
             assets_dir.mkdir()
             (assets_dir / "scenes").symlink_to(outside, target_is_directory=True)
@@ -10337,33 +8569,10 @@ bad scene
 """,
                 encoding="utf-8",
             )
-            (run_dir / "eval_report.json").write_text(
-                json.dumps(
-                    {
-                        "run_dir": str(run_dir.resolve()),
-                        "stage_target": "p680",
-                        "stages": {
-                            "image": {
-                                "passed": False,
-                                "details": {
-                                    "image_regeneration_plan": [
-                                        {
-                                            "output": "assets/scenes/bad_scene.png",
-                                            "action": "regenerate_p600_scene",
-                                        }
-                                    ]
-                                },
-                            }
-                        },
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
 
             result = image_gen_app._delete_existing_images_for_image_resume(run_dir)
 
-            self.assertEqual(outside_image.read_bytes(), PNG_BYTES)
+            self.assertEqual(outside_image.read_bytes(), b"outside-image")
         self.assertEqual(result["deletedCount"], 0)
         self.assertTrue(any("unsafe" in error for error in result["errors"]))
 
@@ -10400,32 +8609,6 @@ claimed upload
 dependent scene
 ```
 """,
-                encoding="utf-8",
-            )
-            (run_dir / "eval_report.json").write_text(
-                json.dumps(
-                    {
-                        "run_dir": str(run_dir.resolve()),
-                        "stage_target": "p680",
-                        "stages": {
-                            "image": {
-                                "passed": False,
-                                "details": {
-                                    "image_regeneration_plan": [
-                                        {
-                                            "output": "assets/scenes/dependent_scene.png",
-                                            "action": "regenerate_p500_reference_first",
-                                            "vector_like_references": [
-                                                "assets/uploads/user.png"
-                                            ],
-                                        }
-                                    ]
-                                },
-                            }
-                        },
-                    }
-                )
-                + "\n",
                 encoding="utf-8",
             )
 
@@ -11358,7 +9541,7 @@ dependent scene
             run_dir = Path(tmp) / "output" / "sample_run"
             destination = run_dir / "assets" / "objects" / "stale.png"
             destination.parent.mkdir(parents=True)
-            destination.write_bytes(b"stale-but-reviewable")
+            destination.write_bytes(b"stale-output")
 
             class FailingClient:
                 def __init__(self, **_kwargs):
@@ -11397,7 +9580,7 @@ dependent scene
 
             preserved = destination.read_bytes()
 
-        self.assertEqual(preserved, b"stale-but-reviewable")
+        self.assertEqual(preserved, b"stale-output")
 
     def test_create_flow_does_not_reuse_provenance_for_different_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -11548,57 +9731,6 @@ dependent scene
         self.assertEqual(destination_bytes, PNG_BYTES)
         self.assertIn('"reason": "destination already exists"', event_payload)
 
-    def test_create_flow_hands_off_when_asset_prompt_repair_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            run_dir = root / "output" / "sample_run"
-            run_dir.mkdir(parents=True)
-            calls: list[str] = []
-
-            async def fake_generate_request_outputs(*, run_dir: Path, kind: str) -> None:
-                calls.append(kind)
-
-            def fake_validate_p560_asset_quality(_run_dir: Path) -> None:
-                raise image_gen_app.P560AssetGateError(
-                    "p560 asset gate failed: low detail raster",
-                    failed_check_ids=("asset.visual_not_vector_like",),
-                    retryable_visual_quality=True,
-                )
-
-            async def fake_repair_bootstrap_asset_prompts(*_args: Any, **_kwargs: Any) -> None:
-                raise TimeoutError("repair timed out")
-
-            semantic_review = AsyncMock()
-            fixed_point = AsyncMock()
-            with (
-                patch("server.image_gen_app.ROOT", root),
-                patch("server.image_gen_app._generate_request_outputs", fake_generate_request_outputs),
-                patch("server.image_gen_app._generate_request_outputs_unlocked", fake_generate_request_outputs),
-                patch("server.image_gen_app._validate_p560_asset_quality", fake_validate_p560_asset_quality),
-                patch("server.image_gen_app._repair_bootstrap_asset_prompts", fake_repair_bootstrap_asset_prompts),
-                patch(
-                    "server.image_gen_app._run_pre_asset_semantic_fixed_point",
-                    fixed_point,
-                ),
-                patch("server.image_gen_app._run_semantic_review", semantic_review),
-                patch("server.image_gen_app._validate_pre_asset_provider_gate", Mock()),
-                patch("server.image_gen_app._validate_p650_run"),
-            ):
-                result = asyncio.run(image_gen_app._generate_create_images("job-1", run_id="sample_run"))
-
-            state = image_gen_app.parse_state_file(run_dir / "state.txt")
-            event_payload = (run_dir / "logs" / "app_server" / "events.jsonl").read_text(encoding="utf-8")
-
-        self.assertFalse(result)
-        self.assertEqual(calls, ["asset"])
-        fixed_point.assert_awaited_once_with("job-1", run_dir=run_dir.resolve())
-        semantic_review.assert_not_awaited()
-        self.assertEqual(state["review.asset_visual_gate.status"], "needs_frontend_review")
-        self.assertEqual(state["review.asset_visual_gate.repair.status"], "failed")
-        self.assertEqual(state["slot.p570.status"], "awaiting_approval")
-        self.assertEqual(state["slot.p680.status"], "pending")
-        self.assertIn('"operation": "prompt_repair"', event_payload)
-        self.assertIn('"status": "failed"', event_payload)
 
     def test_request_generation_group_cancels_sibling_items_after_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -12042,7 +10174,7 @@ good prompt
         self.assertEqual(request_after, request_before)
         self.assertEqual(snapshot_after, snapshot_before)
 
-    def test_create_video_prompts_saves_review_design_and_request_file(self) -> None:
+    def test_create_video_prompts_saves_design_and_request_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = write_valid_p650_artifacts(root, "sample_run")
@@ -12119,14 +10251,8 @@ good prompt
             REVIEWABLE_VIDEO_PROMPT,
         )
         self.assertIn("review.frontend.video.status=saved_for_video_prompt", state)
-        self.assertIn("slot.p830.status=in_progress", state)
-        self.assertIn("stage.video_generation.status=in_progress", state)
-        self.assertIn("review.video_prompt.status=pending", state)
-        self.assertIn("gate.video_prompt_review=required", state)
-        self.assertIn(
-            "review.video_prompt.item.scene10_cut1.status=pending",
-            state,
-        )
+        self.assertIn("slot.p830.status=done", state)
+        self.assertIn("stage.video_generation.status=ready", state)
 
     def test_create_video_prompts_rejects_unknown_manifest_cut_without_advancing_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -12161,7 +10287,7 @@ good prompt
         self.assertFalse(video_requests_exists)
         self.assertNotIn("slot.p830.status=awaiting_approval", state)
 
-    def test_create_video_prompts_rejects_unsupported_kling_auxiliary_references_before_approval(self) -> None:
+    def test_create_video_prompts_rejects_unsupported_kling_auxiliary_references_before_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = write_valid_p650_artifacts(root, "sample_run")
@@ -12199,8 +10325,7 @@ good prompt
         self.assertEqual(response.status_code, 400)
         self.assertIn("reference image count 1", response.text)
         self.assertIn("outside the kling_3_0_omni image_to_video limit 0-0", response.text)
-        self.assertNotIn("review.video_prompt.item.scene10_cut1.status=approved", state)
-        self.video_semantic_review_mock.assert_not_awaited()
+        self.assertNotIn("video_generation_requests.md", state)
 
     def test_create_video_prompts_partial_update_preserves_existing_video_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -12288,118 +10413,7 @@ keep existing request
         self.assertNotIn("last_frame", video_generation)
         self.assertEqual(video_generation["api_prompt_payload"], recompiled)
 
-    def test_create_video_prompts_does_not_approve_when_video_semantic_review_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            run_dir = write_valid_p650_artifacts(root, "sample_run")
-            (run_dir / "assets" / "scenes").mkdir(parents=True, exist_ok=True)
-            (run_dir / "assets" / "scenes" / "scene10_cut1.png").write_bytes(PNG_BYTES)
-            self.video_semantic_review_mock.side_effect = ValueError("semantic rejection")
 
-            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with patch("server.image_gen_app.ROOT", root):
-                    with TestClient(app) as client:
-                        response = client.post(
-                            "/api/image-gen/video-prompts/create",
-                            json={
-                                "run_id": "sample_run",
-                                "approve_for_generation": True,
-                                "items": [
-                                    {
-                                        "item_id": "scene10_cut1",
-                                        "kind": "scene",
-                                        "output": "assets/scenes/scene10_cut1.png",
-                                        "video_prompt": "主人公が扉の手前で止まる",
-                                        "video_first_reference": "assets/scenes/scene10_cut1.png",
-                                    }
-                                ],
-                            },
-                        )
-
-            state = (run_dir / "state.txt").read_text(encoding="utf-8")
-
-        self.assertEqual(response.status_code, 400)
-        self.video_semantic_review_mock.assert_awaited_once()
-        self.assertIn("review.video_prompt.item.scene10_cut1.status=pending", state)
-        self.assertNotIn("review.video_prompt.item.scene10_cut1.status=approved", state)
-
-    def test_create_video_prompts_serializes_materialization_review_and_approval_per_run(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            run_dir = write_valid_p650_artifacts(root, "sample_run")
-            active_reviews = 0
-            peak_reviews = 0
-
-            async def controlled_semantic_review(*, run_dir: Path) -> None:
-                nonlocal active_reviews, peak_reviews
-                active_reviews += 1
-                peak_reviews = max(peak_reviews, active_reviews)
-                try:
-                    await asyncio.sleep(0.05)
-                finally:
-                    active_reviews -= 1
-
-            self.video_semantic_review_mock.side_effect = controlled_semantic_review
-            request_a = image_gen_app.VideoPromptCreateRequest(
-                run_id="sample_run",
-                approve_for_generation=True,
-                items=[
-                    image_gen_app.FrontendReviewItem(
-                        item_id="scene10_cut1",
-                        kind="scene",
-                        video_prompt="主人公が左へ一歩進む",
-                        video_first_reference="assets/characters/hero.png",
-                    )
-                ],
-            )
-            request_b = image_gen_app.VideoPromptCreateRequest(
-                run_id="sample_run",
-                approve_for_generation=True,
-                items=[
-                    image_gen_app.FrontendReviewItem(
-                        item_id="scene10_cut1",
-                        kind="scene",
-                        video_prompt="主人公が右へ二歩進む",
-                        video_first_reference="assets/characters/hero.png",
-                    )
-                ],
-            )
-
-            async def run_concurrently() -> list[Any]:
-                first = asyncio.create_task(
-                    image_gen_app.api_create_video_prompts(request_a)
-                )
-                await asyncio.sleep(0)
-                second = asyncio.create_task(
-                    image_gen_app.api_create_video_prompts(request_b)
-                )
-                return list(
-                    await asyncio.gather(first, second, return_exceptions=True)
-                )
-
-            with patch("server.image_gen_app.ROOT", root):
-                results = asyncio.run(run_concurrently())
-
-            _path, _text, manifest = image_gen_app._read_manifest_data(run_dir)
-            generation = manifest["scenes"][0]["cuts"][0]["video_generation"]
-            current_binding = image_gen_app._reviewed_video_request_binding(
-                run_dir, "scene10_cut1"
-            )
-            state = image_gen_app.parse_state_file(run_dir / "state.txt")
-            prefix = image_gen_app._video_prompt_approval_state_prefix(
-                "scene10_cut1"
-            )
-
-        self.assertEqual(peak_reviews, 1)
-        self.assertTrue(all(isinstance(result, dict) for result in results), results)
-        self.assertEqual(
-            generation["prompt_authoring_source"], "主人公が右へ二歩進む"
-        )
-        self.assertEqual(
-            state[f"{prefix}.request_section_sha256"],
-            current_binding["request_section_sha256"],
-        )
-        self.assertEqual(state[f"{prefix}.status"], "approved")
 
     def test_create_video_prompts_rejects_markdown_code_fence_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -12825,52 +10839,6 @@ keep existing request
         )
         self.assertIsNone(listed_candidate)
 
-    def test_video_generate_rejects_exact_but_pending_materialization(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            run_dir = write_valid_p650_artifacts(root, "sample_run")
-            mark_manifest_narration_ready(run_dir)
-
-            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with (
-                    patch("server.image_gen_app.ROOT", root),
-                    patch(
-                        "server.image_gen_app._require_narration_ready_for_video",
-                        return_value={"ready": True},
-                    ),
-                    patch("server.image_gen_app._generate_video_candidates") as generate,
-                ):
-                    with TestClient(app) as client:
-                        created = client.post(
-                            "/api/image-gen/video-prompts/create",
-                            json={
-                                "run_id": "sample_run",
-                                "items": [
-                                    {
-                                        "item_id": "scene10_cut1",
-                                        "kind": "scene",
-                                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
-                                        "video_first_reference": "assets/characters/hero.png",
-                                    }
-                                ],
-                            },
-                        )
-                        response = client.post(
-                            "/api/image-gen/video-generate",
-                            json={
-                                "run_id": "sample_run",
-                                "item_id": "scene10_cut1",
-                                "prompt": REVIEWABLE_VIDEO_PROMPT,
-                                "first_reference": "assets/characters/hero.png",
-                                "candidate_count": 1,
-                            },
-                        )
-
-        self.assertEqual(created.status_code, 200)
-        self.assertFalse(created.json()["approvedForGeneration"])
-        self.assertEqual(response.status_code, 409)
-        self.assertIn("not approved", response.text)
-        generate.assert_not_called()
 
     def test_video_generate_rejects_prompt_that_differs_from_materialized_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -13389,59 +11357,6 @@ keep existing request
 
             generate.assert_not_called()
 
-    def test_video_generate_rejects_review_artifact_prompt_tampering(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            run_dir = write_valid_p650_artifacts(root, "sample_run")
-            mark_manifest_narration_ready(run_dir)
-
-            with patch.dict(os.environ, {"TOC_SERVER_AUTH_DISABLED": "1"}):
-                with (
-                    patch("server.image_gen_app.ROOT", root),
-                    patch("server.image_gen_app._require_narration_ready_for_video", return_value={"ready": True}),
-                    patch("server.image_gen_app._generate_video_candidates") as generate,
-                ):
-                    with TestClient(app) as client:
-                        created = client.post(
-                            "/api/image-gen/video-prompts/create",
-                            json={
-                                "run_id": "sample_run",
-                                "approve_for_generation": True,
-                                "items": [
-                                    {
-                                        "item_id": "scene10_cut1",
-                                        "kind": "scene",
-                                        "video_prompt": REVIEWABLE_VIDEO_PROMPT,
-                                        "video_first_reference": "assets/characters/hero.png",
-                                    }
-                                ],
-                            },
-                        )
-                        request_path = run_dir / "video_generation_requests.md"
-                        request_text = request_path.read_text(encoding="utf-8")
-                        request_path.write_text(
-                            request_text.replace(
-                                "[主動作]",
-                                "[主動作]\n未承認の別動作。",
-                                1,
-                            ),
-                            encoding="utf-8",
-                        )
-                        response = client.post(
-                            "/api/image-gen/video-generate",
-                            json={
-                                "run_id": "sample_run",
-                                "item_id": "scene10_cut1",
-                                "prompt": REVIEWABLE_VIDEO_PROMPT,
-                                "first_reference": "assets/characters/hero.png",
-                                "candidate_count": 1,
-                            },
-                        )
-
-        self.assertEqual(created.status_code, 200)
-        self.assertEqual(response.status_code, 409)
-        self.assertIn("review", response.text.lower())
-        generate.assert_not_called()
 
     def test_video_generate_rejects_missing_narration_ready_before_provider_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -13470,7 +11385,7 @@ keep existing request
                         )
 
         self.assertEqual(response.status_code, 409)
-        self.assertIn("requires audio files or silent approvals for all cuts", response.text)
+        self.assertIn("requires audio files or intentional silence for all cuts", response.text)
 
     def test_video_generate_rejects_invalid_reference_before_provider_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -13550,7 +11465,7 @@ scenes:
         self.assertEqual(payload["items"][0]["videoPrompt"], "slow move")
         self.assertEqual(payload["items"][0]["videoQuality"], "720p")
 
-    def test_narration_drafts_create_preserves_existing_review_without_replace(self) -> None:
+    def test_narration_drafts_create_preserves_existing_narration_without_replace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = write_valid_p680_artifacts(root, "sample_run")
@@ -13560,7 +11475,7 @@ scenes:
             first_cut = data["scenes"][0]["cuts"][0]
             first_cut["audio"] = {
                 "narration": {
-                    "status": "review_pending",
+                    "status": "draft",
                     "text": "既存レビュー中の文面",
                     "tts_text": "既存レビュー中の文面。",
                     "output": "assets/audio/scene10_cut1/custom.mp3",
@@ -13630,7 +11545,6 @@ scenes:
         self.assertEqual(narration["text_draft"], "")
         self.assertEqual(narration["elevenlabs_prompt"]["spoken_body"], "")
         self.assertEqual(narration["elevenlabs_prompt"]["materialized"], "")
-        self.assertEqual(narration["review"]["status"], "")
         self.assertIn("runtime.stage=narration_contract_ready_p700_text_missing", state_text)
         self.assertIn("slot.p720.status=pending", state_text)
 
@@ -13643,7 +11557,7 @@ scenes:
             data = yaml.safe_load(image_gen_app._extract_manifest_yaml_text(original_text)) or {}
             data["scenes"][0]["cuts"][0]["audio"] = {
                 "narration": {
-                    "status": "review_pending",
+                    "status": "draft",
                     "text": "古い文面",
                     "tts_text": "古い文面。",
                 }
@@ -13670,7 +11584,7 @@ scenes:
         self.assertEqual(cuts[0]["audio"]["narration"]["text"], "")
         self.assertEqual(cuts[0]["audio"]["narration"]["tts_text"], "")
 
-    def test_narration_generate_creates_unapproved_candidate_without_duration_sync(self) -> None:
+    def test_narration_generate_creates_candidate_without_duration_sync(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run_dir = write_valid_p650_artifacts(root, "sample_run")
@@ -13736,9 +11650,9 @@ scenes:
         self.assertEqual(response.json()["item"]["status"], "candidate")
         self.assertEqual(cut["audio"]["narration"]["text"], "読み上げ本文")
         self.assertEqual(cut["audio"]["narration"]["tts_text"], "読み上げ本文。")
-        self.assertEqual(cut["audio"]["narration"]["output"], "")
-        self.assertEqual(cut["audio"]["narration"]["status"], "candidate")
-        self.assertFalse(cut["audio"]["narration"]["review"]["human_review_ok"])
+        candidate_output = cut["audio"]["narration"]["output"]
+        self.assertTrue(candidate_output.startswith("assets/audio/candidates/"))
+        self.assertEqual(cut["audio"]["narration"]["status"], "audio_ready")
         self.assertNotIn("video_generation", cut)
 
     def test_video_generate_uses_narration_duration_as_minimum(self) -> None:
@@ -14136,10 +12050,9 @@ scenes:
         self.assertEqual(updated_image_generation["first_frame_visual_plan"]["scene_material_pack"]["light_source"], "細い朝日")
         self.assertEqual(updated_snapshot.items[0].prompt, updated_image_generation["api_prompt_payload"]["prompt"])
         self.assertNotEqual(updated_snapshot.items[0].prompt, payload["prompt"])
-        self.assertEqual(recompile_state["runtime.stage"], "prompt_recompiled_awaiting_semantic_review")
-        self.assertEqual(recompile_state["review.image_prompt.request_freeze.status"], "draft")
+        self.assertEqual(recompile_state["runtime.stage"], "prompt_recompiled")
+        self.assertEqual(recompile_state["generation.image_prompt.request_freeze.status"], "draft")
         self.assertEqual(recompile_state["slot.p650.status"], "pending")
-        self.assertEqual(recompile_state["review.semantic.image_prompt.status"], "pending")
         self.assertEqual(recompile_state["slot.p680.status"], "pending")
         self.assertEqual(failed_response.status_code, 400)
         self.assertEqual(after_failed_recompile, before_failed_recompile)
@@ -14655,7 +12568,7 @@ scene two
             original_two = output_two.read_bytes()
             state_file = run_dir / "state.txt"
             state_file.write_text(
-                "slot.p650.status=done\nslot.p680.status=awaiting_approval\n",
+                "slot.p650.status=done\nslot.p680.status=done\n",
                 encoding="utf-8",
             )
             original_state = state_file.read_bytes()
@@ -14902,13 +12815,12 @@ scene two
                     (run_dir / "state.txt").write_text(
                         "\n".join(
                             (
-                                "review.image_prompt.request_freeze.status=frozen",
-                                f"review.image_prompt.request_freeze.request_revision={item.request_revision}",
+                                "generation.image_prompt.request_freeze.status=frozen",
+                                f"generation.image_prompt.request_freeze.request_revision={item.request_revision}",
                                 "slot.p650.status=done",
                                 "slot.p660.status=done",
                                 "slot.p670.status=skipped",
-                                "slot.p680.status=awaiting_approval",
-                                "review.image.status=pending",
+                                "slot.p680.status=done",
                                 "image_generation.status=completed",
                             )
                         )
@@ -14947,22 +12859,18 @@ scene two
                         kind,
                     )
                     self.assertEqual(
-                        state["review.image_prompt.request_freeze.status"],
+                        state["generation.image_prompt.request_freeze.status"],
                         "draft",
                     )
                     self.assertEqual(state["status"], "P650")
                     self.assertEqual(
-                        state["review.image_prompt.request_freeze.invalidated_by"],
+                        state["generation.image_prompt.request_freeze.invalidated_by"],
                         "candidate_insertion",
                     )
                     self.assertEqual(state["slot.p650.status"], "pending")
                     self.assertEqual(state["slot.p660.status"], "pending")
                     self.assertEqual(state["slot.p670.status"], "pending")
                     self.assertEqual(state["slot.p680.status"], "pending")
-                    self.assertEqual(
-                        state["review.semantic.create_scene_media_generated"],
-                        "false",
-                    )
                     self.assertEqual(
                         state["image_generation.status"],
                         "not_started",
@@ -15177,7 +13085,7 @@ scene two
         with tempfile.TemporaryDirectory() as tmp:
             asyncio.run(run_case(Path(tmp)))
 
-    def test_p650_preflight_generation_and_review_handoff_share_revision_lock(self) -> None:
+    def test_p650_preflight_generation_and_completion_share_revision_lock(self) -> None:
         async def run_case(run_dir: Path) -> list[str]:
             order: list[str] = []
             validation_completed = asyncio.Event()
@@ -15204,10 +13112,10 @@ scene two
                 self.assertFalse(prompt_edit_entered.is_set())
                 await release_generation.wait()
 
-            def fake_mark_review_ready(run_id: str) -> None:
+            def fake_mark_complete(run_id: str) -> None:
                 self.assertEqual(run_id, "sample_run")
                 self.assertFalse(prompt_edit_entered.is_set())
-                order.append("review_handoff")
+                order.append("generation_complete")
 
             async def edit_prompt_snapshot() -> None:
                 await validation_completed.wait()
@@ -15221,7 +13129,7 @@ scene two
                 patch("server.image_gen_app._generate_request_outputs_unlocked", fake_generate_unlocked),
                 patch("server.image_gen_app._validate_generated_outputs", Mock()),
                 patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
-                patch("server.image_gen_app._mark_image_generation_review_ready", fake_mark_review_ready),
+                patch("server.image_gen_app._mark_image_generation_review_ready", fake_mark_complete),
             ):
                 generation = asyncio.create_task(
                     image_gen_app._generate_scene_outputs_after_p650_preflight(
@@ -15238,110 +13146,15 @@ scene two
             return order
 
         with tempfile.TemporaryDirectory() as tmp:
-            order = asyncio.run(run_case(Path(tmp)))
+            root = Path(tmp)
+            run_dir = write_valid_p650_artifacts(root, "sample_run")
+            order = asyncio.run(run_case(run_dir))
 
         self.assertEqual(
             order,
-            ["validate", "job_state", "provider_submission", "validate", "review_handoff", "prompt_edit"],
+            ["validate", "job_state", "provider_submission", "validate", "generation_complete", "prompt_edit"],
         )
 
-    def test_image_prompt_shard_passed_status_with_blocked_entries_fails_closed(self) -> None:
-        async def fake_turn_until_completed(_client: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], bool]:
-            report_path = Path(kwargs["report_path"])
-            suffix = ".report.md"
-            self.assertTrue(report_path.name.endswith(suffix))
-            scope_path = report_path.with_name(
-                report_path.name[: -len(suffix)] + ".scope.json"
-            )
-            scope = json.loads(scope_path.read_text(encoding="utf-8"))
-            input_digest = str(scope["semantic_review_input_digest"])
-            report_path.write_text(
-                "\n".join(
-                    [
-                        "status: passed",
-                        f"semantic_review_input_digest: {input_digest}",
-                        "reviewed_entries: [scene01_cut01, scene01_composite]",
-                        "blocked_entries: [scene01_cut01]",
-                        "findings: [required drawable evidence is absent]",
-                        "failed_selectors: [scene01_cut01]",
-                        "reason_keys: [api_prompt_drawable_dependency_missing]",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            return [], False
-
-        class FakeClient:
-            async def start_thread(self, **_kwargs: Any) -> str:
-                return "thread-1"
-
-            async def stop(self) -> None:
-                return None
-
-        with tempfile.TemporaryDirectory() as tmp:
-            run_dir = Path(tmp).resolve()
-            for source_name in ("story.md", "script.md"):
-                (run_dir / source_name).write_text(f"# {source_name}\n", encoding="utf-8")
-            (run_dir / "video_manifest.md").write_text(
-                "# video_manifest.md\n\n```yaml\nscenes: []\n```\n",
-                encoding="utf-8",
-            )
-            builder_path = Path(__file__).resolve().parents[1] / "scripts" / "build-semantic-review-pack.py"
-            spec = importlib.util.spec_from_file_location(
-                "build_semantic_review_pack_for_blocked_shard_test",
-                builder_path,
-            )
-            self.assertIsNotNone(spec)
-            self.assertIsNotNone(spec.loader if spec is not None else None)
-            assert spec is not None and spec.loader is not None
-            builder = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(builder)
-            entries = [
-                {"selector": "scene01_cut01", "scene_id": "01", "review_scope": "all_entries"},
-                {"selector": "scene01_composite", "scene_id": "01", "review_scope": "scene_composite"},
-            ]
-            with patch.object(builder, "collect_entries", return_value=entries):
-                builder.build_pack(run_dir, "image_prompt")
-            relpaths = image_gen_app.semantic_review_relpaths("image_prompt")
-            canonical_scope = run_dir / relpaths["scope"]
-            canonical_report = run_dir / relpaths["report"]
-            canonical_scope_payload = json.loads(canonical_scope.read_text(encoding="utf-8"))
-            shard = canonical_scope_payload["shards"][0]
-            with (
-                patch("server.image_gen_app.create_codex_app_server_client", return_value=FakeClient()),
-                patch(
-                    "server.image_gen_app._run_turn_until_semantic_artifact_completed",
-                    fake_turn_until_completed,
-                ),
-            ):
-                result = asyncio.run(
-                    image_gen_app._run_image_prompt_scene_shard_review(
-                        "job-1",
-                        run_dir=run_dir,
-                        shard_dir=run_dir / "shards",
-                        shard=shard,
-                        shard_index=1,
-                        total_shards=1,
-                        collection_sections={
-                            "scene01_cut01": "## scene01_cut01\n",
-                            "scene01_composite": "## scene01_composite\n",
-                        },
-                        canonical_scope_path=canonical_scope,
-                        canonical_report_path=canonical_report,
-                        attempt=1,
-                        max_attempts=1,
-                        final_attempt=True,
-                        semaphore=asyncio.Semaphore(1),
-                        transport_attempt=1,
-                        transport_max_attempts=1,
-                    )
-                )
-
-        self.assertEqual(result["status"], "transport_failed")
-        self.assertEqual(result["blocked_entries"], ["scene01_cut01", "scene01_composite"])
-        self.assertEqual(result["transport_error_kind"], "output_contract_failed")
-        self.assertIn("image_prompt_shard_transport_failed", result["reason_keys"])
 
     def test_p680_generated_output_rejects_v2_snapshot_without_strict_provenance(self) -> None:
         request_text = """# Image Generation Requests
@@ -15538,674 +13351,10 @@ scene two
         self.assertIn("copy failed", event_lines)
         self.assertNotIn('"status": "completed"', event_lines)
 
-    def test_pre_asset_semantic_fixed_point_returns_to_earliest_stale_stage(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            run_dir = Path(tmp)
-            passed = {"research", "story"}
-            calls: list[str] = []
-            scene_detail_calls = 0
 
-            def is_current(_run_dir: Path, stage: str) -> bool:
-                return stage in passed
 
-            async def review(
-                _job_id: str,
-                *,
-                run_dir: Path,
-                stage: str,
-            ) -> str | None:
-                nonlocal scene_detail_calls
-                calls.append(stage)
-                passed.add(stage)
-                if stage == "scene_detail":
-                    scene_detail_calls += 1
-                    if scene_detail_calls == 1:
-                        passed.discard("scene_set")
-                return None
 
-            with (
-                patch(
-                    "server.image_gen_app._semantic_review_stage_is_current_passed",
-                    side_effect=is_current,
-                    create=True,
-                ),
-                patch(
-                    "server.image_gen_app._run_semantic_review_for_media_generation",
-                    side_effect=review,
-                ),
-            ):
-                asyncio.run(
-                    image_gen_app._run_pre_asset_semantic_fixed_point(
-                        "job-1",
-                        run_dir=run_dir,
-                    )
-                )
 
-        self.assertEqual(
-            calls,
-            [
-                "research",
-                "story",
-                "scene_set",
-                "scene_detail",
-                "scene_set",
-                "cut_blueprint",
-                "asset_plan",
-            ],
-        )
-
-    def test_non_image_semantic_repair_reconciles_dependencies_in_safe_order(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            run_dir = Path(tmp)
-            calls: list[str] = []
-            manifest_revision = 0
-            p400_reviewed_revision = -1
-            for relpath in (
-                "research.md",
-                "story.md",
-                "visual_value.md",
-                "script.md",
-                "video_manifest.md",
-                "asset_inventory.md",
-                "asset_plan.md",
-            ):
-                (run_dir / relpath).write_text(
-                    f"# {relpath}\n",
-                    encoding="utf-8",
-                )
-
-            class FakeFrontend:
-                @staticmethod
-                def _prepare_authoring_grounding(_run_dir: Path) -> None:
-                    calls.append("authoring_grounding")
-
-                @staticmethod
-                def _refresh_p400_review_artifacts(_run_dir: Path) -> None:
-                    nonlocal p400_reviewed_revision
-                    calls.append("p400_reviews")
-                    p400_reviewed_revision = manifest_revision
-
-                @staticmethod
-                def _require_fresh_p400_readiness(_run_dir: Path) -> None:
-                    calls.append("p400_gate")
-                    self.assertEqual(p400_reviewed_revision, manifest_revision)
-
-                @staticmethod
-                def prepare_grounding(
-                    _run_dir: Path,
-                    *,
-                    verify_p450: bool = True,
-                ) -> None:
-                    self.assertFalse(verify_p450)
-                    calls.append("downstream_grounding")
-
-                @staticmethod
-                def _refresh_downstream_review_artifacts(_run_dir: Path) -> None:
-                    calls.append("downstream_reviews")
-
-            def sync(
-                _run_dir: Path,
-                *,
-                precompiled_selectors: Iterable[str] | None = None,
-            ) -> None:
-                nonlocal manifest_revision
-                calls.append("request_sync")
-                self.assertEqual(list(precompiled_selectors or ()), ["scene01.cut01"])
-                calls.append("request_materialization")
-                self.assertEqual(p400_reviewed_revision, manifest_revision)
-                # generate-assets compiles the request revision back into the
-                # manifest, so the final P400 refresh must still happen.
-                manifest_revision += 1
-                calls.append("request_manifest_compiled")
-
-            def compile_prompts(_run_dir: Path) -> list[str]:
-                nonlocal manifest_revision
-                manifest_revision += 1
-                calls.append("prompt_compile")
-                return ["scene01.cut01"]
-
-            with (
-                patch(
-                    "server.image_gen_app._load_frontend_review_runner",
-                    return_value=FakeFrontend,
-                    create=True,
-                ),
-                patch(
-                    "server.image_gen_app._reconcile_semantic_repair_authoring_projections",
-                    side_effect=lambda _run_dir: calls.append(
-                        "authoring_projection"
-                    ),
-                ),
-                patch(
-                    "server.image_gen_app._synchronize_image_prompt_repair_outputs",
-                    side_effect=sync,
-                ),
-                patch(
-                    "server.image_gen_app._recompile_image_prompt_payloads_from_plans",
-                    side_effect=compile_prompts,
-                ),
-            ):
-                asyncio.run(
-                    image_gen_app._reconcile_after_semantic_repair(
-                        run_dir,
-                        stage="scene_detail",
-                        changed_artifacts=["script.md", "video_manifest.md"],
-                    )
-                )
-
-            state = image_gen_app.parse_state_file(run_dir / "state.txt")
-
-        self.assertEqual(
-            calls,
-            [
-                "authoring_projection",
-                "prompt_compile",
-                "authoring_grounding",
-                "p400_reviews",
-                "p400_gate",
-                "request_sync",
-                "request_materialization",
-                "request_manifest_compiled",
-                "authoring_grounding",
-                "p400_reviews",
-                "p400_gate",
-                "downstream_grounding",
-                "downstream_reviews",
-                "p400_gate",
-            ],
-        )
-        self.assertEqual(
-            state["review.semantic.scene_detail.dependency_sync.status"],
-            "done",
-        )
-        self.assertEqual(state["slot.p650.status"], "pending")
-        self.assertEqual(state["slot.p680.status"], "pending")
-
-    def test_image_prompt_manifest_repair_reaches_upstream_fixed_point_before_asset_refresh(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            run_dir = write_valid_p650_artifacts(root, "sample_run")
-            (run_dir / "asset_inventory.md").write_text(
-                "# Asset Inventory\n\nhero\n",
-                encoding="utf-8",
-            )
-            (run_dir / "asset_plan.md").write_text(
-                "# Asset Plan\n\nhero\n",
-                encoding="utf-8",
-            )
-            asset_items = image_gen.load_request_items(run_dir, "asset")
-            asset_snapshot = materialize_request_snapshot(
-                run_dir,
-                kind="asset",
-                items=[
-                    {
-                        "item_id": item.id,
-                        "destination": item.output,
-                        "prompt": item.prompt,
-                        "prompt_policy_version": "asset_prompt_v1",
-                        "compiler_version": "test_fixture_v1",
-                        "source_digest": hashlib.sha256(
-                            f"{item.id}:asset".encode()
-                        ).hexdigest(),
-                        "references": list(item.references),
-                    }
-                    for item in asset_items
-                ],
-                source_artifact="asset_generation_requests.md",
-            )
-            write_request_snapshot_atomic(
-                run_dir / "asset_generation_request_snapshot.json",
-                asset_snapshot,
-                run_dir=run_dir,
-            )
-            for stage in ("scene_set", "scene_detail", "cut_blueprint"):
-                bind_semantic_review_to_sources(
-                    run_dir,
-                    stage,
-                    ["script.md", "video_manifest.md"],
-                )
-            bind_semantic_review_to_sources(
-                run_dir,
-                "asset_plan",
-                [
-                    "video_manifest.md",
-                    "asset_generation_requests.md",
-                    "asset_generation_request_snapshot.json",
-                ],
-            )
-            write_review_input_snapshot(
-                run_dir=run_dir,
-                stage="scene_set",
-                round_number=1,
-                snapshot=build_review_input_snapshot(
-                    run_dir=run_dir,
-                    stage="scene_set",
-                    round_number=1,
-                ),
-            )
-
-            manifest_path = run_dir / "video_manifest.md"
-            manifest_text = manifest_path.read_text(encoding="utf-8")
-            manifest_data = yaml.safe_load(
-                image_gen_app._extract_manifest_yaml_text(manifest_text)
-            )
-            manifest_data["image_prompt_producer_revision"] = "changed"
-            image_gen_app._write_manifest_data(
-                manifest_path,
-                manifest_text,
-                manifest_data,
-            )
-            self.assertTrue(
-                any(
-                    "stale review source sha256" in issue
-                    for issue in review_input_snapshot_issues(
-                        run_dir=run_dir,
-                        stage="scene_set",
-                        round_number=1,
-                    )
-                )
-            )
-            for stage in (
-                "scene_set",
-                "scene_detail",
-                "cut_blueprint",
-                "asset_plan",
-            ):
-                self.assertFalse(
-                    image_gen_app.check_semantic_review(run_dir, stage).passed
-                )
-
-            order: list[str] = []
-            stale_semantic_stages: list[str] = []
-            sync_count = 0
-
-            class FakeFrontend:
-                @staticmethod
-                def _prepare_authoring_grounding(_run_dir: Path) -> None:
-                    order.append("authoring_grounding")
-
-                @staticmethod
-                def _refresh_p400_review_artifacts(_run_dir: Path) -> None:
-                    order.append("p400_refresh")
-                    write_review_input_snapshot(
-                        run_dir=run_dir,
-                        stage="scene_set",
-                        round_number=1,
-                        snapshot=build_review_input_snapshot(
-                            run_dir=run_dir,
-                            stage="scene_set",
-                            round_number=1,
-                        ),
-                    )
-
-                @staticmethod
-                def _require_fresh_p400_readiness(_run_dir: Path) -> None:
-                    order.append("p400_gate")
-                    self.assertFalse(
-                        any(
-                            "stale review source sha256" in issue
-                            for issue in review_input_snapshot_issues(
-                                run_dir=run_dir,
-                                stage="scene_set",
-                                round_number=1,
-                            )
-                        ),
-                        review_input_snapshot_issues(
-                            run_dir=run_dir,
-                            stage="scene_set",
-                            round_number=1,
-                        ),
-                    )
-
-                @staticmethod
-                def prepare_grounding(
-                    _run_dir: Path,
-                    *,
-                    verify_p450: bool = True,
-                ) -> None:
-                    self.assertFalse(verify_p450)
-                    order.append("downstream_grounding")
-
-                @staticmethod
-                def _refresh_downstream_review_artifacts(
-                    _run_dir: Path,
-                ) -> None:
-                    order.append("downstream_reviews")
-
-            def synchronize(
-                _run_dir: Path,
-                *,
-                precompiled_selectors: Iterable[str] | None = None,
-            ) -> None:
-                nonlocal sync_count
-                self.assertIsNotNone(precompiled_selectors)
-                sync_count += 1
-                order.append(f"sync_{sync_count}")
-                image_gen_app.append_state_snapshot(
-                    run_dir / "state.txt",
-                    {
-                        "review.semantic.image_prompt.repair.asset_refresh_required": (
-                            "true" if sync_count == 1 else "false"
-                        )
-                    },
-                )
-
-            async def review_stage(
-                _job_id: str,
-                *,
-                run_dir: Path,
-                stage: str,
-            ) -> str | None:
-                if not image_gen_app.check_semantic_review(
-                    run_dir,
-                    stage,
-                ).passed:
-                    stale_semantic_stages.append(stage)
-                    refresh_existing_semantic_review_digest(run_dir, stage)
-                return None
-
-            def provider_gate(_run_dir: Path) -> None:
-                order.append("provider_gate")
-                self.assertFalse(
-                    any(
-                        "stale review source sha256" in issue
-                        for issue in review_input_snapshot_issues(
-                            run_dir=run_dir,
-                            stage="scene_set",
-                            round_number=1,
-                        )
-                    ),
-                    review_input_snapshot_issues(
-                        run_dir=run_dir,
-                        stage="scene_set",
-                        round_number=1,
-                    ),
-                )
-                for stage in image_gen_app.PRE_ASSET_SEMANTIC_STAGES:
-                    self.assertTrue(
-                        image_gen_app.check_semantic_review(
-                            run_dir,
-                            stage,
-                        ).passed,
-                        stage,
-                    )
-
-            async def refresh_assets(_run_dir: Path) -> None:
-                order.append("asset_provider")
-                self.assertIn("provider_gate", order)
-                image_gen_app.append_state_snapshot(
-                    run_dir / "state.txt",
-                    {
-                        "review.semantic.image_prompt.repair.asset_refresh_required": "false"
-                    },
-                )
-
-            with (
-                patch(
-                    "server.image_gen_app._load_frontend_review_runner",
-                    return_value=FakeFrontend,
-                ),
-                patch(
-                    "server.image_gen_app._reconcile_semantic_repair_authoring_projections",
-                    side_effect=lambda _run_dir: order.append(
-                        "authoring_projection"
-                    ),
-                ),
-                patch(
-                    "server.image_gen_app._synchronize_image_prompt_repair_outputs",
-                    side_effect=synchronize,
-                ),
-                patch(
-                    "server.image_gen_app._run_semantic_review_for_media_generation",
-                    side_effect=review_stage,
-                ),
-                patch(
-                    "server.image_gen_app._validate_pre_asset_provider_gate",
-                    side_effect=provider_gate,
-                ),
-                patch(
-                    "server.image_gen_app._refresh_image_prompt_repair_assets_if_required",
-                    side_effect=refresh_assets,
-                ),
-                patch(
-                    "server.image_gen_app._prepare_image_prompt_request_revision_for_review",
-                    return_value="review-revision",
-                ),
-            ):
-                asyncio.run(
-                    image_gen_app._reconcile_after_semantic_repair(
-                        run_dir,
-                        stage="image_prompt",
-                        changed_artifacts=["video_manifest.md"],
-                        job_id="job-1",
-                    )
-                )
-
-        self.assertEqual(
-            stale_semantic_stages,
-            ["scene_set", "scene_detail", "cut_blueprint", "asset_plan"],
-        )
-        self.assertLess(order.index("provider_gate"), order.index("asset_provider"))
-        self.assertLess(order.index("p400_refresh"), order.index("provider_gate"))
-
-    def test_p560_prompt_repair_rereviews_real_asset_snapshot_before_next_provider_call(
-        self,
-    ) -> None:
-        class StopAfterSecondAssetSubmission(RuntimeError):
-            pass
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            run_id = "sample_run"
-            run_dir = write_valid_p650_artifacts(root, run_id)
-            asset_items = image_gen.load_request_items(run_dir, "asset")
-            asset_snapshot = materialize_request_snapshot(
-                run_dir,
-                kind="asset",
-                items=[
-                    {
-                        "item_id": item.id,
-                        "destination": item.output,
-                        "prompt": item.prompt,
-                        "prompt_policy_version": "asset_prompt_v1",
-                        "compiler_version": "test_fixture_v1",
-                        "source_digest": hashlib.sha256(
-                            f"{item.id}:asset".encode()
-                        ).hexdigest(),
-                        "references": list(item.references),
-                    }
-                    for item in asset_items
-                ],
-                source_artifact="asset_generation_requests.md",
-            )
-            write_request_snapshot_atomic(
-                run_dir / "asset_generation_request_snapshot.json",
-                asset_snapshot,
-                run_dir=run_dir,
-            )
-            bind_semantic_review_to_sources(
-                run_dir,
-                "asset_plan",
-                [
-                    "asset_generation_requests.md",
-                    "asset_generation_request_snapshot.json",
-                ],
-            )
-            self.assertTrue(
-                image_gen_app.check_semantic_review(
-                    run_dir,
-                    "asset_plan",
-                ).passed
-            )
-
-            provider_calls = 0
-            provider_gate_calls = 0
-            stale_asset_plan_reviews = 0
-
-            async def generate_outputs(
-                *,
-                run_dir: Path,
-                kind: str,
-            ) -> None:
-                nonlocal provider_calls
-                if kind != "asset":
-                    raise AssertionError("scene provider must not be reached")
-                provider_calls += 1
-                self.assertTrue(
-                    image_gen_app.check_semantic_review(
-                        run_dir,
-                        "asset_plan",
-                    ).passed,
-                    "asset provider received a request with stale asset_plan evidence",
-                )
-                if provider_calls == 2:
-                    raise StopAfterSecondAssetSubmission
-
-            async def repair_prompts(
-                _job_id: str,
-                *,
-                run_dir: Path,
-                failure_detail: str,
-                attempt: int,
-            ) -> None:
-                del failure_detail, attempt
-                result = image_gen.update_request_prompts(
-                    run_dir,
-                    "asset",
-                    {
-                        "hero": (
-                            "修正版の実写映画調の人物参照。自然な肌、布、髪、"
-                            "立体的な映画照明を持つ。"
-                        )
-                    },
-                    allow_inline_prompt=True,
-                )
-                self.assertEqual(result["updated"], ["hero"])
-                self.assertFalse(
-                    image_gen_app.check_semantic_review(
-                        run_dir,
-                        "asset_plan",
-                    ).passed
-                )
-
-            async def review_stage(
-                _job_id: str,
-                *,
-                run_dir: Path,
-                stage: str,
-            ) -> str | None:
-                nonlocal stale_asset_plan_reviews
-                if not image_gen_app.check_semantic_review(
-                    run_dir,
-                    stage,
-                ).passed:
-                    if stage == "asset_plan":
-                        stale_asset_plan_reviews += 1
-                    refresh_existing_semantic_review_digest(run_dir, stage)
-                return None
-
-            def provider_gate(_run_dir: Path) -> None:
-                nonlocal provider_gate_calls
-                provider_gate_calls += 1
-                self.assertTrue(
-                    image_gen_app.check_semantic_review(
-                        run_dir,
-                        "asset_plan",
-                    ).passed
-                )
-
-            retryable_error = image_gen_app.P560AssetGateError(
-                "p560 asset gate failed: bootstrap asset is vector-like",
-                failed_check_ids=("asset.visual_not_vector_like",),
-                retryable_visual_quality=True,
-            )
-            with (
-                patch("server.image_gen_app.ROOT", root),
-                patch(
-                    "server.image_gen_app._generate_request_outputs",
-                    side_effect=generate_outputs,
-                ),
-                patch(
-                    "server.image_gen_app._run_semantic_review_for_media_generation",
-                    side_effect=review_stage,
-                ),
-                patch(
-                    "server.image_gen_app._validate_pre_asset_provider_gate",
-                    side_effect=provider_gate,
-                ),
-                patch(
-                    "server.image_gen_app._validate_p560_asset_quality",
-                    side_effect=retryable_error,
-                ),
-                patch(
-                    "server.image_gen_app._repair_bootstrap_asset_prompts",
-                    side_effect=repair_prompts,
-                ),
-                patch(
-                    "server.image_gen_app._remove_bootstrap_asset_outputs",
-                ),
-                patch(
-                    "server.image_gen_app._set_create_job",
-                    new=AsyncMock(),
-                ),
-            ):
-                try:
-                    asyncio.run(
-                        image_gen_app._generate_create_images(
-                            "job-1",
-                            run_id=run_id,
-                        )
-                    )
-                except StopAfterSecondAssetSubmission:
-                    pass
-                else:
-                    state = image_gen_app.parse_state_file(
-                        run_dir / "state.txt"
-                    )
-                    self.fail(
-                        "second provider submission was not reached: "
-                        f"provider_calls={provider_calls}, "
-                        f"repair_error={state.get('review.asset_visual_gate.repair.error')}"
-                    )
-
-        self.assertEqual(provider_calls, 2)
-        self.assertGreaterEqual(provider_gate_calls, 2)
-        self.assertEqual(stale_asset_plan_reviews, 1)
-
-    def test_pre_asset_provider_gate_blocks_asset_provider_submission(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            run_dir = Path(tmp)
-            generate_outputs = AsyncMock()
-
-            with (
-                patch("server.image_gen_app.safe_run_dir", return_value=run_dir),
-                patch(
-                    "server.image_gen_app._run_pre_asset_semantic_fixed_point",
-                    new=AsyncMock(),
-                    create=True,
-                ),
-                patch(
-                    "server.image_gen_app._validate_pre_asset_provider_gate",
-                    side_effect=RuntimeError("stale p400 review"),
-                    create=True,
-                ),
-                patch(
-                    "server.image_gen_app._generate_request_outputs",
-                    new=generate_outputs,
-                ),
-                patch("server.image_gen_app._set_create_job", new=AsyncMock()),
-            ):
-                with self.assertRaisesRegex(RuntimeError, "stale p400"):
-                    asyncio.run(
-                        image_gen_app._generate_create_images(
-                            "job-1",
-                            run_id="sample_run",
-                        )
-                    )
-
-        generate_outputs.assert_not_awaited()
 
 
 class FileTransactionStateBoundaryTests(unittest.TestCase):

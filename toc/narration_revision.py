@@ -270,7 +270,7 @@ def apply_authoring_update(
     if semantic_changed or tts_changed:
         _invalidate_audio(narration, current_tts_hash=new_tts_hash)
     elif previous_status in {"human_locked", "reviewed", "silent"} and normalized_status == "draft":
-        _clear_audio_selection(narration, reset_generation=False)
+        _clear_audio_selection(narration)
     return True
 
 
@@ -381,8 +381,11 @@ def record_audio_candidate_result(
     generation["status"] = "candidate"
     generation["generated_from_tts_hash"] = _text(snapshot.get("generated_from_tts_hash"))
     narration["generation"] = generation
-    if not current_audio_is_ready(narration):
-        selection = _dict(narration.get("audio_selection"))
+    selection = _dict(narration.get("audio_selection"))
+    selected_id = _text(selection.get("candidate_id")) or _text(
+        _dict(narration.get("audio_review")).get("approved_candidate_id")
+    )
+    if not selected_id:
         selection.update(
             {
                 "status": "selected",
@@ -465,23 +468,29 @@ def current_audio_candidate(narration: dict[str, Any]) -> dict[str, Any] | None:
 
     revision = _dict(narration.get("revision"))
     selection = _dict(narration.get("audio_selection"))
-    candidate_id = _text(selection.get("candidate_id"))
-    if not candidate_id:
-        candidate_id = _text(_dict(narration.get("audio_review")).get("approved_candidate_id"))
-    if not candidate_id:
-        candidate_id = _text(_dict(narration.get("generation")).get("candidate_id"))
-    candidate = _candidate_by_id(narration, candidate_id)
-    if candidate is None:
-        return None
-    if _text(candidate.get("status")) in {"failed", "rejected", "stale", "superseded", "generating"}:
-        return None
-    if _text(candidate.get("generated_from_text_hash")) != _text(revision.get("text_hash")):
-        return None
-    if _text(candidate.get("generated_from_tts_hash")) != _text(revision.get("tts_hash")):
-        return None
-    if not _text(candidate.get("output")):
-        return None
-    return candidate
+    candidate_ids = [
+        _text(selection.get("candidate_id")),
+        _text(_dict(narration.get("audio_review")).get("approved_candidate_id")),
+        _text(_dict(narration.get("generation")).get("candidate_id")),
+    ]
+    seen: set[str] = set()
+    for candidate_id in candidate_ids:
+        if not candidate_id or candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        candidate = _candidate_by_id(narration, candidate_id)
+        if candidate is None:
+            continue
+        if _text(candidate.get("status")) in {"failed", "rejected", "stale", "superseded", "generating"}:
+            continue
+        if _text(candidate.get("generated_from_text_hash")) != _text(revision.get("text_hash")):
+            continue
+        if _text(candidate.get("generated_from_tts_hash")) != _text(revision.get("tts_hash")):
+            continue
+        if not _text(candidate.get("output")):
+            continue
+        return candidate
+    return None
 
 
 def current_audio_is_ready(narration: dict[str, Any]) -> bool:
@@ -515,12 +524,6 @@ def current_audio_is_ready(narration: dict[str, Any]) -> bool:
     )
 
 
-def current_audio_is_human_approved(narration: dict[str, Any]) -> bool:
-    """Backward-compatible alias for the deterministic current-audio check."""
-
-    return current_audio_is_ready(narration)
-
-
 def narration_audio_set_hash(items: list[tuple[str, dict[str, Any]]]) -> str:
     """Hash the ordered, selected playback set for timeline consistency."""
 
@@ -534,9 +537,9 @@ def narration_audio_set_hash(items: list[tuple[str, dict[str, Any]]]) -> str:
         candidate = current_audio_candidate(narration)
         payload.append(
             {
-                "candidate_id": selected_id or _text((candidate or {}).get("candidate_id")),
+                "candidate_id": _text((candidate or {}).get("candidate_id")) or selected_id,
                 "duration_seconds": candidate.get("duration_seconds") if candidate else None,
-                "output": _text(narration.get("output")),
+                "output": _text(narration.get("output") or (candidate or {}).get("output")),
                 "output_sha256": _text(candidate.get("output_sha256")) if candidate else "",
                 "selector": selector,
                 "source_hash": _text(revision.get("source_hash")),

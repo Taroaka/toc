@@ -1,4 +1,5 @@
 # Asset plan template
+# p500: inventory/plan → request snapshot → generation → ordinary file/provenance checks
 asset_plan_metadata:
   topic: "string"
   source_story: "output/<topic>_<timestamp>/story.md"
@@ -6,148 +7,121 @@ asset_plan_metadata:
   created_at: "ISO8601"
   purpose: "reusable asset design before cut image generation"
 
-review_contract:
-  must_cover:
-    - "script.md の該当 scene/cut と矛盾しない"
-    - "この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still を網羅する"
-    - "再利用時の visual identity が固定できる"
-    - "character_reference は全身の front / side / back 3面図として設計する"
-  must_avoid:
-    - "provider 固有 prompt syntax"
-    - "story/script に無い新情報の追加"
-    - "p550 prompt に `物語「<topic>」の sceneXX` や `sceneXX_cutYY` のような制作管理メタを残す"
-  done_when:
-    - "human review が approved"
-    - "asset generation に必要な reference / view plan が揃う"
-
 assets:
   characters:
-    - asset_id: "protagonist"
-      asset_type: "character_reference"
-      source_script_selectors: ["scene1_cut1", "scene2_cut3"]
-      story_purpose: "主人公の基準参照"
+    - asset_id: "character_01"
+      asset_type: character_reference
+      source_script_selectors: ["scene_01_cut_01"]
+      story_purpose: "人物の基準参照"
       subject_contract:
-        identity_scope: "individual|ensemble"
+        identity_scope: individual|ensemble
         subject_count: 1
         member_ids: []
       appearance_contract:
-        social_position: "string"
-        occupation_or_role: "string"
-        occasion_or_state: "string"
-        silhouette: "string"
-        materials: "string"
-        condition: "string"
-        palette: "string"
+        social_position: ""
+        occupation_or_role: ""
+        occasion_or_state: ""
+        silhouette: ""
+        materials: ""
+        condition: ""
+        palette: ""
         must_avoid: []
       reuse_contract:
-        mode: "neutral_anchor|time_variant|state_variant"
+        mode: neutral_anchor|time_variant|state_variant
         time_of_day: ""
         derived_from_asset_id: ""
       visual_spec:
-        identity: ["string"]
-        fixed_details: ["string"]
-        must_avoid: ["string"]
+        identity: []
+        fixed_details: []
+        must_avoid: []
       generation_plan:
-        output_dir: "assets/characters"
-        required_views: ["front", "side", "back"]
-        view_requirements: "full-body, head-to-toe, front/side/back three-view reference"
-        execution_lane: "standard|bootstrap_builtin"
-        bootstrap_allowed: false
-        bootstrap_reason: "no_reference_seed|other"
+        output_dir: assets/characters
+        required_views: [front, side, back]
+        view_requirements: full-body head-to-toe
+        execution_lane: standard|bootstrap_builtin
         reference_inputs: []
         derived_from_asset_id: ""
-      creation_status: "planned|created|stale|missing"
+      creation_status: planned|created|stale|missing
       existing_outputs: []
-      review:
-        status: "pending|approved|changes_requested"
-        notes: ""
 
   objects:
-    - asset_id: "tamatebako"
-      asset_type: "object_reference"
-      source_script_selectors: ["scene14_cut1", "scene15_cut1"]
-      story_purpose: "禁忌の贈与"
+    - asset_id: "object_01"
+      asset_type: object_reference
+      source_script_selectors: ["scene_01_cut_01"]
+      story_purpose: ""
       reuse_contract:
-        mode: "neutral_anchor|time_variant|state_variant"
+        mode: neutral_anchor|time_variant|state_variant
         time_of_day: ""
         derived_from_asset_id: ""
       visual_spec:
-        identity: ["string"]
-        fixed_details: ["string"]
-        must_avoid: ["string"]
+        identity: []
+        fixed_details: []
+        must_avoid: []
       generation_plan:
-        output_dir: "assets/objects"
-        required_views: ["hero"]
-        execution_lane: "standard|bootstrap_builtin"
-        bootstrap_allowed: false
-        bootstrap_reason: "no_reference_seed|other"
+        output_dir: assets/objects
+        required_views: [hero]
+        execution_lane: standard|bootstrap_builtin
         reference_inputs: []
         derived_from_asset_id: ""
-      creation_status: "planned|created|stale|missing"
+      creation_status: planned|created|stale|missing
       existing_outputs: []
-      review:
-        status: "pending|approved|changes_requested"
-        notes: ""
 
   locations:
-    - asset_id: "sea_temple_interior"
-      asset_type: "location_anchor"
-      source_script_selectors: ["scene3.5_cut4", "scene6_cut2"]
-      story_purpose: "海底神殿の再利用アンカー"
+    - asset_id: "location_01"
+      asset_type: location_anchor
+      source_script_selectors: ["scene_01_cut_01"]
+      story_purpose: ""
       reuse_contract:
-        mode: "neutral_anchor|time_variant|state_variant"
+        mode: neutral_anchor|time_variant|state_variant
         time_of_day: ""
         derived_from_asset_id: ""
       visual_spec:
-        identity: ["string"]
-        fixed_details: ["string"]
-        must_avoid: ["string"]
+        identity: []
+        fixed_details: []
+        must_avoid: []
       generation_plan:
-        output_dir: "assets/locations"
-        required_views: ["hero"]
-        execution_lane: "standard|bootstrap_builtin"
-        bootstrap_allowed: false
-        bootstrap_reason: "no_reference_seed|other"
+        output_dir: assets/locations
+        required_views: [hero]
+        execution_lane: standard|bootstrap_builtin
         reference_inputs: []
         derived_from_asset_id: ""
-      creation_status: "planned|created|stale|missing"
+      creation_status: planned|created|stale|missing
       existing_outputs: []
-      review:
-        status: "pending|approved|changes_requested"
-        notes: ""
 
   reusable_stills:
-    - asset_id: "scene15_cut03_day_anchor"
-      asset_type: "reusable_still"
-      source_script_selectors: ["scene15_cut3"]
-      story_purpose: "昼夜切替の基準 still"
+    - asset_id: "still_01"
+      asset_type: reusable_still
+      source_script_selectors: ["scene_01_cut_01"]
+      story_purpose: ""
       visual_spec:
-        identity: ["string"]
-        fixed_details: ["string"]
-        must_avoid: ["string"]
+        identity: []
+        fixed_details: []
+        must_avoid: []
       generation_plan:
-        output_dir: "assets/scenes"
-        required_views: ["single"]
-        execution_lane: "standard|bootstrap_builtin"
-        bootstrap_allowed: false
-        bootstrap_reason: "no_reference_seed|other"
+        output_dir: assets/scenes
+        required_views: [single]
+        execution_lane: standard|bootstrap_builtin
         reference_inputs: []
         derived_from_asset_id: ""
-      creation_status: "planned|created|stale|missing"
+      creation_status: planned|created|stale|missing
       existing_outputs: []
-      review:
-        status: "pending|approved|changes_requested"
-        notes: ""
 
-# rule:
-# - source_script_selectors は「どこで使うか」
-# - generation_plan.reference_inputs は「何を参照して生成するか」
-# - reference_inputs を使うのは same character / same location / same camera 派生だけ
-# - character_reference は全身の front / side / back 3面図を基本にする
-# - image provider は常に codex_builtin_image（gpt-image-2 via Codex app-server）
-# - execution_lane は既定で standard。reference_inputs が空で、かつ bootstrap_allowed=true のときだけ bootstrap_builtin を使ってよい
-# - bootstrap_builtin という lane 名は互換のため維持するが、repo 全体では no-reference built-in image lane を意味する
-# - derived_from_asset_id がある asset は常に standard
-# - neutral_anchor の prompt に scene 固有の朝/昼/夕/夜、空、影、色温度を入れない
-# - time_variant は reuse_contract.time_of_day と reuse_contract.derived_from_asset_id を必須にする
-# - p550 の prompt 本文では `物語「<topic>」の sceneXX` / `sceneXX_cutYY` ではなく、具体的に見える人物・場所・道具・行為を書く
+asset_plan_validation:
+  source_selectors_resolved: false
+  asset_ids_unique: false
+  reference_paths_valid: false
+  variant_lineage_valid: false
+  prompts_drawable: false
+  request_snapshots_current: false
+  outputs_decodable: false
+  provenance_matched: false
+
+# Rules:
+# - source_script_selectors records usage; generation_plan.reference_inputs records generation inputs.
+# - reference_inputs is used only for same-identity/same-location/same-camera derivation.
+# - character references normally include full-body front/side/back views.
+# - provider is codex_builtin_image (gpt-image-2 via Codex app-server).
+# - bootstrap_builtin is the no-reference built-in lane; derived assets use standard.
+# - neutral_anchor does not include scene-specific time-of-day light; use an explicit time_variant instead.
+# - p550 prompt body uses visible people, places, objects, and actions, never scene/request metadata.
+

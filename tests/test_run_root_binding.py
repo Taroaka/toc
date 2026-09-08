@@ -15,9 +15,9 @@ from unittest.mock import patch
 from server import image_gen_app
 from toc.harness import append_state_snapshot, parse_state_file, write_json
 from toc.image_request_snapshot import (
+    load_request_snapshot,
     materialize_request_snapshot,
 )
-from toc import partial_media
 from toc.run_root_binding import (
     RunRootBindingError,
     RunFilePostAppendError,
@@ -27,6 +27,7 @@ from toc.run_root_binding import (
     current_run_root_binding,
     list_run_directory_entry_names,
     read_run_file_bytes,
+    run_file_entry_exists,
     run_file_append_transaction,
     require_bound_run_root,
     unlink_run_file,
@@ -332,7 +333,7 @@ class RunRootBindingTests(unittest.TestCase):
                 "replacement\n",
             )
 
-    def test_bound_partial_media_read_uses_retained_descriptor_during_swap_restore(
+    def test_bound_media_read_uses_retained_descriptor_during_swap_restore(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -415,11 +416,11 @@ class RunRootBindingTests(unittest.TestCase):
                         side_effect=swapping_require,
                     ),
                     patch(
-                        "toc.partial_media.os.open",
+                        "toc.run_root_binding.os.open",
                         side_effect=swapping_open,
                     ),
                 ):
-                    content = partial_media.read_run_relative_regular_file_bytes(
+                    content = read_run_file_bytes(
                         run_dir,
                         "logs/truth.json",
                     )
@@ -433,7 +434,7 @@ class RunRootBindingTests(unittest.TestCase):
                 "replacement",
             )
 
-    def test_bound_partial_media_destination_presence_ignores_replacement(
+    def test_bound_media_destination_presence_ignores_replacement(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -507,15 +508,13 @@ class RunRootBindingTests(unittest.TestCase):
                         side_effect=swapping_require,
                     ),
                     patch(
-                        "toc.partial_media.os.open",
+                        "toc.run_root_binding.os.open",
                         side_effect=swapping_open,
                     ),
                 ):
-                    exists = (
-                        partial_media.run_relative_entry_exists_no_follow(
-                            run_dir,
-                            "images/blocked.png",
-                        )
+                    exists = run_file_entry_exists(
+                        run_dir,
+                        "images/blocked.png",
                     )
 
             self.assertTrue(attacked)
@@ -583,7 +582,7 @@ class RunRootBindingTests(unittest.TestCase):
                 ("trusted.json",),
             )
 
-    def test_bound_partial_media_read_rejects_nested_directory_swap_restore(
+    def test_bound_media_read_rejects_nested_directory_swap_restore(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -653,10 +652,10 @@ class RunRootBindingTests(unittest.TestCase):
                         side_effect=restoring_stat,
                     ),
                     self.assertRaises(
-                        partial_media.PartialMediaProjectionError
+                        RunRootBindingError
                     ),
                 ):
-                    partial_media.read_run_relative_regular_file_bytes(
+                    read_run_file_bytes(
                         run_dir,
                         "logs/truth.json",
                     )
@@ -726,32 +725,34 @@ class RunRootBindingTests(unittest.TestCase):
             )
             opened = run_dir.stat()
             identity = opened.st_dev, opened.st_ino
-            real_read_bytes = Path.read_bytes
+            from toc import image_request_snapshot as snapshot_module
 
-            def swapping_read_bytes(path: Path) -> bytes:
-                if path == snapshot_path:
+            real_reader = snapshot_module.read_regular_file_nofollow
+            swapped = False
+
+            def swapping_reader(root: Path, relative: str | Path, **kwargs: object) -> bytes:
+                nonlocal swapped
+                if Path(relative) == Path("image_generation_request_snapshot.json"):
+                    trusted_bytes = real_reader(root, relative, **kwargs)
                     run_dir.rename(original_slot)
                     replacement_slot.rename(run_dir)
+                    swapped = True
                     try:
-                        return real_read_bytes(path)
+                        return trusted_bytes
                     finally:
                         run_dir.rename(replacement_slot)
                         original_slot.rename(run_dir)
-                return real_read_bytes(path)
+                return real_reader(root, relative, **kwargs)
 
             with bind_run_root(run_dir, expected_identity=identity):
-                with patch.object(
-                    Path,
-                    "read_bytes",
-                    autospec=True,
-                    side_effect=swapping_read_bytes,
-                ):
-                    loaded, _digest = (
-                        partial_media._stable_scene_request_snapshot(
-                            run_dir
-                        )
+                with patch.object(snapshot_module, "read_regular_file_nofollow", side_effect=swapping_reader):
+                    loaded = load_request_snapshot(
+                        snapshot_path,
+                        run_dir=run_dir,
+                        verify_references=False,
                     )
 
+            self.assertTrue(swapped)
             self.assertEqual(loaded.request_revision, trusted.request_revision)
             self.assertNotEqual(
                 loaded.request_revision,

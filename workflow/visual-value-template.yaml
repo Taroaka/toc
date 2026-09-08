@@ -32,6 +32,9 @@ adaptation_intent:
     - "REPLACE_ME: 豪華さや美麗さだけで原作価値を代替する処理"
 
 global_visual_identity:
+  # 任意: docs/story-creation.md「観客の理解と意味の設計」を採用した story の意図を引き継ぐ。
+  # 全編の見せ方は notes、各場面の具体化は visual_value / continuity_hooks / p400_script_notes へ。
+  # 新規 block や adaptation marker は不要。原作の事実・意味・結末・開示順を変えない。
   visual_style: "REPLACE_ME: 実写、シネマティック等。この run 固有の一貫した画作りを書く"
   camera_principles:
     - "scene の物語価値が読める構図を優先する"
@@ -51,12 +54,16 @@ global_visual_identity:
 scene_visual_values:
   - scene_selector: "REPLACE_ME_scene_selector"
     story_function: "REPLACE_ME: この scene が物語上担う役割"
+    # 理解の維持・深化・揺らぎ・複数解釈の併存も扱える。毎 scene の反転や教訓を要求しない。
+    # 世界観は選択・行動・関係・結果へ具体化し、その主体の信念と世界内の事実を分ける。
     visual_value: "REPLACE_ME: 観客に画として何を理解・体感させるか"
     must_show:
       - "REPLACE_ME: 映像で落とすと物語価値が弱くなる要素"
     must_avoid:
       - "REPLACE_ME: 後続 prompt が流れやすい誤表現"
     emotional_payload: "REPLACE_ME: この scene の視覚的な感情到達点"
+    # 反復を採用するときだけ、同じと認識させる要素・文脈の差・対応 scene を記す。
+    # 小道具に限定せず、音・行為・関係も扱う。反復を作るための追加 scene/asset は不要。
     continuity_hooks:
       - "REPLACE_ME: 次 scene / 後半で再利用する視覚要素"
     p400_script_notes:
@@ -67,8 +74,9 @@ scene_visual_values:
       source_value_refs:
         - "REPLACE_ME_STORY_VALUE_ID"
       why_this_scene_matters: "REPLACE_ME: 原作全体に対してこのsceneが不可欠な理由"
-      audience_state_before: "REPLACE_ME: scene開始時の観客の期待・理解・感情"
-      audience_state_after: "REPLACE_ME: scene終了時に生じる不可逆な体験差"
+      # 知識・解釈を感情と区別する。感情の狙いは emotional_payload / emotional_contradiction へ。
+      audience_state_before: "REPLACE_ME: scene開始時の観客に開示済みの情報・期待・解釈"
+      audience_state_after: "REPLACE_ME: scene終了時の理解・期待・残る問い。維持・深化・揺らぎも扱う"
       emotional_contradiction: "REPLACE_ME: 同時に存在する相反感情や圧力"
       cinematic_gain:
         performance: "REPLACE_ME: 呼吸、視線、抑制、身体反応の具体差"
@@ -109,7 +117,7 @@ asset_bible_candidates:
         - "EXAMPLE_ONLY_refstrip"
       used_by_selectors:
         - "REPLACE_ME_sceneXX_cutYY"
-      p500_handoff: "REPLACE_ME: asset_plan.md で設計・review すべきこと"
+      p500_handoff: "REPLACE_ME: asset_plan.md で設計すること"
   objects:
     - asset_id: "REPLACE_ME_object_asset_id"
       story_purpose: "REPLACE_ME: 反復する小道具 / setpiece の役割"
@@ -120,7 +128,7 @@ asset_bible_candidates:
         - "EXAMPLE_ONLY_detail"
       used_by_selectors:
         - "REPLACE_ME_sceneXX_cutYY"
-      p500_handoff: "REPLACE_ME: object_bible / reference image として固定すべき理由"
+      p500_handoff: "REPLACE_ME: object_bible / reference image として固定する理由"
   locations:
     - asset_id: "REPLACE_ME_location_asset_id"
       story_purpose: "REPLACE_ME: 反復する場所 / 状態差分の役割"
@@ -169,19 +177,19 @@ handoff_to_p400_p500_p600_p700:
     must_not_do:
       - "p300 で未承認の新規主筋を追加しない"
   p500_asset:
-    must_create_or_review:
+    must_create:
       - "asset_bible_candidates から asset_plan.md へ渡す候補"
-    review_focus:
+    authoring_focus:
       - "visual identity と continuity anchor として十分か"
   p600_scene_implementation:
     must_materialize:
       - "anchor_cut_candidates と reference_strategy を video_manifest.md に反映する"
-    review_focus:
+    authoring_focus:
       - "prompt / references / still_image_plan が p300 の意図と矛盾しないか"
   p700_narration:
     must_preserve:
       - "scene image と矛盾しない narration の視点・距離感"
-    review_focus:
+    authoring_focus:
       - "visual を説明しすぎず、音声で補うべき意味だけを足しているか"
 
 value_parts:

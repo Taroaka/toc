@@ -86,9 +86,6 @@ P400_REPLACED_PATHS: tuple[str, ...] = (
     "video_manifest.md",
     "p000_index.md",
     "run_status.json",
-    "logs/review/semantic/scene_set.report.md",
-    "logs/review/semantic/scene_detail.report.md",
-    "logs/review/semantic/cut_blueprint.report.md",
 )
 
 INVALIDATED_STATE_PREFIXES: tuple[str, ...] = (
@@ -99,7 +96,6 @@ INVALIDATED_STATE_PREFIXES: tuple[str, ...] = (
     "slot.p8",
     "slot.p9",
     "artifact.",
-    "review.semantic.",
     "orchestration.p5",
     "orchestration.p6",
     "orchestration.p7",
@@ -124,9 +120,6 @@ _RESERVED_CANDIDATE_PATHS = {
 _ALLOWED_CANDIDATE_EXACT = {
     *REQUIRED_CANDIDATE_PATHS,
     "logs/authoring/scene_acceptance/source_ledger.json",
-    "logs/review/semantic/scene_set.report.md",
-    "logs/review/semantic/scene_detail.report.md",
-    "logs/review/semantic/cut_blueprint.report.md",
 }
 _ALLOWED_CANDIDATE_PATTERNS = (
     re.compile(r"^logs/authoring/scene_acceptance/scenes/[A-Za-z0-9_.+\-]+\.json$"),

@@ -99,6 +99,13 @@ script / story の正本は `intended` であり、`experienced` を script に�
 affect label や valence / arousal は、視聴体験を設計するための創作・演出上の意図であり、事実根拠そのものではない。
 selection や revision の判断材料には使えるが、research grounding、human approval gate、documented uncertainty を上書きしない。
 
+### 感情と理解を区別する
+
+[観客の理解と意味の設計](story-creation.md#観客の理解と意味の設計) は、何を知り、どう解釈できるかを扱う。
+感情の強さや快・不快が同じでも、理解が深まったり疑念が残ったりする。逆に理解が変わらない
+場面でも感情の持続に意味がある。両方を毎 scene で変える必要はなく、認識の推移を affect の
+数値だけで代用しない。ここでも記録するのは作者の意図であり、観客の実測反応ではない。
+
 ## Affect Scale
 
 ### Numeric range

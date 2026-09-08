@@ -1,455 +1,181 @@
 # Video Integration（正本）
 
-このドキュメントは `.steering/20260117-video-integration/` で合意した内容を **恒久仕様として昇華**したもの。
-
-## 目的
-
-`script.md` から素材生成→合成→検証までを一貫した流れとして定義する。
-
-変更内容:
-- production order を asset/image-first に固定した
-- `video_manifest.md` は `manifest_phase: skeleton|production` の二段階にした
-
-修正理由:
-- asset と scene image を先に確定し、実際の visual に合わせて narration と video を仕上げるため
-
-旧仕様との差分:
-- 旧運用では narration/TTS が asset / image より前に置かれていた
-- 新運用では `script -> skeleton manifest -> asset -> scene implementation / image -> narration/TTS -> duration gate -> video -> render` を正本にする
-
-## 全体フロー
-
-`script.md → video_manifest.md (manifest_phase: skeleton) → asset → scene implementation / image (manifest_phase: production) → narration/TTS → duration gate → video → render-video.sh → video.mp4 → QA`
-
-## 正本ルール
-
-- **`script.md` を言語情報の正本**とする
-- `script.md.scenes[].cuts[].elevenlabs_prompt` は ElevenLabs v3 用の authoring source とし、`spoken_context` / `voice_tags` / `spoken_body` / `stability_profile` を持てる
-- `script.md.scenes[].cuts[].tts_text` は ElevenLabs v3 に渡す final string とし、`spoken_context + [tag][tag] + spoken_body` を materialize した値として扱う
-- `image_generation.prompt` / `video_generation.motion_prompt` は `script.md` の visual beat を生成向けに翻訳したものであり、新しい物語情報を足さない
-- `scene_conte.md` は橋渡し資料であり、`script.md` と矛盾してはならない
-- `video_manifest.md` は二段階で扱う
-  - `manifest_phase: skeleton`
-    - narration review / TTS / duration gate に必要な最小構造
-  - `manifest_phase: production`
-    - image_generation / video_generation の実装 field を持つ生成正本
-
-補足:
-
-- `script.md` は **意味設計の正本**
-- `video_manifest.md` は **生成実装の正本**
-- `script.md` の `tts_text` は TTS 専用であり、image/video generation の主ソースにしない
-
-generator の既定参照順:
-
-1. `video_manifest.md`
-2. `script.md`
-3. narration / `tts_text` は補助参照
-
-特に image/video generation では、`script.md` の `approved_image_notes[]` / `approved_video_notes[]` / `human_change_requests[]` を参照してよいが、実行前にそれらが `video_manifest.md` の contract へ materialize されていることを前提にする。
-
-## 映像とナレーションの役割分担
-
-- 原則: **見えることは映像にやらせる**
-- ナレーションは cut の役割に応じて、必要なら **見えないが重要なこと** を補う
-- 目標は、ナレーションが無くても scene の大意が通ること。その上で音声が opening / middle / ending の役割に応じた理解を支えること
-- ナレーションは映像の説明文ではなく、観客の認知の導線を整える層として扱う
-
-ナレーションが優先して運ぶ情報:
-- 時間の圧縮 / 回想 / 予感
-- 内面（迷い、願い、後悔、決意）
-- 因果（なぜそうしたか / 次に何が効いてくるか）
-- 視点の偏り
-- 世界のルール / 禁忌 / 伝承
-- 終盤の軽い意味づけ
-
-まず映像に任せる情報:
-- 一目で分かる物理行動
-- 一目で分かる感情
-- 空間の基本説明
-- 画面構図だけで読める力関係や距離感
-
-例外:
-- 異界・地下都市・聖域・夢の中の城など、現実の読者/視聴者にとって **非日常感のあるエリア** は、空間の基本説明をナレーションで担ってよい。
-  - 目的は、見た目の説明ではなく「現実とは違う世界へ入った」という認知を早く立てること。
-  - この場合は体感描写だけに寄せず、「地上とはまったく違う世界」「ありえない広さ」のようなダイレクトな説明を許容する。
-  - ただし、後続 scene で reveal する人物・禁忌・世界ルールなど、作品固有の情報は先出ししない。
-
-## Scene → Assets 契約（最小）
-
-入力（scene単位）:
-- `scene_id`
-- `narration_text`
-- `visual_prompt`
-- `duration_seconds`
-- `constraints`
-  - （任意）参照画像: `references[]`
-  - （任意）動画の開始/終了フレーム: `first_frame`, `last_frame`
-
-補足:
-- ここでの参照画像は、毎sceneの必須成果物ではない
-- 新規の静止画生成は、連続性アンカーを作るとき、または同じ場所/物体/人物状態を複数scene/cutで再利用するときに優先する
-- それ以外の scene/cut は、既存の anchor frame を再利用してよい
-
-出力（scene単位）:
-- `assets/scenes/scene{n}_base.png`
-- `assets/scenes/scene{n}_video.mp4`
-- `assets/audio/scene{n}_narration.mp3`
-
-記録先:
-- `video_manifest.md` の `scenes[]`
-
-## Audio Story設計: 全編原稿からcutへanchorする（推奨）
-
-基本:
-- **cutは映像編集単位、narration spanは文章・演技単位**として分離する
-- **1 spanは1つ以上のcutをまたいでよい**。`1 cut = 1 narration` は互換defaultに留める
-- cut duration は viewer-facing intent を読み取れる長さと、選択 provider / model / input mode の capability から導く。メイン/サブの固定秒数は設けない
-- 短いcutへ独立した短文を必ず置かず、前後spanの継続または意図された無音を使う
-- `visual_value.md` に基づく視覚報酬 cut も固定秒数にせず、ナレーションなしの場合は `audio.narration.tool: "silent"` と `audio.narration.text: ""` を使う
-
-分割判断:
-- provider の単一 clip 上限を超える場合は、同じ authored cut の semantic identity を保つ render unit / provider clip 分割を先に使う
-- 新しい authored cut は、未被覆の required beat または既存 one-intent cut に載せられない distinct semantic obligation がある場合だけ追加する。同じ責務のまま秒数だけを理由に cut を増やさない
-- scene と narration の両方が揃った時点で、semantic boundary と編集上の自然さを再確認する
-
-運用（例）:
-1) `video_manifest.md` を cuts 前提で書く（`scenes[].cuts[]` でも、sceneをカットとして扱ってもよい）
-   - `audio.narration.text` / `audio.narration.tts_text` は **空文字**でよい（未記入）。`TODO:` のようなメタ情報は入れない（TTSで喋られて事故る）
-   - 未記入は `audio.narration.authoring_status: "missing"` と `missing_reason: "p700_narration_not_written_yet"` で表す
-   - p400 / skeleton 時点では、final narration text ではなく `audio.narration.contract` と runtime 枠だけを置く
-2) 先に reusable asset と scene image を生成する（image-only）
-   - `python scripts/generate-assets-from-manifest.py --manifest output/<run>/video_manifest.md --skip-audio --skip-videos`
-3) p710 で `script.md` / `video_manifest.md` / 生成済み scene image を grounding し、image-to-voice の読み取りを行う
-   - first frame / approved image から、見えている subject / action / emotion / location rule / handoff anchor を読む
-   - `visual_distance.visible_facts_in_frame` と `visual_distance.narration_should_add` を確認し、声が映像をキャプション化しないようにする
-4) Narration Writer が、確定した visual に合わせて `script.md` を正本として全編音声を作る
-  - 先に `audio_story_plan`（narrator bible / audience state / open loop-payoff / causal handoff / silence budget）を作る
-  - 次にcut境界なしの `continuous_full_draft` を通しで書き、全編の反復・情報負荷・視点・問いの回収をreviewする
-  - 最後に `narration_spans[]` とcut anchorsへ割り当て、公開`text`とprovider用`tts_text`を分離する
-  - 承認後、`scripts/sync-narration-from-script.py` でmanifestへ一方向同期する。manifestを言語正本として直接育てない
-  - `audio.narration.contract` を更新し、必要なら image 後の読み取りを反映する
-    - `story_role.narrative_position`: `opening|middle|ending`
-    - `story_role.cut_function`: `setup|pressure|threshold|turn|payoff|reaction|handoff`
-    - `story_role.voice_function`: `information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence`
-    - `visual_distance.distance_policy`: `stay_close|contextual|meaning_first|silent`
-    - `visual_distance.narration_should_add`: 映像だけでは言えない情報・内面・因果・余韻
-    - `rhythm_and_timing`: 話し始め、終わり、pause、目標 speech 秒
-    - `tts_readiness.pronunciation_targets`: 誤読しそうな語
-    - `target_function` / `role` / `must_cover` / `must_avoid` / `done_when` は現行 reader 用の互換 alias として p720 前に必ず派生同期する。新規設計判断では上記 v2 fields を優先する
-  - `script.md` 側では `elevenlabs_prompt` を authoring source、`tts_text` を ElevenLabs v3 に送る final string として扱う
-  - `tts_text` は ひらがな寄せを基本にしつつ、`[]` の audio tag を許可する
-  - `voice_tags` は bracket なしの生タグで保持し、materialize 時に `[]` を付ける
-  - 原稿は cut の物語上の役割に合わせる
-    - opening: 物語の入口として自然で安定した説明を優先
-    - middle: 展開 / 不安 / 因果 / 揺れを支える
-    - ending: 解決 / 帰結 / 余韻を支える
-  - opening では、画面の見えていることに近くても scene/script に忠実なら許容する
-  - 非日常エリアの導入では、middle cut でも説明重視を許容する
-    - 対象読者/視聴者は現実に生きている人なので、体感描写だけではなく「ここは現実とは違う場所だ」と分かる言葉を置いてよい
-    - 例: `ここは、地上とはまったく違う世界です。`
-    - 例: `ありえない広さの中を、主人公は進みます。`
-  - `script.md` の `scene_summary` は先の展開を匂わせすぎず、今その scene で起きることを素直に要約する
-  - `script.md` の `visual_beat` は概要確認用の平文とし、カメラ/レンズ/構図などの制作語は入れない
-   - 深い設計意図や抽象テーマは、基本的にナレーションで説明せず映像側へ置く
-   - 終盤の学び/余韻パートだけ、満足感のために軽く言語化してよい
-   - `script.md` に無い情報や、映像制作用のカメラ専門語は原則入れない
-5) Narration review を実行し、finding をhash付きでmanifestへ記録し、修正は`script.md`正本へ戻す
-  - CLIは決定論的検査を先、独立semantic criticを後の順で実行する
-
-    ```bash
-    python scripts/run-p720-narration-l3.py --run-dir output/<run> --fail-on-findings
-    python scripts/run-p720-narration-semantic.py --run-dir output/<run> --fail-on-findings
-    ```
-
-  - frontendでは「p720全編レビュー」が`POST /api/image-gen/narration-review/run`を呼ぶ。このendpointもlock付き
-    deterministic runnerを先に実行し、成功時の凍結snapshotに対して5つのapp-server semantic criticを実行する。
-    global/cut/semantic findingとreport pathを表示し、修正→候補試聴→再reviewをUI内で往復できる
-  - この review は p720 の mandatory gate。未解消 finding が残る node は `agent_review_ok: false` になり、
-    p750の全編承認とvideo handoffへ進めない。frontendのp730 candidate previewは修正loop中にも行えるが、承認の代替にはならない
-  - `run-p720-narration-l3.py`はdeterministic reviewerであり、`audio.narration.review`と
-    `narration_workflow.arc_review`を書き戻す。`logs/eval/narration/round_01/critic_*.md`と`aggregated_review.md`は
-    rule findingを観点別に投影した互換artifactで、5つの独立LLM判定ではない
-  - `run-p720-narration-semantic.py`は同一のtext hashとexact semantic input hashへ束縛したfull-run packを、
-    別app-server threadの5 criticへ渡す
-    - `retention_hook`: 冒頭の約束、open loop、注意の更新、視聴継続
-    - `narrator_voice_persona`: narrator bible、知識境界、一人の語り手としての声
-    - `causal_information_rhythm`: 因果・reveal順、情報密度、理解と呼吸
-    - `audio_visual_distance`: 映像の字幕化、音声先取り、沈黙、映像へ追加する価値
-    - `payoff_ending`: audience promiseの回収、reaction、余韻
-  - semantic criticはstrict JSONを返し、aggregateを`narration_workflow.semantic_critic_review`と
-    `logs/eval/narration/semantic_critics/`へ保存する。app-server無効、実行失敗、欠落/malformed JSON、hash不一致は
-    passへfallbackせずblocking resultにする。input hashはvisual/contract/prompt/timingも含み、固定5 criticの完全性と
-    response/aggregate/report/json一致を保存時とp750時に検証する。隔離cwd、secret env除去、tool無効config、structured output、
-    instruction/data分離を使い、tool-like eventがあればfail closedにする。review中にtext/input hashまたはactive review idが
-    変わった結果は書き戻さずstaleとして再実行する
-  - p750では個別承認だけで終えず、approved audio / offset / cut末の間 / intentional silenceをcanonical順に通し再生する。
-    完走evidenceをcurrent audio set hashとtimelineへ束縛し、欠落・staleなら全編承認を拒否する
-  - p720 では YouTube 由来の薄さ対策を必ず見る
-    - 発音辞書 / `v-dict`: 誤読しそうな漢字・固有名詞・専門語は `tts_text` の読み替え、または `config/tts-pronunciation-aliases.tsv` に寄せる
-    - 句読点 / pause: 長い一文を避け、意味の切れ目と呼吸の切れ目に `、` / `。` / `！` / `？` を置く
-    - 言葉の薄さ: `フォーマット` / `フレーム` / `フェーズ` / `構造` / `観点` のような抽象語を連発せず、次文で具体的な人物・行動・場所・物へ落とす
-  - deterministic reportの5分類は`tts_readiness` / `story_role` / `visual_redundancy` / `pacing` /
-    `spoken_japanese`であり、semantic criticの5役とは別契約である
-  - p720 は設計目標として `logs/eval/narration/round_01/pronunciation_candidates.tsv` を作れる。現行 runner が直接 materialize しない場合は、aggregator report の pronunciation section か human handoff で候補を明示する
-    - columns: `surface`, `reading`, `selector`, `reason`, `status`
-    - p730 前に unresolved candidate を `tts_text` / alias file / official pronunciation dictionary / rejected のいずれかへ解決する
-  - review は `audio.narration.review` に `agent_review_ok` / reason keys / human override を記録する
-  - review は `audio.narration.contract` も読み、must cover / must avoid / target_function を満たしているか確認する
-  - rubric は `tts_readiness` / `story_role_fit` / `anti_redundancy` / `pacing_fit` / `spoken_japanese` を持ち、criterion ごとの score と `overall_score` を残す
-  - aggregator はcut単体のfindingに加えてfull-run `narration_arc_review`を必須で持つ
-    - voice continuity / emotional curve / information flow / repetition / open-loop payoff / ending重複を確認する
-    - revision-aware runでは、結果を`narration_workflow.arc_review`へ書き、`status: passed`とcurrent
-      `narration_text_set_hash`の一致をp750/video handoffの必須条件にする
-    - hashは`audio_story_plan`、`narration_spans[]`、canonical cut順、各cutの公開/TTS文面、tool、span参照を束ねる。
-      どれかが変われば再reviewする
-    - full-run blocking finding が1件でも残る場合はp750のfinal audio承認へ進めない
-  - revision-aware p750はcurrent `narration_workflow.arc_review.status: passed`だけでなく、current
-    `narration_workflow.semantic_critic_review.status: passed`も必須にする。どちらも現在の`narration_text_set_hash`と一致させ、
-    semantic reviewは現在の`semantic_review_input_hash`とも一致させる
-  - runtime review key は現行運用を維持するが、この slice の script authoring では `elevenlabs_prompt` と `tts_text` の整合を優先し、`[]` の audio tag を許可する
-  - さらに、script の phase / scene_summary / narration と照らして「その cut が opening / middle / ending のどこにいるかに合ったナレーションか」を rubric で採点する
-   - fix 後に再 review して、解消した node だけ `agent_review_ok: true` に戻す
-6) revision-aware runでは、frontendでcurrent revisionに対する音声候補を生成し、cutごとに試聴承認する
-   - 文面保存/確定、候補生成、候補承認は別操作とする。生成成功を承認として扱わない
-   - save/silent/generate/approveは画面が読んだ`expected_revision`を渡す。generate/approveは
-     `expected_tts_hash`も渡し、古いtabや生成中更新からの書き戻しを拒否する
-   - provider実行前にeffective voice/model/settings、発音辞書、alias hashを含むimmutable request snapshotを作る
-   - `tts_generation_group_id`ごとにvoiced cutをcanonical順で並べ、各cutの直前/直後の`tts_text`を
-     ElevenLabs `previous_text` / `next_text`へ渡す。group idと前後文脈の`tts_continuity_hash`もsnapshotへ固定する
-   - output/candidate/個別承認はcut単位を維持する。隣接memberのTTS文面変更でcontinuity hashが変わった音声もstaleにする
-   - 生成完了時にrevision/hashが変わっていたcandidateは`stale`で保存するが、`output`へ昇格しない
-   - `output`は人間がcurrent candidateを承認した時だけ更新し、p750前にもfile content hashを再照合する
-7) legacy narrationだけは、次のCLIで音声だけ生成して秒数を確定できる（audio-only）
-   - `python scripts/generate-assets-from-manifest.py --manifest output/<run>/video_manifest.md --skip-images --skip-videos`
-   - `--skip-narration-review` を付けない限り、この audio-only 実行は p730 前に p720 L3 runner を自動実行する
-   - revision-aware manifestではこの直接audio passを拒否する。frontend candidate/CAS/個別試聴を使い、CLIは`--skip-audio`で残りのassetだけを扱う
-   - ElevenLabs の pronunciation dictionary を使う場合は、`ELEVENLABS_PRONUNCIATION_DICTIONARY_LOCATORS="dictionary_id:version_id"` または `--elevenlabs-pronunciation-dictionary-locator dictionary_id:version_id` を使う
-   - repo 側の簡易読み替え表を使う場合は、`TOC_TTS_PRONUNCIATION_ALIAS_FILE=path/to/aliases.tsv` または `--tts-pronunciation-alias-file path/to/aliases.tsv` を使う
-     - TSV 例: `売上	うりあげ`
-     - `=>` 形式も可: `取得=>しゅとく`
-   - 日本語では IPA/CMU より alias 型の読み替えを優先する。公式 pronunciation dictionary は最大 3 locator までを TTS request に渡す
-8) `video_generation.duration_seconds` をナレーション秒数に合わせて更新する
-   - `python scripts/sync-manifest-durations-from-audio.py --manifest output/<run>/video_manifest.md`
-9) 実尺が target を満たすかを p740 で gate する
-   - `python scripts/check-audio-duration-gate.py --manifest output/<run>/video_manifest.md --run-dir output/<run>`
-   - `cinematic_story` は既定で 300 秒以上を target にする
-   - 未達なら `logs/review/duration_scene.subagent_prompt.md` と `logs/review/duration_narration.subagent_prompt.md` を生成して停止する
-   - gate を超えただけではrevision-aware runのvideo generation / renderへ進まない。p750の明示全編承認も必要
-10) frontendでp750を明示承認する
-   - 一覧取得時の`audioSetHash`を`expected_audio_set_hash`として送る。対象はcanonical cut順のcurrent
-     candidate/silence、source hash、output path/content hash、実測尺、toolを束ねた集合である
-   - `timeline[]`は全manifest cutをちょうど1回ずつcanonical順に含め、各itemで
-     `video_duration_seconds`と`narration_offset_seconds`を確定する
-   - durationは仮の既存値から短縮できるが、`ceil(audio duration + offset)`未満にはできない
-   - cut/render unitはprovider上限60秒以下にし、超える場合はp740で拒否して分割する
-   - 成功時に`narration_workflow.final_audio_review.approved_audio_set_hash`と`approved_timeline_hash`を固定する
-11) revision-aware renderはp750のexact bindingだけを使う
-   - render inputも全cut・同順・同duration・同offsetであることを要求する
-   - spoken cutへ別audio pathを差し替えず、silent cutの無音はserverが承認済みdurationからmaterializeする
-   - 文面、TTS、delivery、candidate、audio file、timelineが変わった場合はp750を再承認する
-
-### Frontend p720 <-> p730 resumable loop
-
-frontendは文面確定とTTS生成を途中入力できる。runtimeは次を別commandとして扱う。
-
-- `POST /api/image-gen/narration-text/save`: `script.md`正本へdraft/human_lockedを保存し、manifestへ同期
-- `POST /api/image-gen/narration-review/run`: deterministic arc/cut検査と5つの独立semantic criticを順に実行
-- `POST /api/image-gen/narration-generate`: current revision/hashからimmutable audio candidateを作成
-- `POST /api/image-gen/narration-audio/approve`: 人間が試聴したcurrent candidateだけをcut outputへ昇格
-- `POST /api/image-gen/narration-review/approve`: 全cutのcurrent audio/silenceとp740尺を再検証し、全編p750を明示承認
-
-各nodeはfull SHA-256とcompare-and-swap revisionを持つ。TTS実行中に文面が変わった場合、完了音声は
-revision別pathに`stale`候補として残すが、current output、duration、review、p750を更新しない。
-音声候補の生成成功は`human_review_ok`やp720/p750承認を意味しない。
-
-`scripts/toc-immersive-ride-generate.sh` はrevision-aware narrationを検出したらfrontendの代わりに候補生成しない。
-current p750が無い場合は`runtime.stage=narration_frontend_handoff`として停止する。frontendで全編承認を完了して
-同じCLIを再実行した場合だけ、video generation側へ継続する。`generate-assets-from-manifest.py`もrevision-aware音声の
-直接生成を拒否し、manifestから直接TTSを生成するCLI経路はlegacy互換だけに限定する。
-
-状態は次で固定する。
-
-- p720/p730往復中: `stage.narration.status=in_progress`。p720 doneにはcurrent deterministic arc passとsemantic critic passの両方が必要
-- p740合格・全編未承認: `stage.narration.status=awaiting_approval`, `slot.p750.status=awaiting_approval`
-- 全編明示承認後のみ: `stage.narration.status=done`, `slot.p750.status=done`
-- `gate.narration_review`はpolicyなので`required|optional|skipped`以外を書かない
-
-### Narration Role Matrix
-
-`story_role.voice_function` は「この cut で声が何を達成するか」を示す。位置や雰囲気ではなく、聞いた人の理解・感情・次 cut への準備をどう変えるかで選ぶ。
-
-| voice_function | 使う場面 | 書くべきこと | 避けること | 文の型 |
-| --- | --- | --- | --- | --- |
-| `information` | 世界観、ルール、状況理解 | 映像だけでは分からない前提 | 画面説明 | `ここでは、XだけがYを決めます。` |
-| `emotion` | 表情だけでは内面が不足 | 迷い、後悔、決意、恐れ | 感情語の連打 | `彼はまだ、Xを選べずにいます。` |
-| `causality` | 次 cut / 次 scene への接続 | なぜ次が起きるか | 先の展開の説明しすぎ | `その小さな選択が、後のXを呼び込みます。` |
-| `time` | 省略、回想、長い移動 | 時間の圧縮 | 年表口調 | `それから三日、村には同じ朝が来ませんでした。` |
-| `viewpoint` | 誰の見方かが重要 | 認識の偏り | 神視点の説明過多 | `彼には、それが助けに見えていました。` |
-| `world_rule` | 異界、禁忌、伝承 | 行動を縛るルール | 設定資料風 | `この場所では、振り返ることが別れを意味します。` |
-| `contrast` | 映像と意味をずらす | 見えているものの裏の意味 | 難解な比喩 | `祝福の声の中で、彼だけが沈黙を聞いていました。` |
-| `meaning` | scene の意味を受け渡す | いま残すべき解釈 | 抽象語だけの総括 | `その沈黙が、彼の答えでした。` |
-| `aftertaste` | 終盤、余韻 | 何が残ったか | 教訓の押しつけ | `残ったのは、名前を呼ぶ声だけでした。` |
-| `silence` | 視覚報酬、反応、間 | 無音の理由 | 書き忘れ | `silence_contract` に理由を書く |
-
-### Visual Distance Policy
-
-`visual_distance.distance_policy` は、映像と声の距離を p720 で判定するための contract である。
-
-- `stay_close`: opening / 場所認知 / 非日常エリア導入。多少の視覚 overlap を許容するが、完全なキャプション化は禁止。
-- `contextual`: 標準。見えている事実を土台に、因果・内面・時間・意味を足す。
-- `meaning_first`: turn / payoff / ending。映像説明より、見たあとに残る意味を優先する。
-- `silent`: 視覚報酬、反応、緊張、余韻。`silence_contract` が必要。
-
-p720 rule:
-
-- `distance_policy` が missing なら warning。
-- `meaning_first` なのに映像説明だけなら blocking。
-- `stay_close` は opening / 非日常導入で説明寄りを許容する。
-- `visual_overlap_allowed: true` の場合も、理由が空なら finding。
-
-### Bad / Good Examples
-
-映像キャプション化:
-
-- bad: `主人公は森の中を歩いています。`
-- good: `その森では、進むほどに帰り道の音が遠ざかっていきます。`
-
-AI っぽい抽象語:
-
-- bad: `彼は新しいフェーズに入り、物語の構造が変化します。`
-- good: `彼は初めて、助けを待つ側ではなく、選ぶ側に立ちます。`
-
-情報過多:
-
-- bad: `この村には古くから、夜に鐘が三度鳴ると森の神が目覚め、名前を呼ばれた者は戻れなくなるという伝承がありました。`
-- good: `この村では、夜の鐘が三度鳴ったあと、名前を呼ばれてはいけません。`
-
-TTS に弱い文:
-
-- bad: `彼は、まだ誰にも知られていないはずの、しかし村の古い記録には何度も現れているその名前を、聞いた気がしました。`
-- good: `彼は、その名前を聞いた気がしました。まだ誰にも、知られていないはずの名前でした。`
-
-render unit の扱い:
-
-- 互換defaultでは`1 cut = 1 video clip`でよいが、narration span / TTS generation groupはcut境界から独立させる
-- ただし、複数 cut の narration を 1 本の動画で受けたい scene では、`video_manifest.md.scenes[].render_units[]` を使う
-- `render_units[]` は最終 render 用の動画クリップ単位で、`unit_id`, `source_cut_ids[]`, `video_generation` を持つ
-- cut は引き続き story / image / audio の正本のまま残す
-- scene に `render_units[]` がある場合、最終 render の動画正本は cut 側 `video_generation` ではなく render unit 側を使う
-- revision-aware renderでは`scripts/freeze-approved-render-inputs.py`を使い、`video_clips.txt` は render unit 順、
-  `video_narration_list.txt` は各 unit の `source_cut_ids[]` をflattenしたcanonical順で作る
-- narration listへはraw provider MP3ではなく、p750で承認したcut duration/offsetに合わせて先頭無音と末尾余白をmaterializeした音声を入れる。
-  unit durationはsource cut duration合計と一致させ、60秒を超えるunitは分割する
-- したがって `動画2本 / 音声3本` のような編集構成も、ffmpeg concat 前に manifest で明示できる
-
-silent cut の扱い:
-
-- `audio.narration.tool: "silent"` の cut は、Narration Writer の対象外としてよい
-- ただし renderable cut では、`audio.narration.silence_contract.intentional: true` と `confirmed_by_human: true` を必須にする
-- 追加カットで narration を入れない場合は、この `silence_contract` を使って「意図的に無音」と明示する
-- revision-aware runでは`audio.narration.output`へ任意の無音pathを入れず、render freeze時にserverが承認尺から無音mp3を生成する
-- `video_generation.duration_seconds` は `4` 秒を基本にする
-- 最終音声連結では、その cut の `duration_seconds` 分の無音 mp3 が `video_narration_list.txt` 経由で連結される
-
-## Final Compile 正規化ルール
-
-scene 単位の compile を最終結合する前に、すべての scene compile を同一 stream 仕様へ正規化する。
-
-必須仕様:
-- video: target size に統一する。通常の 16:9 run では `1280x720`
-- fps: `24`
-- pixel format: `yuv420p`
-- audio codec: `AAC`
-- audio sample rate: `44100Hz`
-- audio channel layout: `stereo`
-
-禁止:
-- scene compile を直接 `ffmpeg -f concat -safe 0 -i list.txt -c copy final.mp4` で最終結合しない
-- `mono` と `stereo` が混在した scene compile をそのまま concat しない
-- silent cut / padded audio を含む scene だけ mono のまま残さない
-
-理由:
-- ffmpeg concat demuxer は、途中で audio channel layout が変わる入力に弱い
-- `scene08: mono -> scene09: stereo` のような境界では、境界以降の音声がジャミング音・ノイズ化することがある
-- scene 単位では正常に聞こえても、最終結合後だけ壊れるため、QA 前の機械チェックだけでは見落としやすい
-
-推奨手順:
-
-```bash
-ffmpeg -i sceneXX_compiled.mp4 \
-  -vf "scale=1280:720,fps=24" \
-  -af "aresample=44100,aformat=channel_layouts=stereo" \
-  -c:v libx264 -preset medium -crf 18 -pix_fmt yuv420p \
-  -c:a aac -b:a 192k \
-  sceneXX_normalized.mp4
+`script.md` から asset/image/narration/video request を作り、生成、合成、ordinary output checks
+を一つの流れで定義する。production order は
+`script → skeleton manifest → asset → scene image → narration/TTS → duration → video → render`。
+
+## 1. Canonical boundaries
+
+- `script.md` は story meaning、scene/cut intent、reveal、narration text の source of truth。
+- `video_manifest.md` は materialized scene/cut execution、provider settings、asset references、
+  compiled payloads、request snapshots、output paths の source of truth。
+- `scene_conte.md` や request Markdown は bridge/projection であり、別の authoring root ではない。
+- `tts_text` は TTS provider 専用。image/video prompt の主 source にしない。
+- `manifest_phase: skeleton` は p450、`manifest_phase: production` は p600 以後の execution
+  fields を表す。
+
+## 2. 全体フロー
+
+```text
+script.md
+  → video_manifest.md (skeleton)
+  → asset_inventory.md / asset_plan.md / asset requests
+  → reusable assets and file checks
+  → production manifest / image requests / stills
+  → narration text / TTS / measured audio
+  → motion requests / clips
+  → stream normalization / render
+  → ordinary QA data
 ```
 
-最終結合は、全 scene の normalized file だけを入力にする。
+p400 では provider を呼ばない。各 request は payload、source digest、settings、reference bytes、
+destination を保存してから provider に渡す。
 
-### 尺の決め方（音声実秒 + 余白）
+## 3. Scene → asset/image contract
 
-- 原則として、**`映像尺 = 音声実秒 + 余白`** とする
-- `音声秒 = 映像秒` にぴったり合わせるのは標準運用にしない
-- 余白は、話し始め前の入りと、話し終わり後の余韻の合計として扱う
-- 例外として、人レビューで追加した intentional silent cut だけは **`video duration > narration duration`** を許可する
-- この例外では narration は空のままにし、最終連結では無音がその秒数ぶん入る
-- ただし total runtime が target 未満なら、余白だけで帳尻を合わせず、scene 設計と narration 設計の見直しを優先する
+scene/cut input:
 
-推奨レンジ:
-- 通常 cut:
-  - 前余白: `0.2–0.5秒`
-  - 後余白: `0.3–1.0秒`
-  - 合計: `0.5–1.5秒`
-- 余韻重視 cut:
-  - 合計: `1.0–2.0秒`
-- テンポ重視 / サブ cut:
-  - 合計: `0.3–0.7秒`
+- `scene_id`、`cut_id`、`cut_contract`、source event IDs
+- `first_frame_contract`、`motion_contract`、`narration_contract`
+- character/object/location IDs と optional references
+- duration intent、downstream handoff
 
-運用順:
-1. まず自然長で TTS を生成する
-2. `ffprobe` 等で音声の実秒を測る
-3. cut の役割に応じた余白を足して `video_generation.duration_seconds` を決める
-4. その結果が選択 provider / model / input mode の capability を外れる場合は、まず原稿短縮または同一 authored cut 内の render unit / provider clip 分割で調整する。新しい authored cut への再設計は、未被覆の required beat または既存 one-intent cut に載せられない distinct semantic obligation がある場合だけ行う
+output:
 
-補足:
-- 聞き比べテストなどで `--duration-seconds` を使って音声を固定長にそろえることはあるが、これは比較用の例外運用であり、実制作の標準ではない
+- reusable assets under `assets/`
+- scene image under `assets/scenes/`
+- manifest entries under `video_manifest.md.scenes[].cuts[]`
 
-注意:
-- `cloud_island_walk`（哲学を島でPOV視点で語る体験）の指示・テンプレは別仕様として扱う（この運用変更の対象外）。
+New stills are generated for continuity anchors or explicit image requests. Existing valid anchors may
+be reused when their bytes and provenance match.
 
-## ナレーション密度の目安
+## 4. Audio Story authoring
 
-- 映画的・没入型を優先する場合:
-  - 映像/演出/効果音: 70–85%
-  - ナレーション: 15–30%
-- 神話・歴史・昔話・伝承紹介型:
-  - 映像: 55–70%
-  - ナレーション: 30–45%
+cut is an editing unit; narration span may cover one or more cuts. Write a continuous full-run spoken
+draft, then split it into ordered `narration_spans[]` anchored to cuts. A visual-only cut may use:
 
-これは固定法則ではなく、初期設計の目安として使う。
+```yaml
+audio:
+  narration:
+    tool: silent
+    text: ""
+    tts_text: ""
+    silence_contract:
+      intentional: true
+      duration_seconds: 4
+      reason: "視覚の余韻"
+```
 
-## プレースホルダ（MVP）
+Do not add words only to fill target duration. Audio timeline is measured spoken audio plus explicit
+silence. Video timeline is measured clip/render-unit duration; the two are parallel layers.
 
-動画/TTS provider は当面 manifest で選べる（例: Seedance / Kling 3.0 / ElevenLabs）。p500 / p600 の画像 provider は `codex_builtin_image` 固定。ただしMVPでは:
+Narration projection:
 
-- placeholder でE2Eを通す（`scripts/generate-placeholder-assets.py`）
-- 画像は Codex built-in image generation、動画/TTS は各 provider で素材化する（`scripts/generate-assets-from-manifest.py`）
+```yaml
+narration_authoring:
+  schema_version: narration_authoring_v1
+  status: missing|draft|human_locked|silent
+  revision: 0
+  text_hash: sha256:<hash>
+  tts_hash: sha256:<hash>
+  source: author|user
+  updated_at: ISO8601
+  updated_by: ""
+```
 
-注: Google Veo はこのリポジトリでは安全のため無効化している。
+`script.md` stores readable `narration`, ElevenLabs authoring fields, and final `tts_text`.
+`video_manifest.md` receives a one-way projection. Pronunciation aliases and provider settings are
+stored in the TTS request snapshot. Candidates may be generated, listened to, selected, or edited by
+the user; a changed text/settings revision invalidates old audio and reruns ordinary checks.
 
-## 品質ゲート（最小）
+## 5. Request materialization
 
-- `duration_ok`
-- `aspect_ratio_ok`
-- `audio_sync_ok`
-- `subtitle_ok`
+Image, audio, and video requests use immutable snapshots. Each binds:
 
-結果は `state.txt` と `video_manifest.md` に記録する。
+```text
+generation_job_id + item_id + turn_id + prompt_sha256 + reference_sha256s
+  + saved_path + destination + source_digest
+```
 
-## 参照
+Materialization writes:
 
+- exact provider prompt and negative prompt
+- compiler/policy version and provider/model/mode
+- duration, aspect ratio, quality, execution options
+- first/last frame and ordered reference roles
+- reference content hashes and destination
+- request revision and source digest
+
+Provider execution reads the saved payload, never reinterprets free text from a bridge file.
+
+## 6. Video prompt compilation
+
+```text
+cut_contract + first/last frames + ordered references
+  → video_prompt_projection_registry_v5
+  → video_prompt_ir_v2
+  → conditional_video_prompt_compiler_v5
+  → video_api_prompt_v1
+```
+
+The compiled payload's `prompt` is exact provider-facing motion text. `sha256` hashes that text;
+`source_digest` includes canonical design, duration, settings, frames, reference bytes, provider model,
+and execution options. Internal IDs, paths, hashes, narration, and future event details stay in metadata.
+
+Before calling the provider, recompile current design and compare prompt, hashes, binding, settings,
+frames, ordered references, and source digest. Drift is a stale request error.
+
+## 7. Ordinary output validation
+
+After each provider call:
+
+- verify provider response item identity and request binding
+- verify expected output path, file type, existence, and decode
+- verify duration, frames/streams, aspect ratio, audio/video compatibility
+- verify content SHA-256, reference SHA-256, and destination lock
+- record state and the smallest failing item
+
+A failed item is repaired by editing its owning contract/request and rematerializing. Existing valid
+files remain in place while the replacement is generated.
+
+## 8. p700 duration and p900 render
+
+Measure TTS audio with ffprobe and update the manifest. Set video duration from measured audio, intentional
+silence, visual hold, and provider capability. If a clip or render unit exceeds provider capability,
+split the render unit while preserving source cut IDs and one primary intent.
+
+Before final concat:
+
+- build clip and narration lists from active canonical selectors in order
+- choose render-unit duration once; do not double-count source cuts
+- normalize video size/fps/pixel format and audio codec/sample rate/channel layout
+- check each input path and its provenance
+
+After render, ffprobe and decode the final mp4; record measured duration, streams, aspect ratio, subtitles,
+audio synchronization, output path, and content hash.
+
+## 9. Optional user actions and publishing
+
+Candidate selection, listening, image editing, narration editing, and explicit change requests are
+optional. Store actor, timestamp, selectors, and selected revision under `human_choice.*`, then rerun
+structural, request, file, and provenance checks.
+
+Hybridizing contradictory source variants requires an explicit user choice and selected source IDs.
+Publishing is a separate explicit user action and stores destination, actor, timestamp, and result.
+
+## 10. Provider and output notes
+
+- Image: Codex built-in image generation (`codex_builtin_image` / `gpt-image-2`)
+- Video: Kling 3.0, Kling Omni, or Seedance according to request capabilities
+- TTS: ElevenLabs
+- provider-facing prompts are Japanese by default and contain visible content, not production metadata
+- local placeholder or unrelated output is never copied to a canonical destination
+
+## References
+
+- `docs/data-contracts.md`
+- `docs/script-creation.md`
 - `docs/video-generation.md`
-- `scripts/build-clip-lists.py`
-- `scripts/freeze-approved-render-inputs.py`
-- `scripts/render-video.sh`
+- `docs/implementation/video-prompting.md`
+- `workflow/video-manifest-template.md`
+

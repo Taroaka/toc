@@ -232,11 +232,6 @@ def artifact_inventory(run_dir: Path, state: dict[str, str]) -> dict[str, dict[s
     return inventory
 
 
-def pending_gates(state: dict[str, str]) -> list[str]:
-    del state
-    return []
-
-
 def run_status_path(run_dir: Path) -> Path:
     return run_dir / "run_status.json"
 

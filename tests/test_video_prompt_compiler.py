@@ -131,7 +131,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
         )
         self.assertEqual(set(_fragment_groups(payload)), set(VIDEO_PROMPT_GROUP_ORDER))
         self.assertEqual(
-            payload["projection_review_contract"]["registry_version"],
+            payload["projection_contract"]["registry_version"],
             VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION,
         )
         self.assertEqual(
@@ -223,8 +223,8 @@ class VideoPromptCompilerTests(unittest.TestCase):
 
         review_only = {
             item["source_key"]: item["value"]
-            for item in payload["projection_review_contract"][
-                "review_only_sources"
+            for item in payload["projection_contract"][
+                "excluded_sources"
             ]
         }
         self.assertEqual(
@@ -268,14 +268,14 @@ class VideoPromptCompilerTests(unittest.TestCase):
         self.assertNotIn(parsed_fallback, continuity)
         projected = [
             item["value"]
-            for item in payload["projection_review_contract"]["groups"][
+            for item in payload["projection_contract"]["groups"][
                 "continuity"
             ]
         ]
         self.assertEqual(projected, [[stable_preserve]])
         shadowed = {
             item["source_key"]: item["reason"]
-            for item in payload["projection_review_contract"]["shadowed_sources"]
+            for item in payload["projection_contract"]["shadowed_sources"]
         }
         self.assertEqual(
             shadowed["compiler_normalized.authoring_source.continuity"],
@@ -306,7 +306,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
         self.assertNotIn(parsed_fallback, payload["negative_prompt"])
         projected = {
             item["source_key"]: item["value"]
-            for item in payload["projection_review_contract"]["groups"][
+            for item in payload["projection_contract"]["groups"][
                 "constraints"
             ]
         }
@@ -316,7 +316,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
         )
         shadowed = {
             item["source_key"]: item["reason"]
-            for item in payload["projection_review_contract"]["shadowed_sources"]
+            for item in payload["projection_contract"]["shadowed_sources"]
         }
         self.assertEqual(
             shadowed["compiler_normalized.authoring_source.constraints"],
@@ -345,14 +345,14 @@ class VideoPromptCompilerTests(unittest.TestCase):
         self.assertNotIn(parsed_fallback, end_state)
         projected = [
             item["value"]
-            for item in payload["projection_review_contract"]["groups"][
+            for item in payload["projection_contract"]["groups"][
                 "end_state"
             ]
         ]
         self.assertEqual(projected, [structured_end])
         shadowed = {
             item["source_key"]: item["reason"]
-            for item in payload["projection_review_contract"]["shadowed_sources"]
+            for item in payload["projection_contract"]["shadowed_sources"]
         }
         self.assertEqual(
             shadowed["compiler_normalized.authoring_source.end_state"],
@@ -533,7 +533,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
                     tool="kling_3_0",
                 )
 
-                projection = payload["projection_review_contract"]
+                projection = payload["projection_contract"]
                 camera_values = [
                     str(item.get("value") or "")
                     for item in projection["groups"]["camera_motion"]
@@ -870,8 +870,8 @@ class VideoPromptCompilerTests(unittest.TestCase):
         )
         scene_review_only = {
             item["source_key"]: item["value"]
-            for item in scene_payload["projection_review_contract"][
-                "review_only_sources"
+            for item in scene_payload["projection_contract"][
+                "excluded_sources"
             ]
         }
         self.assertEqual(
@@ -902,7 +902,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
                 )
                 traced_sources = {
                     item["source_key"]
-                    for item in alias_payload["projection_review_contract"][
+                    for item in alias_payload["projection_contract"][
                         "groups"
                     ]["primary_motion"]
                 }
@@ -988,7 +988,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
         self.assertIn("承認済み要素以外", payload["negative_prompt"])
         active_sources = {
             item.get("source_key")
-            for item in payload["projection_review_contract"]["active_rules"]
+            for item in payload["projection_contract"]["active_rules"]
         }
         self.assertIn(
             "cut.cut_contract.motion_contract.allowed_new_reveal_elements",
@@ -1076,7 +1076,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
         self.assertNotIn("ガラスの靴", payload["prompt"])
         active_sources = {
             str(item.get("source_key") or "")
-            for item in payload["projection_review_contract"]["active_rules"]
+            for item in payload["projection_contract"]["active_rules"]
         }
         self.assertNotIn(
             "video_generation.motion_contract.allowed_new_reveal_elements",
@@ -1084,7 +1084,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
         )
         shadowed_sources = {
             str(item.get("source_key") or "")
-            for item in payload["projection_review_contract"]["shadowed_sources"]
+            for item in payload["projection_contract"]["shadowed_sources"]
         }
         self.assertIn(
             "video_generation.motion_contract.allowed_new_reveal_elements",
@@ -1504,7 +1504,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
         self.assertNotIn("汎用の人物状態", start)
         self.assertNotIn("開始画像にある小道具・場所の状態が見える", start)
         self.assertNotIn("周囲からの圧力を受けている", start)
-        projection = payload["projection_review_contract"]
+        projection = payload["projection_contract"]
         projected_start_values = [
             item["value"] for item in projection["groups"]["start_state"]
         ]
@@ -1519,7 +1519,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
         )
         traced = {
             item["source_key"]: item["value"]
-            for item in projection["review_only_sources"]
+            for item in projection["excluded_sources"]
         }
         self.assertEqual(traced["scene.visualizable_action"], scene_overview)
         self.assertNotIn(scene_overview, payload["prompt"])
@@ -1725,7 +1725,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
         }
         before = compile_video_api_prompt_v1(
             **common,
-            review_only_dependencies={
+            source_context={
                 "render_unit_source_cut_ids": ["1", "2"],
                 "render_unit_source_cut_contracts": [
                     {
@@ -1741,7 +1741,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
         )
         after = compile_video_api_prompt_v1(
             **common,
-            review_only_dependencies={
+            source_context={
                 "render_unit_source_cut_ids": ["1", "2"],
                 "render_unit_source_cut_contracts": [
                     {
@@ -1771,26 +1771,23 @@ class VideoPromptCompilerTests(unittest.TestCase):
             ],
         }
         self.assertEqual(
-            before["projection_review_contract"]["review_only_dependencies"],
+            before["video_prompt_ir"]["dependencies"]["source_context"],
             expected_dependencies,
         )
         serialized_ir = str(before["video_prompt_ir"])
-        for review_only_value in (
-            "廊下へ一歩進む",
-            "銀の鍵",
-            "render_unit_source_cut_ids",
-        ):
-            self.assertNotIn(review_only_value, before["prompt"])
-            self.assertNotIn(review_only_value, before["negative_prompt"])
-            self.assertNotIn(review_only_value, serialized_ir)
+        for source_context_value in ("廊下へ一歩進む", "銀の鍵"):
+            self.assertNotIn(source_context_value, before["prompt"])
+            self.assertNotIn(source_context_value, before["negative_prompt"])
+            self.assertIn(source_context_value, serialized_ir)
+        self.assertIn("render_unit_source_cut_ids", serialized_ir)
 
         without_dependencies = compile_video_api_prompt_v1(
             **common,
-            review_only_dependencies={},
+            source_context={},
         )
         self.assertNotIn(
-            "review_only_dependencies",
-            without_dependencies["projection_review_contract"],
+            "source_context",
+            without_dependencies["video_prompt_ir"]["dependencies"],
         )
 
     def test_execution_bindings_stale_source_digest_without_changing_prompt_text(self) -> None:
@@ -1883,7 +1880,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
         self.assertNotEqual(first["source_digest"], changed["source_digest"])
         traced = {
             item["source_key"]: item["value"]
-            for item in first["projection_review_contract"]["review_only_sources"]
+            for item in first["projection_contract"]["excluded_sources"]
         }
         self.assertEqual(
             traced["scene.location_sequence"],
@@ -2012,36 +2009,23 @@ class VideoPromptCompilerTests(unittest.TestCase):
                         reference_roles=reference_roles,
                     )
 
-    def test_quality_issues_expose_fallback_alternatives_abstract_motion_and_duplicates(self) -> None:
+    def test_motion_compilation_has_no_quality_report(self) -> None:
         fallback = compile_video_api_prompt_v1(cut_contract={})
-        self.assertIn(
-            "video_motion_generated_fallback",
-            {issue["code"] for issue in fallback["quality_issues"]},
-        )
+        self.assertNotIn("quality_issues", fallback)
+        self.assertNotIn("quality_issues", fallback["video_prompt_ir"])
 
-        contract = {
-            "motion_contract": {
-                "motion_brief": "主人公または従者の内面の変化を見せる",
-                "environment_motion": "主人公または従者の内面の変化を見せる",
-                "emotional_change": "主人公または従者の内面の変化を見せる",
-                "end_state": "sceneの変化点の物証が残る",
+        payload = compile_video_api_prompt_v1(
+            cut_contract={
+                "motion_contract": {
+                    "motion_brief": "主人公または従者が扉へ進む",
+                    "end_state": "sceneの変化点の物証が残る",
+                }
             }
-        }
-        payload = compile_video_api_prompt_v1(cut_contract=contract)
-        issues = payload["quality_issues"]
-        issue_codes = {issue["code"] for issue in issues}
-        self.assertIn("video_motion_unresolved_alternative", issue_codes)
-        self.assertIn("video_motion_abstract_primary", issue_codes)
-        self.assertIn("video_motion_abstract_end_state", issue_codes)
-        self.assertIn("video_motion_duplicate_environment", issue_codes)
-        self.assertIn("video_motion_duplicate_emotion", issue_codes)
-        self.assertTrue(all(issue["blocking"] is True for issue in issues))
-        self.assertEqual(
-            payload["video_prompt_ir"]["quality_issues"],
-            issues,
         )
+        self.assertIn("主人公または従者が扉へ進む", payload["prompt"])
+        self.assertIn("変化点の物証が残る", payload["prompt"])
 
-    def test_scene_sequence_overview_is_blocking_in_every_temporal_motion_group(self) -> None:
+    def test_scene_sequence_overview_is_compiled_without_quality_gate(self) -> None:
         sequence = "家族が去る{arrow}助力者が現れる{arrow}衣装が変わる"
         cases = (
             ("first_frame_contract", "first_frame_brief", "start_state"),
@@ -2071,17 +2055,13 @@ class VideoPromptCompilerTests(unittest.TestCase):
                         cut_contract=contract,
                         tool="kling_3_0",
                     )
+                    self.assertNotIn("quality_issues", payload)
+                    self.assertIn(
+                        sequence.format(arrow=arrow),
+                        _fragment_text(payload, expected_group),
+                    )
 
-                    matching = [
-                        issue
-                        for issue in payload["quality_issues"]
-                        if issue["code"] == "video_motion_sequential_overview"
-                    ]
-                    self.assertTrue(matching)
-                    self.assertTrue(all(issue["blocking"] is True for issue in matching))
-                    self.assertIn(expected_group, {issue["group"] for issue in matching})
-
-    def test_single_cut_local_state_does_not_trigger_sequential_overview_issue(self) -> None:
+    def test_single_cut_local_state_does_not_trigger_sequential_overview_error(self) -> None:
         payload = compile_video_api_prompt_v1(
             cut_contract={
                 "first_frame_contract": {
@@ -2095,10 +2075,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
             tool="kling_3_0",
         )
 
-        self.assertNotIn(
-            "video_motion_sequential_overview",
-            {issue["code"] for issue in payload["quality_issues"]},
-        )
+        self.assertNotIn("quality_issues", payload)
 
     def test_missing_motion_sources_receive_an_explicit_single_motion_fallback(self) -> None:
         payload = compile_video_api_prompt_v1(cut_contract={})
@@ -2185,7 +2162,7 @@ class VideoPromptCompilerTests(unittest.TestCase):
         )
         self.assertEqual(reference_payload["mode"], "reference_to_video")
         self.assertEqual(
-            reference_payload["projection_review_contract"]["mode"],
+            reference_payload["projection_contract"]["mode"],
             "reference_to_video",
         )
         self.assertIs(

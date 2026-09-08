@@ -1,71 +1,62 @@
 # /toc-scene-series
 
-ToC（TikTok Story Creator）を「topic → 情報収集 → sceneごとのQ&A縦動画（複数本）」として実行するコマンド。
+ToC を topic/source から複数 scene の Q&A 縦動画へ変換する command。
 
-## 使い方（想定）
+## 使い方
 
 ```text
 /toc-scene-series "桃太郎" --min-seconds 30 --max-seconds 60
-```
-
-動画モデル指定（例: Kling）:
-
-```text
-/toc-scene-series "桃太郎" --video-tool kling --min-seconds 30 --max-seconds 60
-```
-
-部分実行（例: scene 2 と 4 だけ作り直す）:
-
-```text
 /toc-scene-series "桃太郎" --scene-ids 2,4 --min-seconds 30 --max-seconds 60
-```
-
-dry-run（外部APIは呼ばず、設計成果物まで）:
-
-```text
 /toc-scene-series "桃太郎" --dry-run
 ```
 
-## 期待される出力（概要）
+## Output
 
-`output/<topic>_<timestamp>/` に以下が生成される:
+```text
+output/<topic>_<timestamp>/
+  state.txt
+  research.md
+  story.md
+  series_plan.md
+  scenes/sceneXX/
+    evidence.md
+    script.md
+    video_manifest.md
+    assets/
+    video.mp4
+  logs/grounding/
+  logs/orchestration/
+  logs/validation/
+```
 
-- `state.txt`（追記型）
-- `logs/grounding/<stage>.json`
-- `research.md`
-- `story.md`（questionを含む）
-- `series_plan.md`（sceneごとの question 抽出）
-- `scenes/sceneXX/`（sceneごとの成果物）
-  - `evidence.md`
-  - `script.md`（30–60秒のQ&A用）
-  - `video_manifest.md`
-  - `assets/**`
-  - `video.mp4`
-- 成果物の本文（question / ナレーション / プロンプト等）は **日本語**で記述する（ユーザーがそのまま修正できるように）
-- 音声（ナレーション）は **デフォルト必須**。意図的に作らない場合だけ `scripts/generate-assets-from-manifest.py --skip-audio` を指定する
+本文（question、narration、prompt）は日本語で記録する。scene script は evidence の source IDs
+と question/answer を保持し、30–60 秒の target duration と provider capability を使う。
 
-## 実行メモ（内部フローの意図）
+## Flow
 
-- question は `text_overlay.sub_text` の `content` を使う
-- 根拠は **既存 `research.md` 優先**、不足時のみ Web 追加調査
-- scene動画の尺は **30–60秒**（内容に応じて決める）
-- cutは映像編集単位、narration spanは文章・演技単位として分ける。spanは複数cutをまたいでよく、`video_manifest.md` は `scenes[].cuts[]` でanchorを表現する
-- 映像の「現実寄り/抽象寄り」は **実装前に再確認**（このコマンドではプレースホルダを許容）
-- 方針: **創造→選択**
-  - Research は多様性（登場人物/世界観/解釈）を厚めに集め、Story/Script でスコアが高い案を **選択**する
-  - Hero's Journey への当てはめは必須ではない（フレームワークは道具）
-  - 矛盾する複数ソースの要素を同一シーン/設定として **混成（ハイブリッド）**する必要が出た場合は、確定前にユーザー承認を取る（運用）
+```text
+source context → research → story → series_plan
+  → scene evidence → scene script
+  → scene/cut manifest → image/audio/video generation
+  → scene render and ordinary output checks
+```
 
-## Grounding Preflight（必須）
+scene ごとに prepare-stage-context.py を使い、required docs/templates/inputs を読み、
+schema/type/ID/reference/request/file/decode/duration/provenance を確認する。shared
+research.md と series plan は single writer、scene directory は scene owner が更新する。
 
-- run root の `research` / `story` / `script` 開始前に、対応する stage で `scripts/resolve-stage-grounding.py` を実行する
-- scene root の `image_prompt` / `video_generation` に進む前も同様に preflight を通す
-- 証跡は `logs/grounding/<stage>.json`
-- 各 resolve の直後に `scripts/audit-stage-grounding.py` で readset / audit を確定する
-- `stage.<name>.grounding.status=ready` と `stage.<name>.audit.status=passed` が確認できない場合は、その stage を開始しない
+## Scene authoring
 
-## 参照
+- question は concrete な viewer question にする。
+- answer/evidence は evidence.md の source refs に結び付ける。
+- cut は one intent、image first-frame、motion boundary、narration role、downstream handoff を持つ。
+- --dry-run は provider call をせず、構造化 artifact と request payload を作る。
+- candidate selection/listening/editing は任意の user action として保存できる。
+- contradictory source の hybridization と publication は明示した user action として扱う。
 
-- 既存エントリ: `.claude/commands/toc/toc-run.md`
-- 設計: `.steering/20260125-scene-series/requirements.md`
-- 仕様（正本）: `docs/implementation/scene-series-entrypoint.md`
+## References
+
+- docs/how-to-run.md
+- docs/data-contracts.md
+- docs/implementation/scene-loop.md
+

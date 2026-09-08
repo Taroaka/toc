@@ -1,27 +1,19 @@
 # State log schema (append-only delta events, key=value payload)
 #
-# - Stored in project folder: output/<topic>_<timestamp>/state.txt
+# - Stored in output/<topic>_<timestamp>/state.txt.
 # - Each committed block contains only one atomic update's changed keys.
-# - Blocks are separated by a line containing only "---".
 # - Current state is the global last-write-wins merge of every committed block.
-# - state.current.json is a replaceable derived cache bound to the canonical log head.
-# - Every delta binds the resulting full-state digest as state_hash; the view must match the final event.
-# - The view carries state_sha256, log inode/timestamps, and 128 recent events.
-# - Every explicit event-id retry scans canonical history; the derived event index is never authoritative.
-# - Resume never truncates or restores old state bytes; it appends a named invalidation event.
-# - Legacy full/partial blocks remain replayable. Once delta mode begins, legacy writers are forbidden.
+# - state.current.json and run_status.json are replaceable derived projections.
+# - Resume never truncates or restores old state bytes; it appends an event.
+# - Legacy blocks remain replayable, and production readers ignore retired
+#   review/evaluation values without rewriting the history.
 #
-# 変更内容:
-# - production order を asset/image-first に切り替えた
-# - canonical grounding stage は asset / scene_implementation / narration / video_generation に再編した
-# - video_manifest.md は manifest_phase=skeleton|production を持つ
-#
-# 修正理由:
-# - asset と scene image を先に確定し、実際の visual に合わせて narration と video を仕上げるため
-#
-# 旧仕様との差分:
-# - 旧 schema は image_prompt stage を公開 stage とし、audio stage は後段だった
-# - 新 schema では scene_implementation を公開 stage とし、asset/image-first を前提にする
+# Production fixed-slot contract:
+# - Active slots are declared by toc.run_index.SLOT_BY_CODE.
+# - Retired review-only slots are p130, p230, p320, p430, p435, p540,
+#   p630, p640, p720, p820, p850, and p930.
+# - A historical slot.<retired>.status event is data only; it never blocks a
+#   current stage and is not emitted in the active slot projection.
 #
 # Required keys (minimum):
 #   timestamp=ISO8601
@@ -29,333 +21,89 @@
 #   topic=string
 #   status=INIT|RESEARCH|STORY|SCRIPT|VIDEO|QA|DONE
 #
-# Optional keys:
+# Runtime and generation keys:
 #   runtime.stage=init|assets|render|done|shorts|...
-#   runtime.failure.stage=stage where the terminal runtime failure occurred
-#   runtime.failure.phase=semantic_review|semantic_producer_repair|media_generation|validation
+#   runtime.failure.stage=stage where a terminal runtime failure occurred
+#   runtime.failure.phase=grounding|media_generation|validation|runtime
 #   runtime.failure.error_kind=timeout|network|runtime_setup|unknown
 #   runtime.failure.last_progress_at=ISO8601|unknown
+#   runtime.render.status=started|success|failed
+#   runtime.target_video_seconds=integer 300..1200
+#   runtime.duration_fit.status=passed|failed|skipped
+#   runtime.duration_fit.target_seconds=integer
+#   runtime.duration_fit.minimum_seconds=integer
+#   runtime.duration_fit.actual_seconds=number
+#   runtime.duration_fit.ratio=number
+#   runtime.duration_fit.measurement_layer=manifest_runtime|final_video
+#   runtime.duration_fit.measurement_complete=true|false
+#   runtime.duration_fit.spoken_audio_seconds=number
+#   runtime.duration_fit.intentional_silence_seconds=number
+#   runtime.duration_fit.audio_timeline_seconds=number
+#   runtime.duration_fit.video_timeline_seconds=number
+#   runtime.duration_fit.video_timeline_source=cuts|render_units|mixed|none
+#   runtime.duration_fit.missing_items=[]  # JSON array
+#   runtime.duration_fit.invalid_items=[]  # JSON array
+#   runtime.duration_fit.note=string
+#   runtime.duration_fit.at=ISO8601
+#   generation.image_prompt.request_freeze.status=draft|frozen|invalidated
+#   generation.image_prompt.request_freeze.request_revision=integer
+#   generation.image_prompt.request_freeze.request=image_generation_requests.md
+#   generation.image_prompt.request_freeze.snapshot=image_generation_request_snapshot.json
+#   generation.image_prompt.request_freeze.frozen_at=ISO8601
+#   generation.image_prompt.request_freeze.invalidated_by=string
+#   generation.image_prompt.request_freeze.invalidated_at=ISO8601
 #   image_generation.status=not_started|in_progress|partial|completed|failed
 #   image_generation.started=true|false
 #   image_generation.generated_count=non-negative integer
-#   image_generation.blocked_by=semantic stage and phase identifier
-#   image_generation.block_reason=machine-readable blocking reason
+#   image_generation.blocked_by=stage or validation identifier
+#   image_generation.block_reason=machine-readable reason
 #   orchestration.p600.supervisor.status=pending|running|done|failed|invalidated
-#   orchestration.p600.supervisor.invalidated_by=machine-readable invalidation reason
-#   runtime.render.status=started|success|failed
-#   runtime.target_video_seconds=300  # request target; integer 300..1200, omitted request defaults to 300
-#   runtime.narration.phase=authoring|review|tts_preview|revising|audio_qa|awaiting_human_approval|done
-#   runtime.narration.approved_audio_set_hash=sha256:<hex>
-#   runtime.narration.approved_timeline_hash=sha256:<hex>
-#   artifact.narration_generation_request_snapshot=logs/providers/narration/generation_requests/<stamp>.json
-#   runtime.stage=narration_frontend_handoff  # revision-aware CLIがcurrent p750待ちで停止した状態
+#   orchestration.p600.supervisor.invalidated_by=machine-readable reason
+
+# Fixed-slot state keys:
 #   slot.pXXX.status=pending|in_progress|done|skipped|blocked|awaiting_approval|failed
 #   slot.pXXX.requirement=required|optional
 #   slot.pXXX.skip_reason=string
 #   slot.pXXX.note=string
-#   slot.pXXX.review_loop.status=pending|running|passed|changes_requested|failed
-#   slot.pXXX.review_loop.current_round=0-5
-#   stage.research.status=pending|in_progress|awaiting_approval|done|failed|skipped
-#   stage.research.started_at=ISO8601
-#   stage.research.finished_at=ISO8601
-#   stage.research.grounding.status=ready|missing_docs|missing_inputs
-#   stage.research.grounding.report=logs/grounding/research.json
-#   stage.research.readset.report=logs/grounding/research.readset.json
-#   stage.research.audit.status=passed|failed
-#   stage.research.audit.report=logs/grounding/research.audit.json
-#   stage.research.subagent.prompt=logs/grounding/research.subagent_prompt.md
-#   stage.research.subagent.prompt.generated_at=ISO8601
-#   stage.research.playbooks.report=logs/grounding/research.playbooks.json
-#   stage.research.playbooks.selected_count=0
-#   stage.story.status=pending|in_progress|awaiting_approval|done|failed|skipped
-#   stage.story.started_at=ISO8601
-#   stage.story.finished_at=ISO8601
-#   stage.story.grounding.status=ready|missing_docs|missing_inputs
-#   stage.story.grounding.report=logs/grounding/story.json
-#   stage.story.readset.report=logs/grounding/story.readset.json
-#   stage.story.audit.status=passed|failed
-#   stage.story.audit.report=logs/grounding/story.audit.json
-#   stage.story.subagent.prompt=logs/grounding/story.subagent_prompt.md
-#   stage.story.subagent.prompt.generated_at=ISO8601
-#   stage.story.playbooks.report=logs/grounding/story.playbooks.json
-#   stage.story.playbooks.selected_count=0
-#   stage.visual_value.status=pending|in_progress|awaiting_approval|done|failed|skipped
-#   stage.visual_value.started_at=ISO8601
-#   stage.visual_value.finished_at=ISO8601
-#   stage.script.status=pending|in_progress|awaiting_approval|done|failed|skipped
-#   stage.script.started_at=ISO8601
-#   stage.script.finished_at=ISO8601
-#   stage.script.grounding.status=ready|missing_docs|missing_inputs
-#   stage.script.grounding.report=logs/grounding/script.json
-#   stage.script.readset.report=logs/grounding/script.readset.json
-#   stage.script.audit.status=passed|failed
-#   stage.script.audit.report=logs/grounding/script.audit.json
-#   stage.script.subagent.prompt=logs/grounding/script.subagent_prompt.md
-#   stage.script.subagent.prompt.generated_at=ISO8601
-#   stage.script.playbooks.report=logs/grounding/script.playbooks.json
-#   stage.script.playbooks.selected_count=0
-#   stage.narration.status=pending|in_progress|awaiting_approval|done|failed|skipped
-#     p720<->p730 frontend往復中は in_progress、p740合格後は awaiting_approval、明示p750全編承認後だけ done
-#   runtime.narration.preview_stage=string  # p750 done後のalternate previewはcanonical slot/phaseを戻さずここへ記録
+#
+# Authoring slots retained in production:
+#   slot.p410.status=pending|in_progress|done|skipped|blocked|failed
+#   slot.p420.status=pending|in_progress|done|skipped|blocked|failed
+#   slot.p570.status=pending|in_progress|done|skipped|blocked|failed
+#   slot.p680.status=pending|in_progress|done|skipped|blocked|awaiting_approval|failed
+#   slot.p750.status=pending|in_progress|done|skipped|blocked|awaiting_approval|failed
+
+# Stage state and grounding keys:
+#   stage.<name>.status=pending|in_progress|done|failed|skipped
+#   stage.<name>.started_at=ISO8601
+#   stage.<name>.finished_at=ISO8601
+#   stage.<name>.grounding.status=ready|missing_docs|missing_inputs
+#   stage.<name>.grounding.report=logs/grounding/<stage>.json
+#   stage.<name>.readset.report=logs/grounding/<stage>.readset.json
+#   stage.<name>.playbooks.report=logs/grounding/<stage>.playbooks.json
+#   stage.<name>.playbooks.selected_count=non-negative integer
+#   stage.<name>.subagent.prompt=logs/grounding/<stage>.subagent_prompt.md
+#   stage.<name>.subagent.prompt.generated_at=ISO8601
+#
+# Canonical stages are research, story, script, asset, scene_implementation,
+# narration, video_generation, render, and qa.  Grounding resolves real global
+# docs, stage docs, templates, and run inputs; no approval certificate or
+# audit-agent result is required.
+
+# Narration runtime keys:
+#   runtime.narration.phase=authoring|tts_preview|revising|audio_qa|done
+#   runtime.narration.audio_set_hash=sha256:<hex>
+#   runtime.narration.timeline_hash=sha256:<hex>
+#   runtime.narration.preview_stage=string
 #   runtime.narration.preview_note=string
-#   slot.p720.status=pending|in_progress|done|blocked
-#     revision-aware doneにはvideo_manifest narration_workflow.arc_review.status=passedと
-#     narration_workflow.semantic_critic_review.status=passedが必要。両方のnarration_text_set_hashをcurrent setへ一致させ、
-#     semantic_review_input_hashもcurrent exact critic-visible packへ一致させる
-#   slot.p730.status=pending|in_progress|done|blocked  # candidate生成成功だけではdone/approvedを意味しない
-#   slot.p740.status=pending|in_progress|done|blocked
-#   slot.p750.status=pending|awaiting_approval|done|blocked
-#     doneにはcurrent audio set hash、approved timeline hash、同じset/timelineに束縛されたsequential_full_run listen evidenceが必要
-#   stage.narration.grounding.status=ready|missing_docs|missing_inputs
-#   stage.narration.grounding.report=logs/grounding/narration.json
-#   stage.narration.readset.report=logs/grounding/narration.readset.json
-#   stage.narration.audit.status=passed|failed
-#   stage.narration.audit.report=logs/grounding/narration.audit.json
-#   stage.narration.subagent.prompt=logs/grounding/narration.subagent_prompt.md
-#   stage.narration.subagent.prompt.generated_at=ISO8601
-#   stage.narration.playbooks.report=logs/grounding/narration.playbooks.json
-#   stage.narration.playbooks.selected_count=0
-#   stage.asset.status=pending|in_progress|awaiting_approval|done|failed|skipped
-#   stage.asset.grounding.status=ready|missing_docs|missing_inputs
-#   stage.asset.grounding.report=logs/grounding/asset.json
-#   stage.asset.readset.report=logs/grounding/asset.readset.json
-#   stage.asset.audit.status=passed|failed
-#   stage.asset.audit.report=logs/grounding/asset.audit.json
-#   stage.asset.subagent.prompt=logs/grounding/asset.subagent_prompt.md
-#   stage.asset.subagent.prompt.generated_at=ISO8601
-#   stage.asset.playbooks.report=logs/grounding/asset.playbooks.json
-#   stage.asset.playbooks.selected_count=0
-#   stage.asset_plan_review.status=pending|in_progress|awaiting_approval|done|failed|skipped
-#   stage.asset_plan_review.started_at=ISO8601
-#   stage.asset_plan_review.finished_at=ISO8601
-#   stage.asset_generation.status=pending|in_progress|awaiting_approval|done|failed|skipped
-#   stage.asset_generation.started_at=ISO8601
-#   stage.asset_generation.finished_at=ISO8601
-#   legacy compatibility keys:
-#   stage.image_prompt_review.status=pending|in_progress|awaiting_approval|done|failed|skipped
-#   stage.image_prompt_review.started_at=ISO8601
-#   stage.image_prompt_review.finished_at=ISO8601
-#   stage.image_generation.status=pending|in_progress|awaiting_approval|done|failed|skipped
-#   stage.image_generation.started_at=ISO8601
-#   stage.image_generation.finished_at=ISO8601
-#   stage.scene_implementation.status=pending|in_progress|awaiting_approval|done|failed|skipped
-#   stage.scene_implementation.started_at=ISO8601
-#   stage.scene_implementation.finished_at=ISO8601
-#   stage.scene_implementation.grounding.status=ready|missing_docs|missing_inputs
-#   stage.scene_implementation.grounding.report=logs/grounding/scene_implementation.json
-#   stage.scene_implementation.readset.report=logs/grounding/scene_implementation.readset.json
-#   stage.scene_implementation.audit.status=passed|failed
-#   stage.scene_implementation.audit.report=logs/grounding/scene_implementation.audit.json
-#   stage.scene_implementation.subagent.prompt=logs/grounding/scene_implementation.subagent_prompt.md
-#   stage.scene_implementation.subagent.prompt.generated_at=ISO8601
-#   review.image_prompt.subagent.prompt=logs/review/image_prompt.subagent_prompt.md
-#   review.image_prompt.subagent.prompt.generated_at=ISO8601
-#   review.semantic.image_prompt.shards.status=reviewing|passed|failed
-#   review.semantic.image_prompt.shards.count=0
-#   review.semantic.image_prompt.shards.concurrency=0
-#   review.semantic.image_prompt.shards.coverage.status=valid|invalid|failed
-#   review.semantic.image_prompt.shards.<scene>.status=passed|failed
-#   review.semantic.image_prompt.shards.<scene>.entry_ids=comma-separated selectors
-#   review.semantic.image_prompt.shards.<scene>.blocked_entries=comma-separated selectors
-#   review.semantic.image_prompt.shards.<scene>.reason_keys=comma-separated reason keys
-#   review.semantic.image_prompt.shards.<scene>.transport.status=passed|retrying|recovered|failed
-#   review.semantic.<scene_detail|cut_blueprint|image_prompt>.partial_media_allowed=true|false
-#   review.semantic.<scene_detail|cut_blueprint|image_prompt>.blocked_image_items=comma-separated current request item ids
-#   review.semantic.<scene_detail|cut_blueprint|image_prompt>.blocked_image_item_count=non-negative integer
-#   review.semantic.<scene_detail|cut_blueprint|image_prompt>.localization.status=localized_to_image_items|not_localized|not_needed
-#   review.semantic.<scene_detail|cut_blueprint|image_prompt>.localization.validation=passed|empty
-#   review.semantic.partial_media.generated=true|false
-#   review.semantic.partial_media.request_revision=current scene request revision
-#   review.semantic.partial_media.projection_sha256=sha256:<hex>
-#   review.semantic.partial_media.blocked_image_items=comma-separated current request item ids
-#   review.semantic.partial_media.blocked_image_item_count=non-negative integer
-#   review.semantic.partial_media.synthetic_failed_candidates=comma-separated current request item ids
-#   review.semantic.partial_media.provider_submitted_image_items=comma-separated current request item ids
-#   review.semantic.partial_media.reused_image_items=comma-separated current request item ids
-#   review.semantic.partial_media.generated_image_items=comma-separated current request item ids
-#   review.semantic.partial_media.satisfied_image_items=comma-separated current request item ids
-#   review.semantic.partial_media.receipt=logs/review/semantic/partial_media_generation_receipt.json
-#   review.semantic.partial_media.receipt_sha256=sha256:<hex>
-#   review.semantic.<research|story>.status=pending|passed|failed
-#   review.semantic.<research|story>.collection=logs/review/semantic/<stage>.collection.md
-#   review.semantic.<research|story>.scope=logs/review/semantic/<stage>.scope.json
-#   review.semantic.<research|story>.prompt=logs/review/semantic/<stage>.prompt.md
-#   review.semantic.<research|story>.report=logs/review/semantic/<stage>.report.md
-#   review.semantic.<research|story>.entry_count=0
-#   review.semantic.<research|story>.error_count=0
-# passed foundation reports require exact entry coverage plus all fixed criteria with status and evidence
-#   stage.scene_implementation.playbooks.report=logs/grounding/scene_implementation.playbooks.json
-#   stage.scene_implementation.playbooks.selected_count=0
-#   stage.video_generation.status=pending|in_progress|awaiting_approval|done|failed|skipped
-#   stage.video_generation.started_at=ISO8601
-#   stage.video_generation.finished_at=ISO8601
-#   stage.video_generation.grounding.status=ready|missing_docs|missing_inputs
-#   stage.video_generation.grounding.report=logs/grounding/video_generation.json
-#   stage.video_generation.readset.report=logs/grounding/video_generation.readset.json
-#   stage.video_generation.audit.status=passed|failed
-#   stage.video_generation.audit.report=logs/grounding/video_generation.audit.json
-#   stage.video_generation.subagent.prompt=logs/grounding/video_generation.subagent_prompt.md
-#   stage.video_generation.subagent.prompt.generated_at=ISO8601
-#   stage.video_generation.playbooks.report=logs/grounding/video_generation.playbooks.json
-#   stage.video_generation.playbooks.selected_count=0
-#   review.video_prompt.status=pending|partially_approved_for_generation|approved_for_generation
-#   gate.video_prompt_review=required|optional|skipped  # policy only; approval progress は review.video_prompt.* に置く
-#   review.video_prompt.item.<item_id>.status=pending|approved|revoked
-#   review.video_prompt.item.<item_id>.request_section_sha256=<sha256>
-#   review.video_prompt.item.<item_id>.prompt_sha256=<sha256>
-#   review.video_prompt.item.<item_id>.source_digest=<sha256>
-#   review.video_prompt.item.<item_id>.approved_by=<actor-or-empty>
-#   review.video_prompt.item.<item_id>.approved_at=<ISO8601-or-empty>
-#   review.video_prompt.item.<item_id>.revoked_at=<ISO8601-or-empty>
-#   review.video_prompt.item.<item_id>.revocation_reason=<reason-or-empty>
-# materialize/re-materialize 後、semantic review 未完了の間は stage.video_generation.status=in_progress、
-# slot.p830.status=in_progress、item.status=pending とする。awaiting_approval は使わない。
-# semantic review が current で全 canonical item が materialize 済みとなり、人間承認だけが残る場合に限り
-# stage.video_generation.status=awaiting_approval、slot.p830.status=awaiting_approval とする。
-# 全 item の明示承認後は slot.p830.status=done。provider生成が残るため stage.video_generation.status は in_progress を維持する。
-# 明示的な approve_for_generation 後も、current request と上記3 identity binding が一致する item だけ実行可能。
-#   stage.narration.status=pending|in_progress|awaiting_approval|done|failed|skipped
-#   stage.narration.started_at=ISO8601
-#   stage.narration.finished_at=ISO8601
-#   stage.render.status=pending|in_progress|awaiting_approval|done|failed|skipped
-#   stage.render.started_at=ISO8601
-#   stage.render.finished_at=ISO8601
-#   stage.qa.status=pending|in_progress|awaiting_approval|done|failed|skipped
-#   stage.qa.started_at=ISO8601
-#   stage.qa.finished_at=ISO8601
-#   immersive.experience=cinematic_story|cloud_island_walk|world_walk|ride_action_boat  # ride_action_boat は legacy alias
-#   immersive.source_run=output/<topic>_<timestamp>  # required for world_walk
-#   runtime.review_mode=standard|preapproved  # create_input.json に束縛する。暗黙変更禁止
-#   runtime.review_policy=frontend|preapproved|strict|drafts  # strict/drafts は legacy non-frontend flows
-#   runtime.foundation_semantic_review=required|preapproved|not_run_direct_materialization
-#   gate.research_review=required|optional|skipped
-#   gate.story_review=required|optional|skipped
-#   gate.script_review=required|optional|skipped
-#   gate.asset_review=required|optional|skipped
-#   gate.image_prompt_review=required|optional|skipped  # legacy compatibility gate
-#   gate.image_review=required|optional|skipped
-#   gate.narration_review=required|optional|skipped
-#     gate はpolicyであり cleared などの進捗値を書かない
-#   gate.video_prompt_review=required|optional|skipped
-#   gate.video_review=required|optional|skipped
-#   gate.hybridization_review=required|optional|skipped
-#   review.research.status=pending|reviewing|approved|changes_requested
-#   review.research.duration_contract.status=passed|failed  # semantic repair 後も request target / duration_plan を保持したか
-#   review.policy.story=required|optional|skipped
-#   review.policy.image=required|optional|skipped
-#   review.policy.narration=required|optional|skipped
-#   review.story.status=pending|reviewing|approved|changes_requested
-#   review.semantic.<stage>.mode=preapproved
-#   review.semantic.<stage>.report.source=deterministic_preapproval|immutable_workspace_agent_output|agent_message_transport_fallback
-#   review.semantic.<stage>.report.materialized_at=ISO8601
-#   review.semantic.<stage>.transport.status=passed|failed|skipped_preapproved
-#   review.semantic.<stage>.repair.status=in_progress|done|failed|blocked_transport|skipped_preapproved
-#   review.semantic.<stage>.shards.status=passed|failed|retrying|skipped_preapproved
-#   review.story.duration_contract.status=passed|failed  # cut materialization 前の scene / narration duration floor
-#   review.story.subagent.prompt=logs/review/story.subagent_prompt.md
-#   review.story.subagent.prompt.generated_at=ISO8601
+#   artifact.narration_generation_request_snapshot=logs/providers/narration/generation_requests/<stamp>.json
+
+# Artifact and orchestration keys:
 #   artifact.video_manifest=output/<topic>_<timestamp>/video_manifest.md
-#   manifest.video_manifest.phase=skeleton|production
-#   review.hybridization.status=pending|approved|rejected
-#   review.hybridization.note=string
-#   review.hybridization.at=ISO8601
-#   review.image_prompt.status=pending|approved|changes_requested
-#   review.image_prompt.note=string
-#   review.image_prompt.at=ISO8601
-#   review.image_prompt.change_request_count=0
-#   review.image_prompt.open_change_request_count=0
-#   review.image_prompt.last_change_request_id=string
-#   review.image_prompt.judgment.status=pending|passed|failed
-#   review.image_prompt.judgment.collection=logs/review/image_prompt.review_collection.md
-#   review.image_prompt.judgment.scope=logs/review/image_prompt.review_scope.json
-#   review.image_prompt.judgment.prompt=logs/review/image_prompt.judgment_prompt.md
-#   review.image_prompt.judgment.report=logs/review/image_prompt.judgment.md
-#   review.image_prompt.judgment.generated_at=ISO8601
-#   review.image_prompt.judgment.entry_count=0
-#   review.script.status=pending|approved|changes_requested
-#   review.script.note=string
-#   review.script.at=ISO8601
-#   review.script.change_request_count=0
-#   review.script.open_change_request_count=0
-#   review.script.last_change_request_id=string
-#   review.asset.status=pending|approved|changes_requested
-#   review.asset_requests.status=pending|approved|changes_requested
-#   review.asset.note=string
-#   review.asset_requests.note=string
-#   review.asset.at=ISO8601
-#   review.asset_requests.at=ISO8601
-#   review.asset.change_request_count=0
-#   review.asset.open_change_request_count=0
-#   review.asset.last_change_request_id=string
-#   review.image.status=pending|approved|changes_requested
-#   review.image_requests.status=pending|approved|changes_requested
-#   review.image.note=string
-#   review.image_requests.note=string
-#   review.image.at=ISO8601
-#   review.image_requests.at=ISO8601
-#   review.image.change_request_count=0
-#   review.image.open_change_request_count=0
-#   review.image.last_change_request_id=string
-#   review.narration.status=pending|approved|changes_requested
-#   review.narration.note=string
-#   review.narration.at=ISO8601
-#   review.narration.change_request_count=0
-#   review.narration.open_change_request_count=0
-#   review.narration.last_change_request_id=string
-#   review.narration.pronunciation_candidates=logs/eval/narration/round_01/pronunciation_candidates.tsv  # design-target/manual artifact until runner materializes it
-#   review.narration.pronunciation_unresolved_count=0
-#   review.narration.deterministic.status=pending|passed|changes_requested
-#   review.narration.arc.status=passed|changes_requested  # optional state projection。revision-aware正本はvideo_manifest narration_workflow.arc_review
-#   review.narration.arc.report=narration_text_review.md
-#   review.narration.arc.narration_text_set_hash=sha256:<hex>  # manifest current hashとの一致がp750必須
-#   review.narration.semantic_critics.status=pending|in_progress|passed|changes_requested|stale
-#   review.narration.semantic_critics.text_set_hash=sha256:<hex>  # manifest current hashとの一致がp720/p750必須
-#   review.narration.semantic_critics.input_hash=sha256:<hex>  # visual/contract/prompt/timingを含むexact review pack
-#   review.narration.semantic_critics.review_run_id=<uuid>  # 後発reviewだけがcommitできるCAS identity
-#   artifact.narration_semantic_review=logs/eval/narration/semantic_critics/<stamp>_review.md
-#   artifact.narration_semantic_review_json=logs/eval/narration/semantic_critics/<stamp>_review.json
-#   review.duration_fit.status=passed|changes_requested|skipped
-#   review.duration_fit.target_seconds=300
-#   review.duration_fit.actual_seconds=0
-#   review.duration_fit.minimum_seconds=240  # target * 0.8; lower-bound-only, no maximum
-#   review.duration_fit.ratio=0.0
-#   review.duration_fit.measurement_layer=manifest_runtime
-#   review.duration_fit.measurement_complete=true|false
-#   review.duration_fit.spoken_audio_seconds=0
-#   review.duration_fit.intentional_silence_seconds=0
-#   review.duration_fit.audio_timeline_seconds=0
-#   review.duration_fit.video_timeline_seconds=0
-#   review.duration_fit.video_timeline_source=cuts|render_units|mixed|none
-#   review.duration_fit.missing_items=[]  # JSON array
-#   review.duration_fit.invalid_items=[]  # JSON array
-#   review.duration_fit.note=string
-#   review.duration_fit.at=ISO8601
-#   review.duration_fit.scene_prompt=logs/review/duration_scene.subagent_prompt.md
-#   review.duration_fit.scene_prompt.generated_at=ISO8601
-#   review.duration_fit.narration_prompt=logs/review/duration_narration.subagent_prompt.md
-#   review.duration_fit.narration_prompt.generated_at=ISO8601
-#   # revision-aware p750 manifest binding:
-#   # narration_workflow.arc_review.status=passed
-#   # narration_workflow.arc_review.narration_text_set_hash=sha256:<hex>
-#   # narration_workflow.semantic_critic_review.status=passed
-#   # narration_workflow.semantic_critic_review.narration_text_set_hash=sha256:<hex>
-#   # narration_workflow.semantic_critic_review.semantic_review_input_hash=sha256:<hex>
-#   # narration_workflow.final_audio_review.status=pending|approved|stale
-#   # narration_workflow.final_audio_review.approved_audio_set_hash=sha256:<hex>
-#   # narration_workflow.final_audio_review.approved_timeline_hash=sha256:<hex>
-#   # deterministic/semantic review、audio set、timelineのいずれかがcurrentでなければslot.p750.statusをdoneにしない
-#   review.human_changes.status=pending|approved|changes_requested
-#   review.human_changes.note=string
-#   review.human_changes.change_request_count=0
-#   review.human_changes.open_change_request_count=0
-#   review.human_changes.last_change_request_id=string
 #   artifact.research=output/<topic>_<timestamp>/research.md
-#   artifact.research_review=output/<topic>_<timestamp>/research_review.md
 #   artifact.story=output/<topic>_<timestamp>/story.md
-#   artifact.story_review=output/<topic>_<timestamp>/story_review.md
 #   artifact.visual_value=output/<topic>_<timestamp>/visual_value.md
 #   artifact.script=output/<topic>_<timestamp>/script.md
-#   artifact.script_review=output/<topic>_<timestamp>/script_review.md
 #   artifact.asset_inventory=output/<topic>_<timestamp>/asset_inventory.md
 #   artifact.asset_plan=output/<topic>_<timestamp>/asset_plan.md
 #   artifact.asset_generation_requests=output/<topic>_<timestamp>/asset_generation_requests.md
@@ -364,11 +112,7 @@
 #   artifact.image_generation_request_snapshot=output/<topic>_<timestamp>/image_generation_request_snapshot.json
 #   artifact.asset_generation_request_snapshot=output/<topic>_<timestamp>/asset_generation_request_snapshot.json
 #   artifact.video_generation_requests=output/<topic>_<timestamp>/video_generation_requests.md
-#   artifact.grounding.research=output/<topic>_<timestamp>/logs/grounding/research.json
-#   artifact.grounding.story=output/<topic>_<timestamp>/logs/grounding/story.json
-#   artifact.grounding.script=output/<topic>_<timestamp>/logs/grounding/script.json
-#   artifact.grounding.scene_implementation=output/<topic>_<timestamp>/logs/grounding/scene_implementation.json
-#   artifact.grounding.video_generation=output/<topic>_<timestamp>/logs/grounding/video_generation.json
+#   artifact.grounding.<stage>=output/<topic>_<timestamp>/logs/grounding/<stage>.json
 #   artifact.run_index=output/<topic>_<timestamp>/p000_index.md
 #   artifact.l2_supervisor_progress=logs/orchestration/l2_supervisor_progress.md
 #   orchestration.pXXX.supervisor.progress=logs/orchestration/l2_supervisor_progress.md
@@ -379,124 +123,12 @@
 #   orchestration.pXXX.supervisor.status=done|blocked|failed
 #   orchestration.pXXX.supervisor.result=logs/orchestration/pXXX.supervisor_result.json
 #   orchestration.pXXX.supervisor.finished_at=ISO8601
-#   artifact.manifest_review=output/<topic>_<timestamp>/manifest_review.md
 #   artifact.video=output/<topic>_<timestamp>/video.mp4
-#   artifact.video_review_report=output/<topic>_<timestamp>/video_review.md
 #   artifact.video.short.01=output/<topic>_<timestamp>/shorts/short01.mp4
-#   review.video.status=pending|approved|changes_requested
-#   review.video_requests.status=pending|approved|changes_requested
-#   review.video.note=string
-#   review.video_requests.note=string
-#   review.video.at=ISO8601
-#   review.video_requests.at=ISO8601
-#   review.video.change_request_count=0
-#   review.video.open_change_request_count=0
-#   review.video.last_change_request_id=string
-#   review.final.duration_fit.status=passed|changes_requested
-#   review.final.duration_fit.target_seconds=300
-#   review.final.duration_fit.minimum_seconds=240  # target * 0.8; lower-bound-only, no maximum
-#   review.final.duration_fit.actual_seconds=0
-#   review.final.duration_fit.ratio=0.0
-#   review.final.duration_fit.measurement_layer=final_video
-#   review.final.duration_fit.at=ISO8601
-#   eval.research.score=0.0-1.0
-#   eval.research.status=approved|changes_requested
-#   eval.research.findings=0
-#   eval.research.loop.status=pending|running|passed|changes_requested|failed
-#   eval.research.loop.current_round=0-5
-#   eval.research.loop.max_rounds=5
-#   eval.research.loop.final_report=research_review.md
-#   eval.research.loop.round_01.critic_1=logs/eval/research/round_01/critic_1.md
-#   eval.research.loop.round_01.critic_1_prompt=logs/eval/research/round_01/prompts/critic_1.prompt.md
-#   eval.research.loop.round_01.critic_5=logs/eval/research/round_01/critic_5.md
-#   eval.research.loop.round_01.critic_5_prompt=logs/eval/research/round_01/prompts/critic_5.prompt.md
-#   eval.research.loop.round_01.aggregator_prompt=logs/eval/research/round_01/prompts/aggregator.prompt.md
-#   eval.research.loop.round_01.aggregated_review=logs/eval/research/round_01/aggregated_review.md
-#   eval.research.overall_rubric=0.0-1.0
-#   eval.research.rubric.source_grounding=0.0-1.0
-#   eval.research.rubric.coverage=0.0-1.0
-#   eval.research.rubric.conflict_readiness=0.0-1.0
-#   eval.research.rubric.structure_readiness=0.0-1.0
-#   eval.research.rubric.story_material_readiness=0.0-1.0
-#   eval.story.score=0.0-1.0
-#   eval.script.score=0.0-1.0
-#   eval.script.status=approved|changes_requested
-#   eval.script.findings=0
-#   eval.script.overall_rubric=0.0-1.0
-#   eval.script.rubric.arc_coverage=0.0-1.0
-#   eval.script.rubric.scene_specificity=0.0-1.0
-#   eval.script.rubric.reference_grounding=0.0-1.0
-#   eval.script.rubric.anti_todo=0.0-1.0
-#   eval.script.rubric.production_readiness=0.0-1.0
-#   eval.manifest.score=0.0-1.0
-#   eval.manifest.status=approved|changes_requested
-#   eval.manifest.findings=0
-#   eval.manifest.overall_rubric=0.0-1.0
-#   eval.manifest.rubric.beat_clarity=0.0-1.0
-#   eval.manifest.rubric.visual_specificity=0.0-1.0
-#   eval.manifest.rubric.continuity_readiness=0.0-1.0
-#   eval.manifest.rubric.narration_alignment=0.0-1.0
-#   eval.manifest.rubric.production_readiness=0.0-1.0
-#   note: renderable silent cuts are valid only when manifest audio.narration.silence_contract declares intentional + confirmed_by_human
-#   eval.video.score=0.0-1.0
-#   eval.video.status=approved|changes_requested
-#   eval.video.findings=0
-#   eval.video.overall_rubric=0.0-1.0
-#   eval.video.rubric.render_integrity=0.0-1.0
-#   eval.video.rubric.asset_completeness=0.0-1.0
-#   eval.video.rubric.review_readiness=0.0-1.0
-#   eval.video.rubric.audio_packaging=0.0-1.0
-#   eval.video.rubric.publish_readiness=0.0-1.0
-#   eval.image_prompt.score=0.0-1.0
-#   eval.image_prompt.findings=0
-#   eval.image_prompt.unresolved_entries=0
-#   eval.image_prompt.rubric.story_alignment=0.0-1.0
-#   eval.image_prompt.rubric.subject_specificity=0.0-1.0
-#   eval.image_prompt.rubric.prompt_craft=0.0-1.0
-#   eval.image_prompt.rubric.continuity_readiness=0.0-1.0
-#   eval.image_prompt.rubric.production_readiness=0.0-1.0
-#   eval.narration.score=0.0-1.0
-#   eval.narration.findings=0
-#   eval.narration.unresolved_entries=0
-#   eval.narration.rubric.tts_readiness=0.0-1.0
-#   eval.narration.rubric.story_role_fit=0.0-1.0
-#   eval.narration.rubric.anti_redundancy=0.0-1.0
-#   eval.narration.rubric.pacing_fit=0.0-1.0
-#   eval.narration.rubric.spoken_japanese=0.0-1.0
-#   eval.narration.rubric.voice_continuity=0.0-1.0
-#   eval.narration.rubric.emotional_curve=0.0-1.0
-#   eval.narration.rubric.information_flow=0.0-1.0
-#   eval.narration.rubric.repetition_control=0.0-1.0
-#   selection.story.candidate_count=2
-#   selection.story.chosen_id=A
-#   artifact.eval_report=output/<topic>_<timestamp>/eval_report.json
-#   qa.accuracy_score=0.0-1.0
-#   qa.engagement_score=0.0-1.0
-#   qa.consistency_score=0.0-1.0
-#   runtime.attempts.research=0
-#   runtime.attempts.story=0
-#   runtime.attempts.script=0
-#   runtime.attempts.video=0
-#   runtime.scene.1.status=draft|review|revise|accepted|failed
-#   runtime.scene.1.attempts=0
-#   last_error=string|null
-#   note: evaluator / verifier compatibility aliases `manifest=scene_implementation`, `image_prompt=scene_implementation`, `video=video_generation`
-#
-# Example:
-#
-# timestamp=2026-01-17T12:00:00Z
-# job_id=JOB_2026-01-17_0001
-# topic=桃太郎
-# status=RESEARCH
-# stage.research.status=done
-# stage.research.started_at=2026-01-17T11:30:00Z
-# stage.research.finished_at=2026-01-17T12:00:00Z
-# stage.story.status=in_progress
-# stage.story.started_at=2026-01-17T12:00:00Z
-# gate.research_review=required
-# gate.script_review=required
-# artifact.research=output/momotaro_20260117_1200/research.md
-# eval.research.score=0.8500
-# artifact.eval_report=output/momotaro_20260117_1200/eval_report.json
-# runtime.attempts.research=1
-# ---
+
+# Legacy compatibility:
+# - Existing review.*, eval.*, gate.*, and retired slot keys are preserved in
+#   canonical state history when present. They are not active production
+#   requirements, progress blockers, score inputs, or approval certificates.
+# - Existing state.current.json and p000_index.md files are read as data and
+#   may be regenerated without changing state.txt history.

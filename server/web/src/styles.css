@@ -1358,14 +1358,14 @@ body {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
-.audioReviewBox {
+.audioCandidateBox {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) auto;
   gap: 10px;
   align-items: center;
 }
 
-.audioReviewBox audio,
+.audioCandidateBox audio,
 .renderAudioSlot audio {
   width: 100%;
   min-width: 0;
@@ -1857,7 +1857,7 @@ body {
   .narrationSettingsGrid,
   .renderSettingsGrid,
   .renderMediaGrid,
-  .audioReviewBox,
+  .audioCandidateBox,
   .sceneCutTabsBar {
     grid-template-columns: 1fr;
   }

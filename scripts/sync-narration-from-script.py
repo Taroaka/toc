@@ -81,7 +81,9 @@ def preferred_text(cut: dict[str, Any]) -> str:
 
 
 def preferred_tts_text(cut: dict[str, Any]) -> str:
-    return resolve_script_cut_tts_text(cut)
+    human_review = _as_dict(cut.get("human_review"))
+    approved = str(human_review.get("approved_tts_text") or "").strip()
+    return approved or resolve_script_cut_tts_text(cut)
 
 
 def preferred_visual_beat(cut: dict[str, Any]) -> str:

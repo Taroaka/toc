@@ -430,6 +430,38 @@ SCENE_CAUSAL_CONNECTION_INSTRUCTION = (
 )
 
 
+# Runtime counterpart of docs/story-creation.md: 観客の理解と意味の設計.
+# Shared by planning, single/batched scene authoring, and bounded repair.
+AUDIENCE_MEANING_INSTRUCTION = (
+    "Consider audience understanding and meaning as optional authoring tools, "
+    "not another plot formula. Plan what the audience can initially understand, "
+    "which source-grounded experiences support or question that understanding, "
+    "and what remains at the end. Deepening, confirmation, uncertainty, competing "
+    "interpretations, and unchanged characters are valid; do not require positive "
+    "growth, a hero, a return, a moral, a reversal, or a resolved ending. "
+    "Keep world facts, each character's beliefs, audience knowledge, and intended "
+    "affect distinct. Where repetition serves this story, connect an element's "
+    "earlier and later context through concrete evidence; an element may be an "
+    "action, relationship, sound, situation, place, or object. Repetition and "
+    "changed meaning are optional, with no fixed count or mandatory symbol. "
+    "Show relevant world rules and viewpoints through choices, behavior, "
+    "relationships, and consequences. Ground claims about real cultures, history, "
+    "and traditions in research; for fictional worlds follow the authored setting "
+    "and mark creative additions explicitly. Do not treat one viewpoint as "
+    "everyone's belief. "
+    "During architecture, stay at scene-plan scope and preserve source-event "
+    "ownership. During scene authoring, use the existing start_state and "
+    "end_state audience_knowledge, event_sequence audience_knowledge_delta, "
+    "required_visual_evidence, and reveal_contract to make these intentions "
+    "concrete. Knowledge may be reinforced or maintained; every beat need not "
+    "introduce a new fact. Keep creative interpretation explicit and preserve "
+    "source-backed meanings, endings, ambiguity, and reveal order. Do not add "
+    "scenes, events, assets, or required schema fields just to fit these tools. "
+    "During repair, preserve the source-grounded intent and planned reveal order "
+    "while correcting fields identified by the supplied structural errors."
+)
+
+
 def build_story_architect_prompt(
     registry: Mapping[str, Any],
     topic: str = "",
@@ -452,6 +484,7 @@ def build_story_architect_prompt(
         "role": "Story Architect",
         "instructions": [
             SCENE_CAUSAL_CONNECTION_INSTRUCTION,
+            AUDIENCE_MEANING_INSTRUCTION,
             "Use every research field available in full; do not truncate, summarize away, or invent source facts.",
             "Assign every canonical research event to exactly one semantic scene while preserving chronological order.",
             "Return only the architectural scene plan at this turn: stable scene_id, title, phase, source_event_ids, incoming_state_id, outgoing_state_id, previous_scene_id, next_scene_id, and causal_connection_from_previous.",

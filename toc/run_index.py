@@ -23,15 +23,14 @@ DEFAULT_SLOT_MEANINGS: dict[str, str] = {
 
 ROLE_ORDER = {
     "canonical": 0,
-    "review": 1,
-    "request": 2,
-    "output": 3,
-    "log": 4,
-    "scratch": 5,
-    "transitional": 6,
-    "legacy": 7,
-    "compat": 8,
-    "designed_absent": 9,
+    "request": 1,
+    "output": 2,
+    "log": 3,
+    "scratch": 4,
+    "transitional": 5,
+    "legacy": 6,
+    "compat": 7,
+    "designed_absent": 8,
 }
 
 
@@ -42,8 +41,8 @@ class StageSpec:
     slots: dict[str, str]
     state_keys: tuple[str, ...]
     source_of_truth: str
-    evaluator: str
-    human_review: str
+    validator: str
+    handoff: str
     request_target: str
     outputs: str
     default_owner: str
@@ -89,7 +88,7 @@ STAGES: tuple[StageSpec, ...] = (
         slots=_stage_slots(
             {
                 "00": "run navigation source-of-truth",
-                "10": "current stage / gate summary",
+                "10": "current stage summary",
                 "20": "next production action pointer",
                 "30": "stage table / navigation handoff",
                 "40": "current run inventory",
@@ -98,8 +97,8 @@ STAGES: tuple[StageSpec, ...] = (
         ),
         state_keys=(),
         source_of_truth="p000_index.md",
-        evaluator="-",
-        human_review="p000_index.md から次の production action へ進む",
+        validator="-",
+        handoff="p000_index.md から次の production action へ進む",
         request_target="stage table / inventory",
         outputs="p000_index.md",
         default_owner="human",
@@ -118,8 +117,8 @@ STAGES: tuple[StageSpec, ...] = (
         ),
         state_keys=("stage.research.status",),
         source_of_truth="research.md",
-        evaluator="deterministic research validation",
-        human_review="research.md",
+        validator="deterministic research validation",
+        handoff="research.md",
         request_target="-",
         outputs="research.md",
         default_owner="subagent",
@@ -140,8 +139,8 @@ STAGES: tuple[StageSpec, ...] = (
         ),
         state_keys=("stage.story.status",),
         source_of_truth="story.md",
-        evaluator="deterministic story validation",
-        human_review="story.md",
+        validator="deterministic story validation",
+        handoff="story.md",
         request_target="-",
         outputs="story.md",
         default_owner="subagent",
@@ -160,8 +159,8 @@ STAGES: tuple[StageSpec, ...] = (
         ),
         state_keys=("stage.visual_value.status",),
         source_of_truth="visual_value.md",
-        evaluator="visual planning evaluator",
-        human_review="visual planning source doc",
+        validator="visual planning validation",
+        handoff="visual planning source doc",
         request_target="p400/p500/p600/p700 visual planning handoff",
         outputs="visual_value.md",
         default_owner="subagent",
@@ -182,8 +181,8 @@ STAGES: tuple[StageSpec, ...] = (
         ),
         state_keys=("stage.script.status",),
         source_of_truth="script.md",
-        evaluator="deterministic script validation",
-        human_review="script.md",
+        validator="deterministic script validation",
+        handoff="script.md",
         request_target="human change log",
         outputs="script.md",
         default_owner="subagent",
@@ -204,13 +203,13 @@ STAGES: tuple[StageSpec, ...] = (
                 "40": "asset validation",
                 "50": "asset requests",
                 "60": "asset generation",
-                "70": "asset continuity check / human review handoff",
+                "70": "asset continuity check / handoff",
             }
         ),
         state_keys=("stage.asset.status", "stage.asset_generation.status"),
         source_of_truth="asset_plan.md",
-        evaluator="deterministic asset validation",
-        human_review="asset_plan.md",
+        validator="deterministic asset validation",
+        handoff="asset_plan.md",
         request_target="asset_generation_requests.md / asset generation manifests",
         outputs="assets/characters/**, assets/objects/**, assets/locations/**, assets/test/**",
         default_owner="generator",
@@ -232,13 +231,13 @@ STAGES: tuple[StageSpec, ...] = (
                 "50": "generation ready / request freeze",
                 "60": "scene image outputs",
                 "70": "image qa / fix loop",
-                "80": "image review handoff",
+                "80": "image handoff",
             }
         ),
         state_keys=("stage.scene_implementation.status", "stage.image_generation.status"),
         source_of_truth="video_manifest.md",
-        evaluator="deterministic scene request validation",
-        human_review="image_generation_requests.md",
+        validator="deterministic scene request validation",
+        handoff="image_generation_requests.md",
         request_target="image_generation_requests.md",
         outputs="assets/scenes/**",
         default_owner="generator",
@@ -262,8 +261,8 @@ STAGES: tuple[StageSpec, ...] = (
         ),
         state_keys=("stage.narration.status",),
         source_of_truth="script.md narration / production video_manifest.md runtime handoff",
-        evaluator="duration and file validation",
-        human_review="script.md / audio playback",
+        validator="duration and file validation",
+        handoff="script.md / audio playback",
         request_target="manifest audio node / TTS runtime request",
         outputs="assets/audio/**",
         default_owner="generator",
@@ -284,8 +283,8 @@ STAGES: tuple[StageSpec, ...] = (
         ),
         state_keys=("stage.video.status", "stage.video_generation.status"),
         source_of_truth="video_generation plan / manifest handoff",
-        evaluator="deterministic video request/output validation",
-        human_review="video_generation_requests.md",
+        validator="deterministic video request/output validation",
+        handoff="video_generation_requests.md",
         request_target="video_generation_requests.md",
         outputs="assets/videos/**",
         default_owner="generator",
@@ -305,8 +304,8 @@ STAGES: tuple[StageSpec, ...] = (
         ),
         state_keys=("stage.render.status", "stage.qa.status"),
         source_of_truth="video_clips.txt / video_narration_list.txt",
-        evaluator="deterministic render and runtime validation",
-        human_review="run_report.md / final video output",
+        validator="deterministic render and runtime validation",
+        handoff="run_report.md / final video output",
         request_target="render inputs / clip list",
         outputs="video.mp4 / shorts/**",
         default_owner="render pipeline",
@@ -326,7 +325,7 @@ STAGE_ORDER = [stage.bucket for stage in STAGES]
 SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
     "p000": (
         SlotSpec("p000", "Run Entrance", "run navigation source-of-truth", planned_artifacts=("p000_index.md",)),
-        SlotSpec("p010", "Current Position", "current stage and gate summary"),
+        SlotSpec("p010", "Current Position", "current stage summary"),
         SlotSpec("p020", "Next Action", "next production action target"),
         SlotSpec("p030", "Stage Table", "fixed slot workflow table and handoff summary"),
         SlotSpec("p040", "Run Inventory", "artifact inventory and file-to-slot mapping"),
@@ -336,13 +335,12 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
         SlotSpec(
             "p110",
             "Research Grounding",
-            "resolve, audit, readset, and preflight artifacts for research",
+            "resolve, readset, and preflight artifacts for research",
             planned_artifacts=(
                 "logs/grounding/research.json",
                 "logs/grounding/research.readset.json",
-                "logs/grounding/research.audit.json",
             ),
-            state_keys=("stage.research.grounding.status", "stage.research.audit.status"),
+            state_keys=("stage.research.grounding.status",),
         ),
         SlotSpec("p120", "Research Authoring", "author research.md", planned_artifacts=("research.md",), state_keys=("stage.research.status",)),
     ),
@@ -350,13 +348,12 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
         SlotSpec(
             "p210",
             "Story Grounding",
-            "resolve, audit, readset, and preflight artifacts for story",
+            "resolve, readset, and preflight artifacts for story",
             planned_artifacts=(
                 "logs/grounding/story.json",
                 "logs/grounding/story.readset.json",
-                "logs/grounding/story.audit.json",
             ),
-            state_keys=("stage.story.grounding.status", "stage.story.audit.status"),
+            state_keys=("stage.story.grounding.status",),
         ),
         SlotSpec("p220", "Story Authoring", "author story.md", planned_artifacts=("story.md",), state_keys=("stage.story.status",)),
     ),
@@ -372,9 +369,8 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
             planned_artifacts=(
                 "logs/grounding/script.json",
                 "logs/grounding/script.readset.json",
-                "logs/grounding/script.audit.json",
             ),
-            state_keys=("stage.script.grounding.status", "stage.script.audit.status"),
+            state_keys=("stage.script.grounding.status",),
         ),
         SlotSpec("p420", "Cut Blueprint / Script Authoring", "author cut blueprints after scene authoring", planned_artifacts=("script.md",), state_keys=("stage.script.status",)),
         SlotSpec("p440", "Human Changes / Narration Sync", "human change log and narration synchronization", default_requirement="optional"),
@@ -384,13 +380,12 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
         SlotSpec(
             "p510",
             "Asset Grounding",
-            "resolve, audit, readset, and preflight artifacts for asset stage",
+            "resolve, readset, and preflight artifacts for asset stage",
             planned_artifacts=(
                 "logs/grounding/asset.json",
                 "logs/grounding/asset.readset.json",
-                "logs/grounding/asset.audit.json",
             ),
-            state_keys=("stage.asset.grounding.status", "stage.asset.audit.status"),
+            state_keys=("stage.asset.grounding.status",),
         ),
         SlotSpec(
             "p520",
@@ -414,13 +409,12 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
         SlotSpec(
             "p610",
             "Scene Implementation Grounding",
-            "resolve, audit, readset, and preflight artifacts for scene implementation",
+            "resolve, readset, and preflight artifacts for scene implementation",
             planned_artifacts=(
                 "logs/grounding/scene_implementation.json",
                 "logs/grounding/scene_implementation.readset.json",
-                "logs/grounding/scene_implementation.audit.json",
             ),
-            state_keys=("stage.scene_implementation.grounding.status", "stage.scene_implementation.audit.status"),
+            state_keys=("stage.scene_implementation.grounding.status",),
         ),
         SlotSpec("p620", "Production Manifest / Prompt Authoring", "author and revise production video_manifest.md for cut-level prompts", planned_artifacts=("video_manifest.md",)),
         SlotSpec(
@@ -438,13 +432,12 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
         SlotSpec(
             "p710",
             "Narration Grounding",
-            "resolve, audit, readset, and confirm production manifest for narration/audio runtime",
+            "resolve, readset, and confirm production manifest for narration/audio runtime",
             planned_artifacts=(
                 "logs/grounding/narration.json",
                 "logs/grounding/narration.readset.json",
-                "logs/grounding/narration.audit.json",
             ),
-            state_keys=("stage.narration.grounding.status", "stage.narration.audit.status"),
+            state_keys=("stage.narration.grounding.status",),
         ),
         SlotSpec("p730", "TTS Request / Generation", "prepare and run TTS generation", default_requirement="optional"),
         SlotSpec("p740", "Duration Fit Gate", "check actual audio-driven runtime against the target minimum duration", default_requirement="optional"),
@@ -454,13 +447,12 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
         SlotSpec(
             "p810",
             "Video Grounding",
-            "resolve, audit, readset, and preflight artifacts for video generation",
+            "resolve, readset, and preflight artifacts for video generation",
             planned_artifacts=(
                 "logs/grounding/video_generation.json",
                 "logs/grounding/video_generation.readset.json",
-                "logs/grounding/video_generation.audit.json",
             ),
-            state_keys=("stage.video_generation.grounding.status", "stage.video_generation.audit.status"),
+            state_keys=("stage.video_generation.grounding.status",),
         ),
         SlotSpec("p830", "Video Requests", "freeze video generation requests", planned_artifacts=("video_generation_requests.md",), default_requirement="optional"),
         SlotSpec("p840", "Video Generation", "generate video clips", default_requirement="optional"),
@@ -473,23 +465,12 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
 
 SLOT_BY_CODE = {slot.code: slot for slots in SLOT_CONTRACTS.values() for slot in slots}
 
-# Kept as empty compatibility exports for callers that imported the old
-# projection constants.  Review gates are no longer part of production state.
-PENDING_GATE_TARGETS: dict[str, tuple[str, str, str]] = {}
-PENDING_GATE_REVIEW_KEYS: tuple[tuple[str, str], ...] = ()
-
-
 def _parse_state_file(state_path: Path) -> dict[str, str]:
     try:
         state_path.lstat()
     except FileNotFoundError:
         return {}
     return dict(read_current_state(state_path).state)
-
-
-def _pending_gates(state: dict[str, str]) -> list[str]:
-    del state
-    return []
 
 
 def _normalize_slot_state(value: str) -> str:
@@ -562,11 +543,6 @@ def _summarize_slot_status(slot: SlotSpec, state: dict[str, str], entries: list[
 
 def _slot_requirement(slot: SlotSpec, state: dict[str, str]) -> str:
     return state.get(f"slot.{slot.code}.requirement", "").strip().lower() or slot.default_requirement
-
-
-def _next_required_human_review(state: dict[str, str]) -> str:
-    del state
-    return "-"
 
 
 def _current_position(state: dict[str, str]) -> str:

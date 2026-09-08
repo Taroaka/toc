@@ -51,12 +51,12 @@ class TestRunIndex(unittest.TestCase):
 
             index_text = (run_dir / "p000_index.md").read_text(encoding="utf-8")
             self.assertIn("current_position: `status=SCRIPT`", index_text)
-            self.assertIn("next_required_human_review: `script.md`", index_text)
-            self.assertIn("pending_gates: `script_review`", index_text)
+            self.assertNotIn("next_required_human_review:", index_text)
+            self.assertNotIn("pending_gates:", index_text)
             self.assertIn("`p740` | Narration / Audio Runtime Stage | `optional` | Duration Fit Gate", index_text)
             self.assertIn("#### p110 Research Grounding", index_text)
             self.assertIn("- requirement: `required`", index_text)
-            self.assertIn("[transitional] `scene_outline_v3.md`", index_text)
+            self.assertIn("[legacy] `scene_outline_v3.md`", index_text)
             self.assertIn("[output] `assets/audio/scene01_cut01.mp3`", index_text)
             self.assertIn("[log] `logs/providers/scene01_image.json`", index_text)
             self.assertIn("[scratch] `scratch/note.txt`", index_text)
@@ -166,10 +166,10 @@ class TestRunIndex(unittest.TestCase):
             self.assertEqual(script_entry.slot, "p420")
             self.assertEqual(manifest_entry.slot, "p450")
             self.assertEqual(grounding_entry.slot, "p710")
-            self.assertEqual(state_entry.slot, "p930")
+            self.assertEqual(state_entry.slot, "p950")
             self.assertIn("scene subrun", grounding_entry.note)
 
-    def test_current_position_uses_runtime_progress_before_pending_review_gate(self) -> None:
+    def test_current_position_uses_runtime_progress_without_review_gate(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_run_index_position_") as td:
             run_dir = Path(td) / "out" / "topic_20990101_0000"
             run_dir.mkdir(parents=True)
@@ -188,12 +188,15 @@ class TestRunIndex(unittest.TestCase):
             )
 
             self.assertIn("current_position: `runtime.stage=P300`", index_text)
-            self.assertIn("next_required_human_review: `story.md`", index_text)
-            self.assertIn("pending_gates: `story_review`", index_text)
+            self.assertNotIn("next_required_human_review:", index_text)
+            self.assertNotIn("pending_gates:", index_text)
 
-    def test_review_slot_labels_mention_improvement_loop(self) -> None:
-        review_slots = ("p130", "p230", "p320", "p430", "p540", "p630", "p640", "p720", "p820", "p850", "p930")
+    def test_review_slots_are_absent_but_authoring_slots_remain(self) -> None:
+        retired_slots = ("p130", "p230", "p320", "p430", "p435", "p540", "p630", "p640", "p720", "p820", "p850", "p930")
 
-        for slot_code in review_slots:
+        for slot_code in retired_slots:
             with self.subTest(slot=slot_code):
-                self.assertIn("Improve Loop", SLOT_BY_CODE[slot_code].title)
+                self.assertNotIn(slot_code, SLOT_BY_CODE)
+        for slot_code in ("p410", "p420", "p570", "p680", "p750"):
+            with self.subTest(slot=slot_code):
+                self.assertIn(slot_code, SLOT_BY_CODE)

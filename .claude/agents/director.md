@@ -32,15 +32,15 @@ model: inherit
 - cut設計の下流を意識し、ナレーションは **メインカット(5–15秒)** を中心に、必要なら **サブカット(3–15秒)** を足せるまとまり（文脈の区切り）を用意しておく
 - **創造と選択**: まず複数案で多様性を出し、スコア（視聴維持/感情/映像化/分かりやすさ/一貫性）が高い案を選ぶ
 - **フレームワークは道具**: Hero's Journey への当てはめは必須ではない（低フィットでも失格ではない）
-- **混成は承認必須（運用）**: 矛盾する複数ソースの要素を「同一シーン/設定」としてハイブリッド化する場合は、確定前にユーザーに承認を求める
+- **混成は明示選択必須（運用）**: 矛盾する複数ソースの要素を「同一シーン/設定」としてハイブリッド化する場合は、確定前にユーザーの明示選択を求める
 
 ## 作業手順
 
-1) 開始前に `python scripts/resolve-stage-grounding.py --stage story --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive` を実行し、続けて `python scripts/audit-stage-grounding.py --stage story --run-dir output/<topic>_<timestamp>` を実行して `stage.story.grounding.status=ready` と `stage.story.audit.status=passed` を確認する  
+1) 開始前に `python scripts/prepare-stage-context.py --stage story --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive` で required docs/templates/inputs の source context を準備し、返された readset を読む
 2) `docs/system-architecture.md` と `docs/story-creation.md` を読み、全体設計と構成・パターン・出力スキーマを把握  
 3) research を読み、以下を抽出  
    - governing thought / SCQA / hooks / tension points  
-4) **物語案を2–4個作る**（短い logline + 何がスコアに効くか）。必要なら `research.conflicts` を参照  
+4) **物語案を2–4個作る**（短い logline + source basis + creative boundary）。必要なら `research.conflicts` を参照  
 5) 物語案を比較し、**採用案を1つ選ぶ**（理由を短く残す）  
 6) 選んだ案に沿ってシーンを設計する（必ずしも Hero's Journey 3フェーズに固定しない）  
 7) `story.md` を作成し、`sources` セクションで根拠を付与  
@@ -51,7 +51,7 @@ model: inherit
 
 1) 矛盾しているソース（A/B）と衝突点  
 2) 混ぜたい要素（箇条書き）  
-3) 混ぜる理由（スコアが上がる理由）  
+3) 混ぜる理由（物語上必要な理由）  
 4) 破綻リスク（矛盾・違和感・時代錯誤・安全）  
 5) 安全策（混成に見えない構造/但し書き/落とし所）  
 6) 「このハイブリッドで進めてよいですか？」（Yes/No）

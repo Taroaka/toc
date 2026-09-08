@@ -13,7 +13,6 @@ from typing import Any
 from .common import (
     EVENT_TIME_POSITION_VALUES,
     FORBIDDEN_SCENE_EVENT_DIRECTING_FIELDS,
-    SCENE_COVERAGE_REVIEW_REQUIRED_KEYS,
     SCENE_GENERATION_REQUIRED_BLOCKS,
     SCENE_GENERATION_REQUIRED_OUTPUTS,
     SCENE_PROMPT_PAYLOAD_FIXED_CUT_COUNT_RE,
@@ -206,9 +205,8 @@ def _append_p400_scene_cut_checks(
     scenes: list[Any],
     *,
     run_dir: Path | None = None,
-    deterministic_preapproval: bool = False,
 ) -> None:
-    del run_dir, deterministic_preapproval
+    del run_dir
     renderable = [scene for scene in scenes if isinstance(scene, dict) and not str(scene.get("kind") or "").strip().endswith("_reference")]
     missing_cuts = [
         _scene_id_for_issue(scene, str(index))

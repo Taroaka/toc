@@ -41,8 +41,7 @@ When execution is needed, explicitly use `$codex-parallel-image-batch`.
 3. Missing new metadata defaults to `standard`, not `bootstrap_builtin`.
 4. Any asset with `reference_inputs[]` must stay on the standard lane, still using `tool: codex_builtin_image`.
 5. Any asset with `derived_from_asset_id` must stay on the standard lane, still using `tool: codex_builtin_image`.
-6. Bootstrap outputs are not canonical until `review.status=approved`.
-7. After approval, the selected bootstrap output may remain as the canonical asset in the workspace.
+6. Bootstrap outputs become canonical when the request-bound output, file, decode, and provenance checks pass.
 
 ## Execution Workflow
 
@@ -57,13 +56,13 @@ When execution is needed, explicitly use `$codex-parallel-image-batch`.
    - `asset_type`
    - `prompt`
    - `output_path`
-   - `review_status`
+   - `provenance_status`
 5. Route execution through `$codex-parallel-image-batch`.
 6. After built-in generation, import the selected output into the canonical asset path.
-7. Treat the asset as canonical only after human review approval.
+7. Treat the asset as canonical after request-bound output, file, decode, and provenance checks pass.
 8. Record the saved path in `existing_outputs[]` and mark `creation_status` accordingly when updating planning artifacts.
 
-## Review Expectations
+## Visual Expectations
 
 - `character_reference`: full-body, head-to-toe front / side / back three-view output; face, hairstyle, costume, age impression
 - `object_reference`: silhouette, material, decoration, scale impression
@@ -80,4 +79,4 @@ When execution is needed, explicitly use `$codex-parallel-image-batch`.
 ## Example Uses
 
 - "Use $toc-p500-bootstrap-image-runner for p500 assets that have no reference images yet."
-- "Use $toc-p500-bootstrap-image-runner to create initial character/object/location seeds, then stop for human review."
+- "Use $toc-p500-bootstrap-image-runner to create initial character/object/location seeds and validate their output bindings."

@@ -104,7 +104,7 @@ def test_neighbor_edit_invalidates_audio_frozen_with_old_tts_context() -> None:
     assert "scene1_cut1" in invalidated
     assert narration["candidates"][0]["status"] == "stale"
     assert narration["output"] == ""
-    assert narration["audio_review"]["status"] == "pending"
+    assert narration["audio_review"]["status"] == "approved"
 
 
 def test_historical_stale_candidate_does_not_unlock_current_context_audio() -> None:

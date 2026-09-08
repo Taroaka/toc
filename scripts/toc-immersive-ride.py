@@ -30,10 +30,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from toc.grounding import (
     StageGroundingError,
-    build_stage_grounding_audit,
     build_stage_grounding_readset,
     canonical_stage_name,
-    grounding_audit_relpath,
     grounding_readset_relpath,
     grounding_report_relpath,
     load_grounding_contract,
@@ -1255,13 +1253,6 @@ def maybe_run_stage_grounding(run_dir: Path, stage: str, *, flow: str, fatal: bo
                     report,
                     stage=canonical_stage,
                 )
-                audit = build_stage_grounding_audit(
-                    run_dir=run_dir,
-                    stage=canonical_stage,
-                    report=report,
-                    readset=readset,
-                    contract=contract,
-                )
                 artifacts = (
                     (
                         grounding_report_relpath(canonical_stage),
@@ -1270,10 +1261,6 @@ def maybe_run_stage_grounding(run_dir: Path, stage: str, *, flow: str, fatal: bo
                     (
                         grounding_readset_relpath(canonical_stage),
                         readset,
-                    ),
-                    (
-                        grounding_audit_relpath(canonical_stage),
-                        audit,
                     ),
                 )
                 for relative, payload in artifacts:
@@ -1305,21 +1292,10 @@ def maybe_run_stage_grounding(run_dir: Path, stage: str, *, flow: str, fatal: bo
                         ): grounding_readset_relpath(
                             canonical_stage
                         ).as_posix(),
-                        (
-                            f"stage.{canonical_stage}.audit.status"
-                        ): str(audit["status"]),
-                        (
-                            f"stage.{canonical_stage}.audit.report"
-                        ): grounding_audit_relpath(
-                            canonical_stage
-                        ).as_posix(),
                     },
                 )
                 last_report = report
-                if (
-                    report["status"] == "ready"
-                    and audit["status"] == "passed"
-                ):
+                if report["status"] == "ready":
                     return
             assert last_report is not None
             append_state_block(
@@ -1358,8 +1334,13 @@ def require_fresh_p400_readiness(run_dir: Path) -> None:
 
     stage_result, updates = check_manifest_single(run_dir, "standard", "immersive")
     _assert_safe_run_tree(run_dir)
-    if updates:
-        append_state_block(run_dir / "state.txt", updates)
+    structural_updates = {
+        key: value
+        for key, value in updates.items()
+        if not key.startswith(("review.", "eval.", "gate."))
+    }
+    if structural_updates:
+        append_state_block(run_dir / "state.txt", structural_updates)
     failures = [
         str(check.get("id") or "structural_check")
         for check in (stage_result.get("checks", []) if isinstance(stage_result, dict) else [])
@@ -1576,7 +1557,7 @@ def _main_impl() -> None:
         experience = "cinematic_story"
     if experience == "world_walk" and args.stage is None:
         # The world-walk template is an authored source-reference skeleton.
-        # Stop at the script/manifest handoff until its p400 design is approved.
+        # Stop at the script/manifest handoff for world-walk authoring.
         stop_slot = "p450"
     source_run_path: Path | None = (
         Path(args.source_run) if args.source_run else None
@@ -1797,8 +1778,7 @@ def _main_impl() -> None:
     if genuine_rewind and not target_reaches(stop_slot, "p510"):
         ensure_skeleton_manifest_file(manifest_path)
     elif target_reaches(stop_slot, "p510"):
-        # P400 approvals bind video_manifest.md. Promote before refreshing the
-        # final P400 snapshots and before running the readiness gate.
+        # Promote the manifest before downstream request materialization.
         ensure_production_manifest_file(manifest_path)
     source_receipt_state = _refresh_active_source_receipt(run_dir)
 
@@ -2015,8 +1995,6 @@ def _main_impl() -> None:
         )
         return
 
-    write_text(run_dir / "run_report.md", "# Run Report\n\nTODO\n", force=args.force)
-    write_text(run_dir / "eval_report.json", "{}\n", force=args.force)
     finish_scaffold(
         state_path,
         topic_raw,
@@ -2028,14 +2006,6 @@ def _main_impl() -> None:
             **asset_artifacts,
             **scene_artifacts,
             **video_artifacts,
-            "artifact.run_report": _artifact_absolute(
-                run_dir,
-                "run_report.md",
-            ),
-            "artifact.eval_report": _artifact_absolute(
-                run_dir,
-                "eval_report.json",
-            ),
         },
     )
 

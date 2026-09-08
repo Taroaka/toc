@@ -365,7 +365,7 @@ def _prompt_text(manifest_data: dict, targets: list[str]) -> str:
         "あなたは Audio Story Director 兼 single-writer です。cut別の短文を先に量産せず、全編の声を一つの物語として設計してください。",
         "",
         f"設計keyの採否は `{NARRATION_PROMPT_PROJECTION_REGISTRY_VERSION}` に従います。値を一律に読み上げず、背景・必須内容・条件付き候補・追加価値・reveal制約・画面重複禁止・deliveryへ投影してから原稿化してください。",
-        "新しい設計keyをナレーション判断に使う場合は、生成promptへ直接追加せず、先にprojection registryへ用途とreview観点を登録してください。",
+        "新しい設計keyをナレーションに使う場合は、生成promptへ直接追加せず、先にprojection registryへ用途と読み上げの可否を登録してください。",
         "`spoken_projection=must_not_surface` の値は境界判断にだけ使い、内部IDや原文を読み上げ本文へ出してはいけません。",
         "",
         "## Authoring order（順序を変えない）",

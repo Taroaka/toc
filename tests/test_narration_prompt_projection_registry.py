@@ -4,6 +4,7 @@ from toc.narration_prompt_projection_registry import (
     NARRATION_PROMPT_PROJECTION_REGISTRY_VERSION,
     build_narration_prompt_projection,
     narration_projection_registry_issues,
+    projection_rules,
     rule_for_source_key,
 )
 
@@ -25,10 +26,10 @@ class NarrationPromptProjectionRegistryTests(unittest.TestCase):
         )
         self.assertIsNotNone(visual_basis_rule)
         self.assertEqual(visual_basis_rule.usage, "exclude")
-        self.assertEqual(visual_basis_rule.review_visibility, "review_only")
+        self.assertFalse(hasattr(visual_basis_rule, "review_visibility"))
         self.assertEqual(
             visual_basis_rule.transform,
-            "review_visual_daypart_basis_without_speaking_it",
+            "exclude_derived_daypart_basis_from_spoken_text",
         )
 
         location_sequence_rule = rule_for_source_key("scene.location_sequence")
@@ -45,6 +46,11 @@ class NarrationPromptProjectionRegistryTests(unittest.TestCase):
             location_segments_rule.transform,
             "mention_spatial_transition_only_when_orientation_needs_voice",
         )
+
+        for rule in projection_rules():
+            payload = rule.as_dict()
+            self.assertNotIn("review_visibility", payload)
+            self.assertNotIn("semantic_checks", payload)
 
     def test_projection_distinguishes_context_candidates_constraints_and_exclusions(self) -> None:
         manifest = {

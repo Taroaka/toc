@@ -40,15 +40,6 @@ IMAGE_API_PROMPT_POLICY_VERSION_V2 = "image_api_prompt_v2"
 IMAGE_API_PROMPT_V2_GROUPS = set(registered_drawable_group_order())
 IMAGE_API_PROMPT_V2_BASE_GROUPS = {"style", "setting", "lighting", "composition"}
 
-SCENE_COVERAGE_REVIEW_REQUIRED_KEYS: tuple[str, ...] = (
-    "audience_information_covered",
-    "visualizable_action_covered",
-    "value_shift_visible",
-    "causal_turn_visible",
-    "scene_specificity_gate_passed",
-    "next_scene_connection_checked",
-)
-
 SCENE_GENERATION_REQUIRED_BLOCKS: tuple[str, ...] = (
     "scene_authoring_context",
     "scene_prompt_payload",
@@ -320,6 +311,11 @@ def make_stage(
         "stage": stage,
         "artifact": artifact,
         "passed": all(bool(check.get("passed")) for check in checks),
+        "reason_keys": [
+            str(check.get("id"))
+            for check in checks
+            if check.get("passed") is False
+        ],
         "checks": checks,
         "details": details or {},
     }
@@ -410,8 +406,3 @@ def _scene_cut_selector(scene_id: str, cut: dict[str, Any]) -> str:
     if cut_id:
         return f"scene{scene}_cut{cut_id}"
     return f"scene{scene}"
-
-
-# Kept as an explicit marker for callers that used to import it. It no longer
-# drives a pass/fail result or any automatic evidence requirement.
-P400_READINESS_CHECK_IDS: tuple[str, ...] = ()

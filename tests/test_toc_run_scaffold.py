@@ -49,7 +49,7 @@ class TestTocRunScaffold(unittest.TestCase):
             self.assertFalse((run_dir / "logs" / "grounding" / "scene_implementation.json").exists())
             self.assertFalse((run_dir / "logs" / "grounding" / "narration.json").exists())
             self.assertTrue((run_dir / "logs" / "grounding" / "research.readset.json").exists())
-            self.assertTrue((run_dir / "logs" / "grounding" / "research.audit.json").exists())
+            self.assertFalse((run_dir / "logs" / "grounding" / "research.audit.json").exists())
             scene_event_input = json.loads((run_dir / "logs" / "scene_design" / "scene_event_input.json").read_text(encoding="utf-8"))
             scene_event_output = json.loads((run_dir / "logs" / "scene_design" / "scene_event_output.json").read_text(encoding="utf-8"))
             scene_generation_prompts = json.loads((run_dir / "logs" / "scene_design" / "scene_generation_prompts.json").read_text(encoding="utf-8"))

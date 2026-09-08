@@ -1,117 +1,101 @@
-# Evaluation Criteria
+# Structural Validation Criteria
 
-ToC の評価は prompt 単体の出来ではなく、pipeline の各 stage が
-「必要構造・必要根拠・必要 gate」を満たしているかで判定する。
+ToC の各 stage は、必要な入力、構造、参照、生成結果が揃っているかを普通の validator で
+確認する。production の品質 score、rubric、critic、aggregate、合格証明は生成しない。
 
 ## 目的
 
-- `research -> story -> script -> manifest -> video` を共通の評価面に揃える
-- exact text 一致ではなく、構造・根拠・運用 gate の通過可能性を評価する
-- `eval_report.json` と `run_report.md` を毎 run の標準成果物にする
+- `research → story → script → manifest → asset/image → narration → video → render` の
+  artifact contract を揃える
+- source、ID、型、順序、request/provider binding、file/decode/provenance を検出する
+- fast/standard の差で production authoring の必須構造を変えない
 
-## 評価対象
+## Stage checks
 
-### 1. Research
+### Research
 
-- sources 数
-- canonical story dump / legacy synopsis の有無
-- chronological events / legacy beat sheet の量
-- source passages / facts / handoff_to_story の有無
-- conflicts の棚卸し
-- confidence score
-- scene_plan / scene_id は任意参考であり research 合否条件にしない
+- required source paths と exact source bytes/hash
+- source passages、facts、events、conflicts、uncertainty、provenance
+- unique IDs と source-to-story handoff
+- YAML/Markdown shape と required fields
 
-### 2. Story
+Confidence、curiosity、completeness などの research metadata は source context であり、production
+quality score や pass gate ではない。
 
-- 2–4 candidate の比較
-- chosen candidate と rationale
-- scripted scene の research refs
-- hybridization 承認要否の明示
+### Story
 
-### 3. Script
+- protagonist、world、conflict、transformation、theme
+- scene IDs、event order、source refs、creative boundary
+- time-of-day/location contracts と scene handoff
+- optional candidate selection と explicit hybridization choice
 
-- scene / cut の最小構造
-- 実質的な内容量
-- `TODO` / `TBD` の残存有無
+### Script
 
-### 4. Manifest
+- scene intent、scene event sequence、cut blueprint
+- unique scene/cut/beat IDs、event coverage、reveal boundaries
+- first-frame/motion/narration contracts、asset dependencies、handoff selectors
+- `script.md` と skeleton `video_manifest.md` の selector equality
+- duration fields と provider capability
 
-- renderable scene / cut の存在
-- `audio_story_plan` / 全編通し原稿 / narration span と cut anchor の整合。1 span は複数cutをまたいでよい
-- narration text field の存在
-- `audio.narration.text` / `audio.narration.tts_text` に `TODO` / `TBD` / 制作メモが残っていないこと
-- `audio.narration.authoring_status` が `missing|draft|human_locked|reviewed|silent` のいずれかであること
-- revision/hash と audio candidate が一致し、生成成功と人間承認が分離されていること
-- `audio.narration.contract.schema_version: narration_contract_v2` と story role / visual distance / TTS readiness の最低限の記録
-- p720 deterministic reviewでpronunciation candidates、cut-local review、full-run arcを確認し、
-  `narration_workflow.arc_review`がcurrent `narration_text_set_hash`へ束縛されていること
-- p720 independent semantic reviewでretention/hook、narrator persona、causal/information rhythm、
-  audio-visual distance、payoff/endingの5 verdictが揃い、`narration_workflow.semantic_critic_review`がcurrent
-  `narration_text_set_hash`とcurrent exact `semantic_review_input_hash`の両方でpassedであること
-- cut duration 上限
-- `character_ids` / `object_ids` の明示
-- immersive の invariant（experience / no on-screen text）
+### Manifest and asset/image
 
-### 5. Video
+- `manifest_phase`、renderable scenes/cuts、required image/audio/video fields
+- character/object/location IDs と asset plan references
+- compiled prompt payload、request snapshot、source/prompt/provider hashes
+- first/last frame、ordered references、settings、destination
+- generated files の existence、file type、decode、content hash、request-bound provenance
 
-- `video.mp4` existence
-- render status
-- human review 用の `run_report.md`
-- narration list / media duration の最低整合
+### Narration/audio
 
-## 判定方式
+- `script.md` と `tts_text` の one-way projection
+- narration spans、canonical cut order、silence contract
+- pronunciation aliases、TTS settings、candidate revision
+- audio decode と measured duration/timeline
 
-- deterministic check:
-  - file exists
-  - YAML parse
-  - field exists
-  - count threshold
-  - path exists
-- rubric check:
-  - TODO 未解消
-  - coverage
-  - rationale の有無
-  - gate の未解決状態
-  - narration visual distance / voice function / pronunciation unresolved / arc warning
+### Video/render
 
-各 stage score は `passed_checks / total_checks` とする。
+- compiled motion payload、frame/reference bindings、provider capability
+- clip response identity、file/decode、duration、stream compatibility
+- concat order、stream normalization、ffprobe、aspect ratio、subtitle、audio sync
+- final output path、content hash、publication target when supplied
 
-## 出力
+## Validation result
 
-`eval_report.json` の最小形:
+Validator output records each concrete check:
 
 ```json
 {
-  "generated_at": "ISO8601",
-  "run_dir": "output/<topic>_<timestamp>",
-  "flow": "toc-run|scene-series|immersive",
-  "profile": "fast|standard",
-  "overall": {
-    "passed": true,
-    "score": 0.84,
-    "failed_stages": []
-  },
-  "stages": {
-    "research": {
-      "passed": true,
-      "score": 0.88,
-      "checks": []
-    }
-  }
+  "stage": "scene_implementation",
+  "status": "passed|failed|skipped",
+  "checks": [
+    {"id": "scene_ids_unique", "status": "passed", "selectors": []},
+    {"id": "request_provenance", "status": "passed", "selectors": []}
+  ],
+  "errors": [],
+  "warnings": []
 }
 ```
 
-`run_report.md` は上記から生成し、手書きしない。
+`passed` means the named structural check completed. It is not a subjective score and does not
+stand in for user choice. If a check fails, the owner repairs the named artifact/selector and reruns
+the relevant validator.
 
-## 運用
+## Profiles
 
-- fast:
-  - pointer/state/schema/tests 向け
-  - 存在確認と最小構造を優先
-- standard:
-  - final review 前提
-  - TODO 禁止、gate 未解決禁止、manifest/video 契約をより厳しく見る
+- `fast`: pointer, schema, path, ID, request, and file checks needed during local iteration
+- `standard`: the same checks over the complete run, including media decode, duration, stream, and
+  provenance checks
 
-## 回帰セット
+Profiles can change depth and provider calls; they do not introduce a quality rubric or a mandatory
+human handoff.
+
+## Outputs
+
+`run_status.json`, `p000_index.md`, and optional `run_report.md` are derived execution summaries.
+`eval_report.json` is a legacy filename accepted for reading old runs; new validation reports use
+the concrete check shape above.
+
+## Regression set
 
 - `workflow/evals/golden-topics.yaml`
+

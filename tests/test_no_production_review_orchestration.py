@@ -78,6 +78,15 @@ def test_generation_entrypoint_contains_no_reviewer_subprocesses() -> None:
         assert forbidden not in source
 
 
+def test_generation_entrypoint_does_not_gate_video_on_legacy_quality_reports() -> None:
+    source = (
+        REPO_ROOT / "scripts" / "generate-assets-from-manifest.py"
+    ).read_text(encoding="utf-8")
+    assert "quality_issues" not in source
+    assert "_blocking_video_prompt_quality_issue_codes" not in source
+    assert "_assert_video_prompt_quality_allows_provider_execution" not in source
+
+
 def test_audio_duration_gate_has_only_deterministic_runtime_failure_path() -> None:
     source = (
         REPO_ROOT / "scripts" / "check-audio-duration-gate.py"
@@ -97,4 +106,3 @@ def test_vertical_recut_does_not_require_video_review_approval() -> None:
         )
         (run_dir / "video.mp4").write_bytes(b"placeholder")
         module.require_approved(_state(run_dir / "state.txt"), run_dir)
-

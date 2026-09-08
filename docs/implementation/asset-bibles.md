@@ -1,348 +1,167 @@
- # Asset Bibles（object / setpiece）: 正本
+# Asset Bibles（object / setpiece）: 正本
 
-このドキュメントは、キャラクター以外の「物語の主役級要素（アイテム / 舞台装置 / 現象）」を
-**映画品質で設計し、生成に必ず参照させる**ための正本。
+Asset bible は character、object、location、setpiece、phenomenon の reusable visual identity
+を定義する。asset は単なる便利画像ではなく、複数 scene/cut の continuity anchor である。
+生成は asset authoring → structural validation → request-bound generation の順で行う。
 
-狙い:
-- 書籍/絵本でディテールが浅いまま語られてきた舞台装置を、**予算無限の実写映画**として成立する密度に引き上げる
-- 物語のメイン筋に直接関係しない“ショー/仕掛け/誘惑”も、映像の魅力として積極的に設計し、sceneごとの思いつきにしない
-- 文字で説明せず、**映像だけで情報が伝わる**ようにする（看板/刻印/字幕に頼らない）
-- asset を単なる「きれいな物」ではなく、scene の pressure / turn / payoff / handoff を担う **劇的装置**として固定する
+## 1. Asset stage → manifest
 
----
+p500 の active slots:
 
-## 1) データ契約（asset stage → manifest）
+- p510: source context と stage inputs の解決
+- p520: `asset_inventory.md` で character/object/location/setpiece/reusable still を列挙
+- p530: `asset_plan.md` で identity、purpose、reference、variant、output path を定義
+- p550: immutable asset request を materialize
+- p560: reusable asset を生成
+- p570: continuity、file、decode、provenance を普通に検証
 
-画像生成は 2 段で扱う。
+`script.md`、`story.md`、`visual_value.md`、`video_manifest.md` の source IDs と selector を
+辿る。単発 shot の camera、pose、演技、background は scene/cut stage に残す。
 
-1. asset stage
-   - `asset_plan.md` を作り、人が review してから reusable asset を生成する
-2. cut stage
-   - 既存どおり `video_manifest.md` に materialize された bible / reference を使って各 cut を生成する
+## 2. Asset inventory and plan
 
-asset stage では、`script.md` の該当 scene/cut を必ず見る。とくに human review で
+```yaml
+asset_plan:
+  schema_version: asset_plan_v1
+  source_artifacts:
+    - path: story.md
+      sha256: sha256:<hash>
+    - path: script.md
+      sha256: sha256:<hash>
+  assets:
+    - asset_id: character_01
+      asset_type: character|object|location|setpiece|phenomenon|reusable_still
+      story_purpose: ""
+      source_script_selectors: []
+      fixed_prompts: []
+      reference_inputs: []
+      derived_from_asset_id: null
+      variants: []
+      output_path: assets/characters/character_01.png
+      creation_status: planned|created|stale|missing
+      existing_outputs: []
+```
 
-- どの画像を参照するか
-- 背景としてだけ使うか
-- 先に別 asset を作ってから派生を作るか
+Asset identity fields:
 
-のような指示が入った場合は、まず `asset_plan.md` で受ける。
+- character: same person identity、silhouette、costume/state、full-body front/side/back references
+- object/setpiece: silhouette、material、scale、craft traces、mechanism、story purpose
+- location: spatial identity、major structures、light/material、route
+- variant: explicit `derived_from_asset_id` と state/time contract
+- all assets: source selectors、reference paths、provider settings、output destination
 
-### 0.1 p500 slot 運用詳細
+`neutral_anchor` に scene 固有の time-of-day を焼き込まない。時間帯差分や state difference が
+reusable である場合だけ explicit variant として定義する。variant は main reference から派生し、
+別 identity を暗黙に作らない。
 
-`p500` の目的は、p600 の cut 画像生成に入る前に、この物語で繰り返し使う視覚要素を漏れなく固定すること。`p500|500|asset` を target にした場合は、`p570` の asset continuity check まで進める。
+## 3. Asset request
 
-#### p510 asset grounding
+```yaml
+asset_generation_request:
+  schema_version: asset_generation_request_v1
+  generation_job_id: JOB_001
+  item_id: character_01
+  asset_id: character_01
+  provider: codex_builtin_image
+  execution_lane: bootstrap_builtin|standard
+  prompt: "具体的に見える対象の日本語 prompt"
+  negative_prompt: "短い禁止条件"
+  prompt_sha256: sha256:<hash>
+  source_digest: sha256:<hash>
+  reference_inputs: []
+  reference_content_sha256: {}
+  destination: assets/characters/character_01.png
+```
 
-- やること: asset stage で読むべき正本、run local input、stage docs、template を確定する。
-- 主な input: `script.md`、`story.md`、`video_manifest.md`、`docs/implementation/asset-bibles.md`、`docs/data-contracts.md`、`workflow/asset-plan-template.yaml`。
-- 主な output: `logs/grounding/asset.json`、`logs/grounding/asset.readset.json`、`logs/grounding/asset.audit.json`。
-- ゴール: readset が verified、audit が passed で、以後の p520-p570 が親会話だけの暗黙知に依存しない状態にする。
+Provider prompt は drawable subject、material、light、composition、continuity constraints に
+限定し、scene IDs、request metadata、debug keys、source paths、future motion を含めない。
+`reference_inputs: []` は no-reference built-in lane、参照あり/derived asset は standard lane
+として扱える。provider は current default `codex_builtin_image`。
 
-#### p520 reusable asset inventory
+## 4. Generation and ordinary checks
 
-- やること: この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、繰り返し参照される still を `asset_inventory.md` に網羅する。
-- 対象: 主人公の状態差分、相手役、敵役/権力者、案内役/助力者、物語固有の小道具、setpiece、繰り返し使う場所、reusable still。
-- ゴール: 後続 cut で visual identity が揺れる主要 subject が `asset_inventory.md` に洗い出され、`asset_plan.md` 候補に入っていること。
-- 判断基準: `script.md` / `story.md` / `video_manifest.md` に出る固有名詞・固有の場所・物語上の証拠品・再利用される背景を拾う。単発 cut の一時的な構図や演技は p600 に残す。
-- 人物 key は題材固有名へハードコードせず、`research.story_materials.characters[].character_id` と `story.script.scenes[].character_ids` から reusable character asset へ解決する。asset bible に存在することと、全 cut で参照することは別であり、p600 は assigned event に画面上で必要な人物だけを cut-local `character_ids` / references に採用する。
+request を provider 呼び出し前に保存する。完了後に response item ID、prompt hash、source digest、
+reference bytes、destination、file type、decode、content hash を照合する。binding が一致しない
+output は quarantine し、同じ run の別 item に割り当てない。
 
-#### p530 asset plan authoring
+p570/p600 で確認すること:
 
-- やること: p520 の inventory を `asset_plan.md` に構造化し、生成前 review に出せる状態にする。
-- ゴール: 各 asset について、何を固定するか、どこで使うか、参照画像が必要か、どの output に保存するかが明確であること。
-- character asset は `subject_contract`（`individual|ensemble`、人数、member IDs）と `appearance_contract`（身分、役割、場面状態、silhouette、素材、手入れ状態、配色、禁止衣装）を持つ。複数人物を一つの asset にする場合、人数と各 identity を明示し、「人物1人」の共通 prompt へ縮退させない。
-- reusable asset は `reuse_contract.mode` を `neutral_anchor|time_variant|state_variant` から明示する。`neutral_anchor` に朝・昼・夕・夜の光を焼き込まない。`time_variant` は `time_of_day` と `derived_from_asset_id`、`state_variant` は `derived_from_asset_id` を必須にする。
-- character asset: 原則として全身が見える参照を作り、front / side / back の 3 面図を required views に含める。派生 character variant は main の front / side / back を参照して同一人物性を保つ。
-- object / location / setpiece / reusable still: 単体 still を基本にし、同じ場所や同じ物体の状態差分だけ `derived_from_asset_id` と `reference_inputs[]` を使う。
+- character の顔、髪、年齢感、衣装、体格、full-body views
+- object の silhouette、material、decoration、scale
+- location の spatial identity、major structure、lighting
+- variant の source identity と state transition
+- `existing_outputs[]` と request-bound provenance
+- PNG/JPEG/WebP の file type、画素が読めること、低情報量/placeholder でないこと
 
-#### p540 asset review / fix loop
+ローカル疑似ラスター、別 request の画像、存在しない reference、decode 不能 output は
+canonical asset に採用しない。
 
-- やること: review agent が `asset_plan.md` と、同じ revision から compile した `asset_generation_requests.md` / snapshot を一緒に監査する。抽象設計だけが正しく、最終 provider prompt の人数・衣装・時間帯が誤っている状態は合格にしない。漏れや矛盾があれば担当 `p500` L2 supervisor が正本を修正し、再 compile 後に review agent が確認する cycle を回す。
-- 標準 loop: 最大 1 round。round は複数 critic と aggregator を使い、aggregator が `passed|changes_requested` と unresolved findings を返す。
-- review 観点:
-  - この物語の登場人物・物語固有アイテム・使用場所が漏れていないか
-  - 後続 cut で identity drift が起きやすい subject が asset 化されているか
-  - character の full-body front / side / back 参照方針が入っているか
-  - variant が main reference から派生しており、別人/別物として新規設計されていないか
-  - `source_script_selectors[]` と `generation_plan.reference_inputs[]` を混同していないか
-  - `reference_inputs[]` が空なら no-reference lane、参照あり/derived なら standard lane になっているか
-  - `story.md` / `script.md` に無い新情報を足していないか
-  - p550 request に変換できるだけの visual specificity があるか
-- ゴール: 漏れ・矛盾・lane 誤り・参照関係の誤用が解消され、未解決 finding がある場合は human review / explicit override の理由が残っていること。
-
-#### p550 asset requests
-
-- やること: `asset_plan.md` から `asset_generation_requests.md` と `asset_generation_manifest.md` を materialize する。
-- ゴール: 人間が request file だけを見て、何を、どの参照画像で、どの output に、どの status で生成するか判断できること。
-- prompt 本文は image API に渡る凍結文なので、制作管理メタではなく具体的に見える対象を書く。
-- `story.md.story_metadata.time` が非空なら、asset prompt に同じ時代を入れ、人物の衣装・髪型、場所の建築・生活道具、小道具の素材・技術水準を整合させる。空文字なら時代指定の見出しや placeholder を追加しない。
-- asset request は final prompt compiler を通し、`prompt_policy_version: image_api_prompt_v1` と `api_prompt` fence を持つ。API に渡すのは `api_prompt` fence だけで、構造化設計・debug・review source は送らない。
-- asset stage の deterministic compiler は `asset_stage_manifest.md` / `asset_plan.md` の asset prompt を source にする。scene/cut の `first_frame_visual_plan`、`cut_contract`、`motion_brief` は asset request prompt に混ぜない。
-- image-prompt repair が `video_manifest.md.assets` の bible、時代、fixed prompt、visual subject、生成参照を変更した場合は、同じ内容を `asset_plan.md` へ projection し、初期 materialize と同じ共通 asset prompt compiler で request/snapshot を再生成する。既存 output の旧 prompt/source digest を無条件に再利用しない。
-- manifest bible node に `generation_prompt` が無い場合、旧 `asset_plan.md` に残った明示 prompt は削除し、最新の fixed prompt / visual subject から再 compile する。明示 `generation_prompt` がある場合も、非空の物語時代文字列が本文に無ければ共通 compiler が同じ時代制約を先頭へ付加する。
-- asset request digest が変わった場合は reusable asset を先に再生成し、その新しいファイル hash を scene request/snapshot へ再束縛してから image-prompt review をやり直す。
-- prompt editor は、構造化 artifact から provider が描ける語だけを残す。LLM agent で編集する場合も、出力は同じ `api_prompt` contract に凍結し、agent report は別 artifact に置く。
-- leak gate は `api_prompt` 内の `sceneNN_cutNN`、`debug_prompt_source`、`first_frame_visual_plan`、`source_event_beat_id`、`motion_brief` などを fail にする。source selector などの metadata 欄は検査対象ではない。
-- NG:
-  - `物語「シンデレラ」の scene10 のための背景画像。`
-  - `scene30_cut01 で使う魔法の変身 scene。`
-  - `この画像は物語「シンデレラ」の一場面を視覚化する。`
-  - `後続 scene でも使いやすい王子。`
-- OK:
-  - `灰の台所。石床、大きな暖炉、薄い灰、朝の青灰色の光、奥へ続く暗い廊下が見える、人物なしの実写映画風 location anchor。`
-  - `月光の庭に停まる、かぼちゃの丸みを残した実写の馬車。蔓の装飾、金属骨組み、重い車輪、扉の形が明確に見える。`
-  - `若い王子の全身キャラクター参照。深紺と銀の宮廷衣装、落ち着いた目線、同じ人物として再利用できる顔・髪型・立ち姿。`
-
-#### p560 asset generation
-
-- やること: p550 request に従い、reusable asset image を output path に保存する。
-- provider: p500 asset generation は参照あり/なしを問わず `codex_builtin_image` 固定。外部 API provider へ切り替えない。
-- no-reference: `reference_count == 0` の request は、Codex built-in image generation（`codex_builtin_image` / `gpt-image-2`）で生成し、互換 lane 名 `execution_lane=bootstrap_builtin` の no-reference image lane に残す。
-- reference-driven: `reference_count > 0`、`reference_inputs[]` あり、または `derived_from_asset_id` ありの request は `execution_lane=standard` に残し、同じ `codex_builtin_image` provider に参照画像を渡す。
-- ゴール: request と manifest の status、出力ファイル、失敗/skip/再生成対象が対応していること。
-
-#### p570 asset continuity check
-
-- やること: 生成済み asset が p600 の continuity anchor として使えるか確認する。
-- review 観点: character の顔・髪・年齢感・衣装・3 面図、object の silhouette / material / scale、location の spatial identity / major structure / lighting、variant の同一性、`existing_outputs[]`、`review.status`、manifest status。
-- gate: 生成画像そのものを確認し、実写系（photorealistic / cinematic / live-action）ではない画像、ベクター風・フラットな塗り・低情報量の PNG/JPEG は p600 に渡さず p560 へ戻す。ローカル手続き生成の疑似ラスター PNG は、見た目が複雑でも canonical asset として採用しない。`verify-pipeline.py` の `asset.generation_provenance_app_server` または `asset.visual_not_vector_like` が失敗した場合も同じ扱い。
-- ゴール: p600 の scene / cut prompt が参照できる approved asset path が揃い、未承認・不足・差し替え対象が明示されていること。
-
-#### p660 scene image generation gate
-
-- p600 の scene still も、出力ファイルの拡張子だけでなく実画像を開いて検査する。
-- `verify-pipeline.py` の `image.generation_provenance_app_server` または `image.visual_not_vector_like` が失敗し、`image.references_not_vector_like` が通っている場合は、参照画像は使えるため p600 scene image を再生成する。権限エラーや app-server 失敗時にローカル疑似ラスターを置いて通過扱いにしない。
-- `image.references_not_vector_like` が失敗した場合は、p600 の再生成だけでは直らない。`image_regeneration_plan` に従い、該当する p500/p560 reference asset を先に再生成し、ベクター風でなくなったことを確認してから p600 をやり直す。
-- この gate は PNG/JPEG/WebP の拡張子判定ではなく、Pillow で読める raster の画素情報量、thumbnail color diversity、bytes per megapixel を使う。
-
-### 1.0 `asset_plan.md`
-
-- asset 設計と review の正本
-- `workflow/asset-plan-template.yaml` を基準にする
-- approved 後に実 asset を作り、cut stage が参照する
-- 各 asset entry は `creation_status: planned|created|stale|missing` を持ち、すでに作成済みの asset は `existing_outputs[]` に実ファイルを記録する
-- asset を作る本筋目的は、複数 cut で同じ visual identity を再利用し、同一 cut 内でも関連 asset を派生させながら物語の視覚表現をブレさせないこと
-- つまり asset は「先に作ると便利な画像」ではなく、「後続 cut の continuity anchor」として扱う
-- character reference は全身が見える front / side / back の 3 面図を基本にする。顔だけ、上半身だけ、正面だけの参照は p600 の continuity anchor として不足しやすい
-- 同一人物の state/time variant は、main の `character_reference` を基準に派生させる
-- variant entry では `generation_plan.reference_inputs[]` に main reference を入れ、`generation_plan.derived_from_asset_id` で元 asset を明示する
-- 例: `urashima_old` は `urashima` の front / side / back を参照して作り、別人としてゼロから起こさない
-- 同じ場所の昼夜差分、現在/未来差分、状態違いも同じで、main の `location_anchor` または `reusable_still` から派生させる
-- 例: 昼の浜辺 anchor を先に作り、夜の浜辺 anchor は `derived_from_asset_id` で昼 anchor を参照して作る
-- 例: 浜辺の現在と未来も、同じ場所として continuity を保ちたいなら main beach anchor を基準に派生させる
-- `source_script_selectors[]` は使用箇所の記録であり、`reference_inputs[]` とは別物
-- `reference_inputs[]` は同一人物 variant / 同一場所 variant / same-camera 派生のときだけ使う
-- `reference_inputs[]` が空の asset では、bootstrap 用に `execution_lane=bootstrap_builtin` を選んでよい
-- 既存 reference を持つ派生 asset では使わない
-- `bootstrap_builtin` という lane 名は asset 専用語ではなく、repo 全体では no-reference built-in image lane の互換名として扱う。provider は標準で `codex_builtin_image` に固定する
-- asset 段階で参照を持つのは、複数 cut で再利用される同一 entity の identity / state / structure / relation continuity を固定したい場合に限る
-- shot 内の移動、演技、立ち位置、カメラ差分のような表現差分は cut stage で扱い、asset 段階の参照理由にしない
-- 独立した location anchor は原則 `reference_inputs: []`
-- ただし、同じ建物の中でも物語上は別エリアなら、無理に派生させない
-- 例: 竜宮城の宴会エリアと foyer は別 `location_anchor` にしてよい
-- このとき「奥に宴会エリアが見える」のような関係は、派生ではなく `reference_usage.mode=background_glimpse` などで表す
-
-移行中 run の扱い:
-
-- 浦島 run のように設計試行錯誤の途中で、先に scene still ができてから asset に昇格される例外はありうる
-- これは移行中の互換運用であり、本来フローでは asset stage が先、cut stage が後
-- 将来の run では、scene still がそのまま asset 正本になる前提では進めない
-- 例外として、`reference_inputs[]` が無い初期 asset seed は Codex built-in image generation を bootstrap lane として使ってよい
-- その場合も human review で `review.status=approved` になるまでは canonical asset にしない
-- approved 後は bootstrap 生成物をそのまま canonical reference として後続 stage で使ってよい
-
-正本は `/toc-immersive-ride` の `video_manifest.md`（`assets` 内）:
-
-### 1.1 `assets.object_bible[]`
-
-<!-- image-gen-setting:item:start -->
-アイテムや舞台装置は `assets.object_bible` を正本にする。
-silhouette、材質、装飾、縮尺感、工芸の痕跡、物語上の役割を映像だけで伝える。
-看板、刻印、銘板、字幕、説明的 UI に頼らず、形、光、構造、ショー性で理解させる。
-<!-- image-gen-setting:item:end -->
-
-- `object_id: string`（例: `ryugu_palace`, `tamatebako`）
-- `kind: "setpiece"|"artifact"|"phenomenon"`（最小3種）
-- `reference_images: [string, ...]`（必須・非空）
-- `fixed_prompts: [string, ...]`（必須・非空）
-- `cinematic:`（任意だが強く推奨）
-  - `role: string`（映画での役割。例: 境界/誘惑/贈与/代償/啓示 など）
-  - `visual_takeaways: [string, ...]`（映像から観客に与える情報）
-  - `spectacle_details: [string, ...]`（非メイン筋でも“ワクワク”を作る見せ場/仕掛け）
-- `notes: string|null`（根拠、創作ラベル、注意点など）
-
-### 1.2 `scenes[].image_generation.object_ids`
-
-sceneに映す object/setpiece を **IDで宣言**する。
-
-- 例: `object_ids: ["ryugu_palace", "tamatebako"]`
-- B-roll でも必ず `object_ids: []` を明示（検証を通すため）
-
----
-
-## 2) 参照画像運用（reference scene）
-
-`reference_images` に入れたパスは、どこかの scene が必ず生成する:
-
-- `assets/objects/...png` を `scenes[].image_generation.output` にする
-- 参照画像は「無人の setpiece」「クローズアップの artifact」中心（混ざり防止）
-- ここでいう reference scene は、**毎scene/cutに作るものではない**。同じ場所/物体/人物状態をまたぐ continuity anchor として、必要な回数だけ作る。
-- アンカーがすでに存在する scene/cut は、既存の reference image や直前の anchor frame を再利用してよい。
-
-生成側は `--apply-asset-guides` で、該当 object の `fixed_prompts` と cinematic 情報を
-sceneの `[PROPS / SETPIECES]` に自動注入できる。
-
-review で最低限確認する項目:
-
-- `character_reference`: 顔、髪型、衣装、年齢感
-- `object_reference`: silhouette、材質、装飾、縮尺感
-- `location_anchor`: spatial identity、主要構造、光環境
-- `reusable_still`: 後続 cut の continuity anchor として十分か
-
----
-
-## 2.5) scene から asset を逆算する
-
-asset は「作ると便利な素材」ではなく、scene の劇的機能を安定させるための continuity anchor である。
-p500 では `script.md` の `scene_intent` と `cut_blueprint` を読み、次の観点で asset 化を判断する。
-
-### asset 化すべきもの
-
-- 複数 scene / cut で同一性が必要な人物、衣装、身体状態。
-- scene の `causal_turn` を担う小道具。例: 鍵、箱、手紙、傷、証拠品。
-- scene の `visual_thesis` を支える場所。例: 灰の台所、王宮の階段、海底宮殿の門。
-- spectacle の核になる舞台装置。例: 開く門、呼吸する封印、群泳する回廊。
-- p800 motion で変化するが、形状を固定したい物。例: 開く前の箱、閉じた扉、崩れる前の橋。
-
-### asset 化しないもの
-
-- 単発 cut のカメラ差分。
-- 人物の一時的な手の位置や表情だけの差分。
-- 物語上の同一性が不要な群衆や背景の一部。
-- narration の比喩だけで、画面に直接出ない概念。
-
-### asset entry に追加推奨する cinematic field
+## 5. Cinematic fields
 
 ```yaml
 cinematic:
-  role: "scene で担う劇的役割。誘惑/境界/証拠/代償/帰還など"
+  role: "境界/誘惑/証拠/代償/帰還など"
   scene_usage:
-    first_appearance: "どの scene/cut で初めて見せるか"
-    reveal_stage: "concealed|hinted|featured|transformed|aftermath"
-    pressure_function: "観客や人物にどんな圧力をかけるか"
-    payoff_function: "どんな視覚報酬または意味の回収になるか"
+    first_appearance: ""
+    reveal_stage: concealed|hinted|featured|transformed|aftermath
+    pressure_function: ""
+    payoff_function: ""
   visual_takeaways: []
   spectacle_details: []
   continuity_risks: []
 ```
 
-### staged reveal の原則
+形、光、構造、機構、ショー性で観客に情報を渡し、看板、刻印、字幕、説明 UI に頼らない。
+staged reveal は script の reveal constraints に従う。asset prompt で後段の情報を早出ししない。
 
-重要 asset は、初出で全部見せない。
-`hinted → featured → transformed → aftermath` のように、scene 間で情報量を増やすと映画的な期待が生まれる。
-ただし reveal 順序は `script.md.scene_intent.reveal_constraints` に従い、asset prompt 側で早出ししない。
+[観客の理解と意味の設計](../story-creation.md#観客の理解と意味の設計) で反復要素を使う場合、
+`story_purpose` と source selectors で登場場面へ結び、見た目の同一性は `fixed_prompts` で保つ。
+`cinematic.scene_usage` は上流で決まった登場・役割を参照し、登場ごとの行動、構図、音や
+意味の受け取られ方は scene/cut に残す。解釈が変わるだけなら別 asset / variant を作らない。
+実際の外見・状態の変化が上流にある場合だけ、既存の variant 契約で表す。
+反復自体は任意であり、音・行為・関係の反復のために画像 asset を発明しない。
 
-## 3) 書くべきディテール（設計観点）
+## 6. Object and location examples
 
-各 object について、少なくとも以下を一度設計して固定する:
-
-- **映画での役割**: 物語/感情/テーマに対して何を担うか（扉・誘惑・贈与・代償・帰還の証など）
-- **映像から与える情報**: 観客は“何を理解する”べきか（言葉ではなく形/光/動きで）
-- **材質/構造**: 実写で成立する素材感、重量感、経年、工芸の痕跡
-- **機構/ルール**: “開けたくなる”“近づきたくなる”を生む仕掛け（ただ豪華、で終わらせない）
-- **ショー/見せ場**: メイン筋と無関係でも映像として魅力的な現象（音/光/流体/群体/変形）
-- **禁止**: 文字、看板、銘板、説明的UI、露骨なメタ表現（字幕で語らない）
-
----
-
-## 4) 具体例（浦島太郎）
-
-### 4.1 竜宮城（`ryugu_palace` / setpiece）
-
-設計の要点:
-- 役割: “境界の越境”と“饗宴の誘惑”。現実とは別の時間/倫理が働く場所
-- 映像情報: この城は生きている／海そのものが建築になっている／招かれた者だけが気づく仕掛け
-- ショー性: 水族館以上の“見せ物”が常にどこかで起きている（発光、泡、群泳、潮流で舞う光）
-
-例（manifest断片）:
+主役級 object/setpiece の最小 shape:
 
 ```yaml
-assets:
-  object_bible:
-    - object_id: "ryugu_palace"
-      kind: "setpiece"
-      reference_images: ["assets/objects/ryugu_palace_exterior.png", "assets/objects/ryugu_palace_hall.png"]
-      fixed_prompts:
-        - "竜宮城は生きた珊瑚、真珠層、漆を塗った青銅の骨組みでできている。濡れた艶があり、実写の巨大建築として縮尺が分かる"
-        - "内部には泡の灯籠、発光する珊瑚のシャンデリア、ゆっくり制御された潮流がある。看板や刻印で説明しない"
-        - "見せ場: 遠くの大吹き抜けで魚群が渦を作り、水中の光が建築を横切る"
-      cinematic:
-        role: "境界 + 誘惑。完璧すぎて帰る意思を弱める楽園"
-        visual_takeaways:
-          - "この場所は生きている。建築と海が一つの生物のように感じられる"
-          - "時間の流れが現実と違う。静かで、遅く、危うい"
-        spectacle_details:
-          - "水圧で隠し珊瑚扉が開き、奥の水中光ショーが現れる"
-          - "天井が穏やかな水面のように揺れ、壁に光の波紋を落とす"
+object_bible:
+  - object_id: artifact_01
+    kind: artifact|setpiece|phenomenon
+    reference_images: []
+    fixed_prompts: []
+    cinematic:
+      role: ""
+      visual_takeaways: []
+      spectacle_details: []
+    notes: ""
 ```
 
-### 4.2 玉手箱（`tamatebako` / artifact）
-
-設計の要点:
-- 役割: “贈与”であり“代償”。禁忌の魅力（開けたくなる設計）が必要
-- 映像情報: 箱そのものがルールを持つ／触れると反応する／開封が不可逆であると直感できる
-- ショー性: 開封前から誘惑演出（微細な振動、呼吸する光、封印の結晶が脈動）
-
-例（manifest断片）:
+location の最小 shape:
 
 ```yaml
-assets:
-  object_bible:
-    - object_id: "tamatebako"
-      kind: "artifact"
-      reference_images: ["assets/objects/tamatebako_closeup.png"]
-      fixed_prompts:
-        - "玉手箱は黒漆と金細工、貝殻のモザイクで作られた精密な箱。小さいが重く、工芸の痕跡が見える"
-        - "誘惑の仕組み: 封印が近づく手に反応してかすかに光る。文字や刻印で説明しない"
-        - "開封の代償は、蓋の隙間から漏れる細い光、閉じ込められた灰の粒、表面の微細なひびで暗示する"
-      cinematic:
-        role: "贈与 + 禁忌 + 代償。抗いがたい誤った選択"
-        visual_takeaways:
-          - "開けてはいけないというルールと、開けたくなる誘惑が同時に伝わる"
-        spectacle_details:
-          - "蓋の境界が、生きた封印のようにゆっくり呼吸する光を放つ"
+location_bible:
+  - location_id: location_01
+    reference_images: []
+    reference_variants: []
+    fixed_prompts: []
+    continuity_notes: []
+    notes: ""
 ```
 
----
+同じ場所/物体を複数 cut で使う場合は stable ID と reference path を manifest へ投影する。
+background glimpse は別 asset identity にせず、cut の `reference_usage` で関係を指定する。
 
-## 5) 実装との接続
+## 7. Resume
 
-- 自動注入: `scripts/generate-assets-from-manifest.py --apply-asset-guides`
-- 検証ゲート:
-  - `--require-object-ids`（object_bibleがある場合、各sceneで `object_ids: []` を必須）
-  - `--require-object-reference-scenes`（reference_images が必ずどこかの scene output として生成されること）
-- 人間レビュー:
-  - setpiece / artifact に対する修正要求は、口頭メモで流さず `human_review.change_requests[]` に残す
-  - reveal 順序、spectacle 不足、continuity drift のように論点が複数ある場合は request を分ける
-  - `human_review_ok` は evaluator finding の例外許容であり、asset bible 改稿要求の正本には使わない
+upstream source digest、asset plan、request、reference bytes が変わったら downstream image
+requests と stale outputs を再 materialize する。valid asset は bytes/provenance が current の
+限り保持する。resume は state history を書き換えず、stale item だけを再生成する。
 
-### 5.1 location_bible
+## References
 
-<!-- image-gen-setting:location:start -->
-場所は `assets.location_bible` を正本にする。
-spatial identity、主要構造、光環境、場所固有の空気を固定し、同じ場所の状態差分か、別エリアとして扱うべきかを明確にする。
-別エリアから他エリアを見せる場合は、派生ではなく `reference_usage.mode=background_glimpse` などの見え関係として扱う。
-<!-- image-gen-setting:location:end -->
-
-場所そのものを再利用する修正要求は `object_bible` へ押し込まず、`assets.location_bible[]` を使う。
-
-- `location_id`
-- `reference_images`
-- `reference_variants[]`
-- `fixed_prompts`
-- `review_aliases[]`
-- `continuity_notes[]`
-- `notes`
-
-人レビューで「同じ神殿を別 cut でも参照する」「宴会エリアを奥に見せる」ような要求が来た場合は、まず `location_bible` に格上げしてから cut 側で `location_ids[]` / `reference_usage[]` へつなぐ。
+- `docs/data-contracts.md`
+- `docs/implementation/image-prompting.md`
+- `workflow/asset-plan-template.yaml`
+- `workflow/asset-inventory-template.yaml`

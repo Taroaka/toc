@@ -8,7 +8,7 @@ canonical な新規作成・再設計では、backend の `/api/image-gen/runs/c
 python scripts/toc-create-run-headless.py --title "<title>" --source "<source>" --no-images
 ```
 
-この legacy tool は canonical projection / review を実装しないため、canonical semantic key を検出したら fail closed で停止する。
+この legacy tool は canonical projection を実装しないため、現行の structured scene/cut key を検出したら fail closed で停止する。
 
 目的: 非 canonical な旧 `video_manifest.md` の各 scene に対し、利用者が明示した件数の raw-prompt cut scratch を、衝突なく並列編集する。
 

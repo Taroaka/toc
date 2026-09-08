@@ -3,9 +3,10 @@ import unittest
 from toc.image_prompt_compiler import FRAGMENT_GROUP_ORDER, compile_image_api_prompt_v2
 from toc.image_prompt_projection_registry import (
     PROMPT_PROJECTION_REGISTRY_VERSION,
-    build_projection_review_contract,
+    PROMPT_PROJECTION_RULES,
+    build_projection_contract,
     projection_registry_contract_issues,
-    projection_trace_issues,
+    projection_contract_issues,
     registered_drawable_group_order,
     rule_for_source_key,
 )
@@ -30,7 +31,7 @@ class ImagePromptProjectionRegistryTests(unittest.TestCase):
         self.assertEqual(visual_basis_rule.relevance, "none")
         self.assertEqual(
             visual_basis_rule.transform,
-            "review_derived_daypart_basis_without_duplicate_prompt_source",
+            "exclude_derived_daypart_basis_from_prompt",
         )
 
         location_sequence_rule = rule_for_source_key(
@@ -40,14 +41,14 @@ class ImagePromptProjectionRegistryTests(unittest.TestCase):
         self.assertEqual(location_sequence_rule.relevance, "none")
         self.assertEqual(
             location_sequence_rule.transform,
-            "review_scene_location_sequence_but_project_one_cut_location",
+            "exclude_scene_route_from_cut_local_prompt",
         )
         location_segments_rule = rule_for_source_key("scenes[].location_segments")
         self.assertIsNotNone(location_segments_rule)
         self.assertEqual(location_segments_rule.relevance, "none")
         self.assertEqual(
             location_segments_rule.transform,
-            "review_scene_location_sequence_but_project_one_cut_location",
+            "exclude_scene_route_from_cut_local_prompt",
         )
 
         visualizable_action_rule = rule_for_source_key(
@@ -57,7 +58,7 @@ class ImagePromptProjectionRegistryTests(unittest.TestCase):
         self.assertEqual(visualizable_action_rule.relevance, "none")
         self.assertEqual(
             visualizable_action_rule.transform,
-            "review_scene_overview_but_project_cut_local_drawable_evidence",
+            "exclude_scene_overview_from_cut_local_prompt",
         )
         self.assertIn(
             "reject_sequential_notation_in_positive_fragment",
@@ -78,8 +79,8 @@ class ImagePromptProjectionRegistryTests(unittest.TestCase):
             raw_reveal_rule.deterministic_checks,
         )
 
-    def test_review_contract_resolves_active_key_rules_for_one_cut(self) -> None:
-        contract = build_projection_review_contract(
+    def test_projection_contract_resolves_active_key_rules_for_one_cut(self) -> None:
+        contract = build_projection_contract(
             story_time="17世紀末フランス・ルイ14世時代",
             time_of_day="朝",
             dependencies={
@@ -106,6 +107,15 @@ class ImagePromptProjectionRegistryTests(unittest.TestCase):
         self.assertIn("references", active)
         excluded = {item["source_keys"][0]: item for item in contract["excluded_rules"]}
         self.assertIn("cut_contract.motion_contract.motion_brief", excluded)
+        self.assertNotIn("review_operations", contract)
+        for rule in [*contract["active_rules"], *contract["inactive_rules"], *contract["excluded_rules"]]:
+            self.assertNotIn("semantic_checks", rule)
+
+    def test_registry_catalog_contains_only_structural_projection_metadata(self) -> None:
+        for rule in PROMPT_PROJECTION_RULES:
+            payload = rule.as_dict()
+            self.assertNotIn("semantic_checks", payload)
+            self.assertNotIn("review_visibility", payload)
 
     def test_compiler_output_and_registry_activation_have_no_drift(self) -> None:
         plan = {
@@ -118,7 +128,7 @@ class ImagePromptProjectionRegistryTests(unittest.TestCase):
         payload = compile_image_api_prompt_v2(first_frame_visual_plan=plan)
         ir = payload["drawable_prompt_ir"]
 
-        issues = projection_trace_issues(
+        issues = projection_contract_issues(
             prompt=payload["prompt"],
             dependencies=ir["dependencies"],
             included_fragments=ir["included_fragments"],
@@ -155,7 +165,7 @@ class ImagePromptProjectionRegistryTests(unittest.TestCase):
                 fragment["text"] = fragment["text"].replace("舞踏会ドレス", "")
         prompt = payload["prompt"].replace("舞踏会ドレス", "")
 
-        issues = projection_trace_issues(
+        issues = projection_contract_issues(
             prompt=prompt,
             dependencies=payload["drawable_prompt_ir"]["dependencies"],
             included_fragments=fragments,
@@ -210,7 +220,7 @@ class ImagePromptProjectionRegistryTests(unittest.TestCase):
 
         codes = {
             issue.code
-            for issue in projection_trace_issues(
+            for issue in projection_contract_issues(
                 prompt=prompt,
                 dependencies=payload["drawable_prompt_ir"]["dependencies"],
                 included_fragments=fragments,
@@ -235,7 +245,7 @@ class ImagePromptProjectionRegistryTests(unittest.TestCase):
         payload = compile_image_api_prompt_v2(first_frame_visual_plan=plan)
         ir = payload["drawable_prompt_ir"]
 
-        issues = projection_trace_issues(
+        issues = projection_contract_issues(
             prompt=payload["prompt"],
             dependencies=ir["dependencies"],
             included_fragments=ir["included_fragments"],
@@ -245,7 +255,7 @@ class ImagePromptProjectionRegistryTests(unittest.TestCase):
         self.assertEqual(issues, [])
 
     def test_inactive_group_cannot_self_authorize_through_required_groups(self) -> None:
-        issues = projection_trace_issues(
+        issues = projection_contract_issues(
             prompt="光源は月明かり。",
             dependencies={"required_groups": ["light_material"]},
             included_fragments=[{"group": "light_material", "text": "光源は月明かり。"}],
@@ -258,7 +268,7 @@ class ImagePromptProjectionRegistryTests(unittest.TestCase):
         )
 
     def test_inactive_fragment_is_only_unneeded_not_required_group_missing(self) -> None:
-        issues = projection_trace_issues(
+        issues = projection_contract_issues(
             prompt="人物なし。",
             dependencies={"character_ids": [], "required_groups": []},
             included_fragments=[{"group": "characters", "text": "人物なし。"}],
@@ -270,7 +280,7 @@ class ImagePromptProjectionRegistryTests(unittest.TestCase):
         self.assertNotIn("api_prompt_v2_characters_required_group_missing", codes)
 
     def test_inactive_required_only_group_is_unneeded_not_missing_fragment(self) -> None:
-        issues = projection_trace_issues(
+        issues = projection_contract_issues(
             prompt="実写映画調。画面には石段が見える。文字なし。",
             dependencies={
                 "required_groups": ["style", "current_moment", "light_material", "constraints"]
@@ -289,7 +299,7 @@ class ImagePromptProjectionRegistryTests(unittest.TestCase):
 
     def test_exact_source_value_must_match_traced_dependency(self) -> None:
         marker = "物語の時代背景は江戸時代"
-        issues = projection_trace_issues(
+        issues = projection_contract_issues(
             prompt=marker,
             dependencies={"story_time": "平安時代", "required_groups": ["story_time"]},
             included_fragments=[{"group": "story_time", "text": marker}],
@@ -302,7 +312,7 @@ class ImagePromptProjectionRegistryTests(unittest.TestCase):
         )
 
     def test_required_groups_are_unique_and_in_registry_order(self) -> None:
-        issues = projection_trace_issues(
+        issues = projection_contract_issues(
             prompt="実写映画調。\n画面には、窓辺に立つ。\n禁止。",
             dependencies={
                 "required_groups": ["current_moment", "style", "style", "constraints"]

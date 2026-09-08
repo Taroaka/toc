@@ -9,7 +9,6 @@ from pathlib import Path
 
 from toc.harness import load_structured_document, parse_state_file
 from toc.narration_revision import narration_text_hash
-from toc.narration_semantic_review import build_narration_semantic_review_pack
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -135,11 +134,7 @@ scenes:
             self.assertEqual(manifest["video_metadata"]["time"], "17世紀末フランス・ルイ14世時代")
             self.assertEqual(manifest["video_metadata"]["ending_mode"], "happy")
             self.assertEqual(manifest["scenes"][0]["time_of_day"], "朝")
-            review_pack = build_narration_semantic_review_pack(manifest)
-            self.assertIn(
-                "happy",
-                str(review_pack["narration_manifest_projection"]["buckets"]["background_context"]),
-            )
+            self.assertEqual(manifest["video_metadata"]["ending_mode"], "happy")
 
     def test_sync_prefers_human_review_fields(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_sync_narration_") as td:

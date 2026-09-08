@@ -50,7 +50,7 @@ _GENERIC_TEXT_MARKERS = (
     "場所が読める建築、床、壁、空気感",
     "動き出す方向に余白",
     "主役と物語上の証拠",
-    "approved_story_evidence",
+    "story_evidence",
     "primary_visible_object",
     "primary_visible_zone",
     "TODO",
@@ -108,7 +108,7 @@ class PromptProjectionRule:
 
 
 @dataclass(frozen=True)
-class ProjectionTraceIssue:
+class ProjectionContractIssue:
     code: str
     message: str
 
@@ -407,7 +407,7 @@ def build_projection_contract(
     }
 
 
-def projection_trace_issues(
+def projection_contract_issues(
     *,
     prompt: str,
     dependencies: Mapping[str, Any],
@@ -415,7 +415,7 @@ def projection_trace_issues(
     expected_story_time: str | None = None,
     expected_time_of_day: str | None = None,
     first_frame_visual_plan: Mapping[str, Any] | None = None,
-) -> list[ProjectionTraceIssue]:
+) -> list[ProjectionContractIssue]:
     """Validate source -> dependency -> required group -> fragment -> prompt.
 
     Callers retain their own manifest/dependency type checks.  This helper owns
@@ -457,11 +457,11 @@ def projection_trace_issues(
         first_frame_visual_plan=first_frame_visual_plan,
     )
     active_groups = {item["target_group"] for item in contract["active_rules"]}
-    issues: list[ProjectionTraceIssue] = []
+    issues: list[ProjectionContractIssue] = []
 
     if len(raw_required_groups) != len(set(raw_required_groups)):
         issues.append(
-            ProjectionTraceIssue(
+            ProjectionContractIssue(
                 code="api_prompt_v2_required_groups_duplicate",
                 message="dependencies.required_groups must not contain duplicate groups.",
             )
@@ -474,7 +474,7 @@ def projection_trace_issues(
     )
     if known_required_groups != canonical_required_groups:
         issues.append(
-            ProjectionTraceIssue(
+            ProjectionContractIssue(
                 code="api_prompt_v2_required_groups_order",
                 message="dependencies.required_groups must follow the canonical registry order.",
             )
@@ -484,14 +484,14 @@ def projection_trace_issues(
     dependency_time_of_day = str(normalized_dependencies.get("time_of_day") or "").strip()
     if expected_story_time is not None and dependency_story_time != resolved_story_time:
         issues.append(
-            ProjectionTraceIssue(
+            ProjectionContractIssue(
                 code="api_prompt_v2_story_time_dependency_mismatch",
                 message="drawable prompt dependency `story_time` must exactly match video_metadata.time.",
             )
         )
     if expected_time_of_day is not None and dependency_time_of_day != resolved_time_of_day:
         issues.append(
-            ProjectionTraceIssue(
+            ProjectionContractIssue(
                 code="api_prompt_v2_time_of_day_dependency_mismatch",
                 message="drawable prompt dependency `time_of_day` must exactly match scene.time_of_day.",
             )
@@ -509,7 +509,7 @@ def projection_trace_issues(
             continue
         issue_group = {"characters": "character", "objects": "object"}.get(group, group)
         issues.append(
-            ProjectionTraceIssue(
+            ProjectionContractIssue(
                 code=f"api_prompt_v2_unneeded_{issue_group}_fragment",
                 message=f"registered prompt group `{group}` is declared without an active canonical source.",
             )
@@ -524,14 +524,14 @@ def projection_trace_issues(
             continue
         if group not in required_groups:
             issues.append(
-                ProjectionTraceIssue(
+                ProjectionContractIssue(
                     code=f"api_prompt_v2_{group}_required_group_missing",
                     message=f"registered prompt group `{group}` must be present in raw dependencies.required_groups.",
                 )
             )
         if len(texts) > 1:
             issues.append(
-                ProjectionTraceIssue(
+                ProjectionContractIssue(
                     code=f"api_prompt_v2_duplicate_{group}_fragment",
                     message=f"registered prompt group `{group}` must have exactly one fragment.",
                 )
@@ -541,7 +541,7 @@ def projection_trace_issues(
         text = texts[0]
         if text not in prompt:
             issues.append(
-                ProjectionTraceIssue(
+                ProjectionContractIssue(
                     code=f"api_prompt_v2_fragment_not_rendered:{group}",
                     message=f"registered prompt group `{group}` is not rendered in the provider prompt.",
                 )
@@ -556,14 +556,14 @@ def projection_trace_issues(
             marker = render_projection_value_marker(group, expected_value)
             if marker not in text:
                 issues.append(
-                    ProjectionTraceIssue(
+                    ProjectionContractIssue(
                         code=f"api_prompt_v2_{group}_fragment_value_mismatch",
                         message=f"registered prompt group `{group}` fragment does not render its exact source value.",
                     )
                 )
             if text in prompt and marker not in prompt:
                 issues.append(
-                    ProjectionTraceIssue(
+                    ProjectionContractIssue(
                         code=f"api_prompt_v2_{group}_prompt_value_mismatch",
                         message=f"provider prompt does not render the exact `{group}` source value.",
                     )
@@ -584,7 +584,7 @@ def projection_trace_issues(
                 ):
                     continue
                 issues.append(
-                    ProjectionTraceIssue(
+                    ProjectionContractIssue(
                         code=(
                             "api_prompt_v2_character_appearance_"
                             f"{label}_value_missing"

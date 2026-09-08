@@ -409,7 +409,11 @@ def read_run_progress(
     index_path = run_dir / "p000_index.md"
     index_text = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
     stages = _parse_stage_table(index_text) if index_text else []
-    slots = _parse_slot_contract(index_text) if index_text else []
+    slots = [
+        slot
+        for slot in (_parse_slot_contract(index_text) if index_text else [])
+        if not is_retired_review_slot(slot.get("code"))
+    ]
     slot_statuses = _overlay_progress_state(stages=stages, slots=slots, state=state)
     active_states = {"not_started", "pending", "in_progress", "blocked", "awaiting_approval", "failed"}
     current_stage = _current_slot_from_state(slots=slots, slot_statuses=slot_statuses)
