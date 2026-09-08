@@ -167,68 +167,14 @@ def _order_keys(state: dict[str, str]) -> list[str]:
         "runtime.stage",
         "runtime.render.status",
         "immersive.experience",
-        "gate.research_review",
-        "gate.story_review",
-        "gate.visual_value_review",
-        "gate.image_prompt_review",
-        "gate.narration_review",
-        "gate.video_review",
-        "gate.hybridization_review",
-        "review.hybridization.status",
-        "review.hybridization.at",
-        "review.hybridization.note",
-        "review.image_prompt.status",
-        "review.image_prompt.at",
-        "review.image_prompt.note",
-        "review.narration.status",
-        "review.narration.at",
-        "review.narration.note",
-        "review.duration_fit.status",
-        "review.duration_fit.actual_seconds",
-        "review.duration_fit.minimum_seconds",
-        "review.duration_fit.note",
-        "review.duration_fit.at",
-        "review.duration_fit.scene_prompt",
-        "review.duration_fit.narration_prompt",
-        "review.video.status",
-        "review.video.at",
-        "review.video.note",
-        "review.visual_value.status",
-        "review.visual_value.at",
-        "review.visual_value.note",
-        "eval.image_prompt.score",
-        "eval.image_prompt.findings",
-        "eval.image_prompt.unresolved_entries",
-        "eval.narration.score",
-        "eval.narration.findings",
-        "eval.narration.unresolved_entries",
-        "eval.research.status",
-        "eval.research.score",
-        "eval.research.findings",
-        "eval.story.score",
-        "eval.script.status",
-        "eval.script.score",
-        "eval.script.findings",
-        "eval.manifest.status",
-        "eval.manifest.score",
-        "eval.manifest.findings",
-        "eval.video.status",
-        "eval.video.score",
-        "eval.video.findings",
         "selection.story.candidate_count",
         "selection.story.chosen_id",
         "artifact.research",
-        "artifact.research_review",
         "artifact.story",
         "artifact.visual_value",
-        "artifact.visual_value_review",
         "artifact.script",
-        "artifact.script_review",
         "artifact.video_manifest",
-        "artifact.manifest_review",
-        "artifact.eval_report",
         "artifact.video",
-        "artifact.video_review_report",
         "artifact.video.short.01",
         "last_error",
     ]
@@ -287,28 +233,8 @@ def artifact_inventory(run_dir: Path, state: dict[str, str]) -> dict[str, dict[s
 
 
 def pending_gates(state: dict[str, str]) -> list[str]:
-    pending: list[str] = []
-    gate_pairs = [
-        ("research_review", "review.research.status"),
-        ("story_review", "review.story.status"),
-        ("visual_value_review", "review.visual_value.status"),
-        ("script_review", "review.script.status"),
-        ("asset_review", "review.asset.status"),
-        ("image_prompt_review", "review.image_prompt.status"),
-        ("image_review", "review.image.status"),
-        ("narration_review", "review.narration.status"),
-        ("hybridization_review", "review.hybridization.status"),
-        ("video_review", "review.video.status"),
-    ]
-    for gate_name, review_key in gate_pairs:
-        gate_value = state.get(f"gate.{gate_name}", "").strip().lower()
-        review_value = state.get(review_key, "").strip().lower()
-        if gate_value != "required":
-            continue
-        if review_value in {"approved", "rejected", "changes_requested"}:
-            continue
-        pending.append(gate_name)
-    return pending
+    del state
+    return []
 
 
 def run_status_path(run_dir: Path) -> Path:
@@ -341,16 +267,7 @@ def _sync_run_status_locked(run_dir: Path, merged: dict[str, str]) -> Path:
         "state_flat": merged,
         "state": nested_state(merged),
         "artifacts": artifact_inventory(run_dir, merged),
-        "pending_gates": pending_gates(merged),
     }
-
-    eval_path = eval_report_path(run_dir)
-    eval_text = _read_bound_text(eval_path, missing_ok=True)
-    if eval_text:
-        try:
-            payload["eval_report"] = json.loads(eval_text)
-        except json.JSONDecodeError:
-            payload["eval_report"] = {"error": f"Failed to parse {eval_path.name}"}
 
     output_path = run_status_path(run_dir)
     _write_bound_text(

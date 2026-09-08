@@ -1,383 +1,73 @@
 #!/usr/bin/env python3
-"""Run the p720 narration L3 review loop and write gate artifacts."""
+"""Validate p720 narration shape before audio generation.
+
+The historical p720 entrypoint ran a critic loop and materialized review
+reports. It remains as a compatibility command for older callers, but now
+performs only deterministic authoring checks and records ordinary runtime
+progress.
+"""
 
 from __future__ import annotations
 
 import argparse
-import re
-import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-
-try:
-    import yaml  # type: ignore[import-not-found]
-except ModuleNotFoundError:  # pragma: no cover
-    yaml = None
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from toc.harness import append_state_snapshot, now_iso
-from toc.harness import load_structured_document
-from toc.narration_arc import narration_text_set_hash, validate_audio_story_contract
-from toc.narration_semantic_review import narration_semantic_review_is_current
+from toc.harness import append_state_snapshot, load_structured_document, now_iso
 from toc.runtime_locks import sync_file_lock
-from toc.review_loop import (
-    REVIEW_LOOP_CRITIC_COUNT,
-    aggregated_review_relpath,
-    critic_relpath,
-    final_review_relpath,
-    loop_state_updates,
-)
-from toc.review_loop_runner import materialize_review_loop_round
 
 
 STAGE = "narration"
-CANONICAL_FINDING_CODES = {
-    "ai_thin_abstract_wording",
-    "missing_pause_punctuation",
-    "narration_contains_meta_marker",
-    "narration_contract_missing",
-    "narration_contract_must_avoid_violated",
-    "narration_contract_must_cover_unmet",
-    "narration_contract_target_function_unmet",
-    "narration_empty",
-    "narration_pacing_mismatch",
-    "narration_spoken_japanese_weak",
-    "narration_story_role_mismatch",
-    "narration_too_visual_redundant",
-    "narration_tts_text_missing",
-    "needs_text_normalization",
-    "sentence_too_long_for_tts",
-    "tts_unfriendly_literal",
-    "visual_direction_leaked_into_narration",
-}
 
 
-@dataclass(frozen=True)
-class Finding:
-    selector: str
-    code: str
-    message: str
-    human_review_ok: bool = False
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
-@dataclass(frozen=True)
-class CriticProfile:
-    title: str
-    focus: tuple[str, ...]
+def _list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
-CRITIC_PROFILES: tuple[CriticProfile, ...] = (
-    CriticProfile(
-        title="TTS readiness and pronunciation payload",
-        focus=(
-            "narration_empty",
-            "narration_tts_text_missing",
-            "tts_unfriendly_literal",
-            "needs_text_normalization",
-            "missing_pause_punctuation",
-        ),
-    ),
-    CriticProfile(
-        title="Narration contract and story role",
-        focus=(
-            "narration_contract_missing",
-            "narration_contract_must_cover_unmet",
-            "narration_contract_must_avoid_violated",
-            "narration_contract_target_function_unmet",
-            "narration_story_role_mismatch",
-        ),
-    ),
-    CriticProfile(
-        title="Visual redundancy and leakage",
-        focus=(
-            "visual_direction_leaked_into_narration",
-            "narration_too_visual_redundant",
-        ),
-    ),
-    CriticProfile(
-        title="Pacing and spoken timing",
-        focus=(
-            "sentence_too_long_for_tts",
-            "missing_pause_punctuation",
-            "narration_pacing_mismatch",
-        ),
-    ),
-    CriticProfile(
-        title="Spoken Japanese and thin wording",
-        focus=(
-            "ai_thin_abstract_wording",
-            "narration_spoken_japanese_weak",
-        ),
-    ),
-)
-
-
-def _replace_yaml_block(text: str, new_yaml: str) -> str:
-    match = re.search(r"```yaml\s*\n(.*?)\n```", text, flags=re.DOTALL)
-    if not match:
-        raise RuntimeError("video_manifest.md has no YAML block")
-    start, end = match.span(1)
-    return text[:start] + new_yaml.rstrip("\n") + text[end:]
-
-
-def _requires_full_run_arc_review(manifest: dict[str, object]) -> bool:
-    if manifest.get("audio_story_plan") or manifest.get("narration_spans"):
-        return True
-    for scene in manifest.get("scenes") or []:
+def _narration_nodes(manifest: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    nodes: list[tuple[str, dict[str, Any]]] = []
+    for scene in _list(manifest.get("scenes")):
         if not isinstance(scene, dict):
             continue
-        nodes = scene.get("cuts") if isinstance(scene.get("cuts"), list) else [scene]
-        for node in nodes:
+        scene_id = str(scene.get("scene_id") or "").strip()
+        if not scene_id:
+            continue
+        cuts = scene.get("cuts") if isinstance(scene.get("cuts"), list) else []
+        raw_nodes = cuts or [scene]
+        for index, node in enumerate(raw_nodes, start=1):
             if not isinstance(node, dict):
                 continue
-            audio = node.get("audio") if isinstance(node.get("audio"), dict) else {}
-            narration = audio.get("narration") if isinstance(audio.get("narration"), dict) else {}
-            revision = narration.get("revision") if isinstance(narration.get("revision"), dict) else {}
-            if revision.get("schema_version") == "narration_revision_v1":
-                return True
-    return False
+            cut_id = str(node.get("cut_id") or "").strip()
+            selector = f"scene{scene_id}_cut{cut_id}" if cut_id else f"scene{scene_id}"
+            narration = _dict(_dict(node.get("audio")).get("narration"))
+            if not narration:
+                narration = _dict(node.get("narration"))
+            nodes.append((selector or f"scene{scene_id}_node{index}", narration))
+    return nodes
 
 
-def _write_arc_review_to_manifest(
-    *, manifest_path: Path, manifest_text: str, manifest: dict[str, object], status: str, findings: list[str], report: Path, run_dir: Path
-) -> None:
-    if yaml is None:
-        raise RuntimeError("PyYAML is required to write narration arc review")
-    workflow = manifest.get("narration_workflow") if isinstance(manifest.get("narration_workflow"), dict) else {}
-    workflow["schema_version"] = "narration_run_workflow_v1"
-    workflow["arc_review"] = {
-        "status": status,
-        "narration_text_set_hash": narration_text_set_hash(manifest),
-        "findings": findings,
-        "report": _relative(run_dir, report),
-        "reviewed_at": now_iso(),
-    }
-    manifest["narration_workflow"] = workflow
-    dumped = yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True, width=1000)
-    manifest_path.write_text(_replace_yaml_block(manifest_text, dumped), encoding="utf-8")
+def validate_narration_contract(manifest: dict[str, Any]) -> list[str]:
+    """Return malformed narration fields without semantic judgment."""
 
-
-def _relative(run_dir: Path, path: Path) -> str:
-    try:
-        return path.resolve().relative_to(run_dir.resolve()).as_posix()
-    except ValueError:
-        return str(path)
-
-
-def _parse_int_bullet(text: str, key: str) -> int:
-    pattern = rf"^- {re.escape(key)}: `?(\d+)`?"
-    for line in text.splitlines():
-        match = re.match(pattern, line.strip())
-        if match:
-            return int(match.group(1))
-    return 0
-
-
-def _parse_status(text: str) -> str:
-    for line in text.splitlines():
-        match = re.match(r"^- status: `?([A-Z]+|passed|changes_requested)`?", line.strip())
-        if match:
-            return match.group(1).lower()
-    return "fail"
-
-
-def _parse_findings(text: str) -> list[Finding]:
-    findings: list[Finding] = []
-    selector = "(run)"
-    human_review_ok = False
-    for raw in text.splitlines():
-        line = raw.strip()
-        heading = re.match(r"^##\s+(.+)$", line)
-        if heading:
-            selector = heading.group(1).strip()
-            human_review_ok = False
+    issues: list[str] = []
+    for selector, narration in _narration_nodes(manifest):
+        tool = str(narration.get("tool") or "elevenlabs").strip().lower()
+        if tool == "silent":
             continue
-        human_match = re.match(r"^- human_review_ok:\s+`?(true|false)`?", line)
-        if human_match:
-            human_review_ok = human_match.group(1) == "true"
-            continue
-        match = re.match(r"^- ([a-z0-9_]+):\s+(.+)$", line)
-        if match and selector != "(run)" and match.group(1) in CANONICAL_FINDING_CODES:
-            findings.append(
-                Finding(
-                    selector=selector,
-                    code=match.group(1),
-                    message=match.group(2).strip(),
-                    human_review_ok=human_review_ok,
-                )
-            )
-    return findings
-
-
-def _root_cause_for(finding: Finding) -> str:
-    if finding.code in {"missing_pause_punctuation", "sentence_too_long_for_tts", "narration_pacing_mismatch"}:
-        return "The narration line does not expose enough spoken breakpoints for stable TTS pacing."
-    if finding.code.startswith("narration_contract"):
-        return "The narration text is not anchored tightly enough to its audio.narration.contract."
-    if finding.code in {"needs_text_normalization", "tts_unfriendly_literal", "narration_tts_text_missing"}:
-        return "The final ElevenLabs payload is not fully normalized for speech."
-    if finding.code in {"visual_direction_leaked_into_narration", "narration_too_visual_redundant"}:
-        return "The narration is carrying visual prompt work instead of voiceover meaning."
-    if finding.code == "ai_thin_abstract_wording":
-        return "The wording leans on repeated abstract process terms instead of concrete people, actions, places, or objects."
-    if finding.code == "narration_spoken_japanese_weak":
-        return "The line does not yet read like natural spoken Japanese."
-    return "The narration node violates the p720 TTS readiness contract."
-
-
-def _fix_direction_for(finding: Finding) -> str:
-    if finding.code == "ai_thin_abstract_wording":
-        return "Replace repeated abstract process words, or follow each needed abstract term with a concrete person, action, place, or object."
-    if finding.code in {"missing_pause_punctuation", "sentence_too_long_for_tts"}:
-        return "Split the line and add Japanese punctuation at semantic breathing points."
-    if finding.code.startswith("narration_contract"):
-        return "Patch audio.narration.text and tts_text so the contract target_function, must_cover, and must_avoid fields are satisfied."
-    if finding.code in {"needs_text_normalization", "tts_unfriendly_literal", "narration_tts_text_missing"}:
-        return "Rewrite tts_text as the exact ElevenLabs payload with speech-friendly readings and no raw literals."
-    if finding.code in {"visual_direction_leaked_into_narration", "narration_too_visual_redundant"}:
-        return "Move camera or visual description back to visual prompts and leave narration to causal, emotional, or meaning-layer information."
-    return "Patch the narration node, then rerun p720 before p730 TTS generation."
-
-
-def _render_critic_report(
-    *,
-    index: int,
-    profile: CriticProfile,
-    findings: list[Finding],
-    accepted_findings: list[Finding],
-    deterministic_report: Path,
-    run_dir: Path,
-) -> str:
-    status = "changes_requested" if findings else "passed"
-    lines = [
-        f"# L3 Narration Critic {index}: {profile.title}",
-        "",
-        f"- status: {status}",
-        f"- deterministic_gate_report: `{_relative(run_dir, deterministic_report)}`",
-        f"- focus_codes: `{', '.join(profile.focus)}`",
-        "",
-        "## Blocking Findings",
-        "",
-    ]
-    if not findings:
-        lines.append("- []")
-    for item_no, finding in enumerate(findings, start=1):
-        lines.extend(
-            [
-                f"- id: `{finding.selector}.{finding.code}.{item_no}`",
-                "  severity: blocker",
-                f"  evidence: `{finding.selector}` raised `{finding.code}`: {finding.message}",
-                f"  root_cause: {_root_cause_for(finding)}",
-                "  downstream_impact: p730 must not send this line to ElevenLabs until p720 is clean.",
-                f"  fix_direction: {_fix_direction_for(finding)}",
-                "  acceptance_condition: rerun p720 and this finding no longer appears in the deterministic gate report.",
-            ]
-        )
-    lines.extend(["", "## Human-Accepted Findings", ""])
-    if not accepted_findings:
-        lines.append("- []")
-    for finding in accepted_findings:
-        lines.append(f"- `{finding.selector}` `{finding.code}`: {finding.message}")
-    lines.extend(
-        [
-            "",
-            "## Recommended Changes",
-            "",
-            "- Keep audio.narration.text and audio.narration.tts_text aligned unless the tts_text divergence is explicitly for pronunciation or delivery.",
-            "",
-            "## Rejected Suggestions",
-            "",
-            "- []",
-            "",
-            "## Generator Patch Brief",
-            "",
-        ]
-    )
-    if not findings:
-        lines.append("- No blocking patch needed for this critic focus.")
-    for finding in findings:
-        lines.append(f"- `{finding.selector}`: {_fix_direction_for(finding)}")
-    lines.extend(["", "## Round Summary", "", f"{profile.title} completed with status `{status}`."])
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def _render_aggregate_report(
-    *,
-    critic_reports: list[str],
-    blocking_findings: list[Finding],
-    accepted_findings: list[Finding],
-    status: str,
-    round_number: int,
-    deterministic_report: Path,
-    run_dir: Path,
-) -> str:
-    lines = [
-        "# Narration Text Eval/Improve Loop",
-        "",
-        f"- status: {status}",
-        f"- round: {round_number}/5",
-        f"- critic_count: {REVIEW_LOOP_CRITIC_COUNT}",
-        f"- deterministic_gate_report: `{_relative(run_dir, deterministic_report)}`",
-        "",
-        "## Blocking Findings",
-        "",
-    ]
-    if not blocking_findings:
-        lines.append("- []")
-    for item_no, finding in enumerate(blocking_findings, start=1):
-        lines.extend(
-            [
-                f"- id: `{finding.selector}.{finding.code}.{item_no}`",
-                "  severity: blocker",
-                f"  evidence: `{finding.selector}` raised `{finding.code}`: {finding.message}",
-                f"  root_cause: {_root_cause_for(finding)}",
-                "  downstream_impact: p730 TTS generation is blocked until this narration node passes p720.",
-                f"  adopted_fix_plan: {_fix_direction_for(finding)}",
-                "  acceptance_condition: rerun p720 and the deterministic gate reports no unresolved entry for this selector.",
-            ]
-        )
-    lines.extend(["", "## Human-Accepted Findings", ""])
-    if not accepted_findings:
-        lines.append("- []")
-    for finding in accepted_findings:
-        lines.append(
-            f"- `{finding.selector}` raised `{finding.code}` but is already marked `human_review_ok: true`: {finding.message}"
-        )
-    lines.extend(
-        [
-            "",
-            "## Recommended Changes",
-            "",
-            "- Use v-dict or ElevenLabs pronunciation dictionary locators for names or terms that are likely to be misread.",
-            "- Keep punctuation in tts_text where the intended voice needs a pause.",
-            "",
-            "## Rejected Suggestions",
-            "",
-            "- []",
-            "",
-            "## Generator Patch Brief",
-            "",
-        ]
-    )
-    if not blocking_findings:
-        lines.append("- No patch needed. p720 may advance to p730.")
-    for finding in blocking_findings:
-        lines.append(f"- `{finding.selector}`: {_fix_direction_for(finding)}")
-    lines.extend(
-        [
-            "",
-            "## Round Summary",
-            "",
-            f"p720 automatic L3 review finished with status `{status}`.",
-        ]
-    )
-    for idx, report in enumerate(critic_reports, start=1):
-        lines.extend(["", f"## Critic {idx} Input", "", report.strip()])
-    return "\n".join(lines).rstrip() + "\n"
+        if not str(narration.get("text") or "").strip():
+            issues.append(f"{selector}: narration.text is required")
+        if not str(narration.get("tts_text") or narration.get("text") or "").strip():
+            issues.append(f"{selector}: narration.tts_text is required")
+    return issues
 
 
 def _run_p720_l3_unlocked(
@@ -385,165 +75,28 @@ def _run_p720_l3_unlocked(
     run_dir: Path,
     manifest_path: Path,
     script_path: Path,
-    round_number: int,
+    round_number: int = 1,
 ) -> str:
-    run_dir = run_dir.resolve()
-    manifest_path = manifest_path.resolve()
-    script_path = script_path.resolve()
-    materialize_review_loop_round(run_dir=run_dir, stage=STAGE, round_number=round_number)
-
-    round_dir = run_dir / aggregated_review_relpath(STAGE, round_number).parent
-    deterministic_report = round_dir / "deterministic_gate_report.md"
-    review_cmd = [
-        sys.executable,
-        str(REPO_ROOT / "scripts" / "review-narration-text-quality.py"),
-        "--manifest",
-        str(manifest_path),
-        "--script",
-        str(script_path),
-        "--out",
-        str(deterministic_report),
-        "--assume-run-lock-held",
-    ]
-    result = subprocess.run(review_cmd, check=False, capture_output=True, text=True)
-    if result.returncode != 0:
-        error = result.stderr.strip() or result.stdout.strip() or "deterministic narration review failed"
-        updates = loop_state_updates(stage=STAGE, status="failed", current_round=round_number)
-        updates.update(
-            {
-                f"eval.{STAGE}.loop.round_{round_number:02d}.failed_at": now_iso(),
-                f"eval.{STAGE}.loop.round_{round_number:02d}.error": error,
-                "slot.p720.status": "blocked",
-                "slot.p720.review_loop.status": "failed",
-                "slot.p720.review_loop.current_round": str(round_number),
-                "review.narration.status": "changes_requested",
-                "review.narration.note": error,
-            }
-        )
-        append_state_snapshot(run_dir / "state.txt", updates)
-        raise RuntimeError(error)
-
-    report_text = deterministic_report.read_text(encoding="utf-8")
-    unresolved_entries = _parse_int_bullet(report_text, "unresolved_entries")
-    findings = _parse_findings(report_text)
-    blocking_findings = [finding for finding in findings if not finding.human_review_ok]
-    accepted_findings = [finding for finding in findings if finding.human_review_ok]
-    status = "changes_requested" if unresolved_entries else "passed"
-    manifest_text, manifest = load_structured_document(manifest_path)
-    requires_arc_review = _requires_full_run_arc_review(manifest)
-    arc_findings = validate_audio_story_contract(manifest) if requires_arc_review else []
-    if arc_findings:
-        status = "changes_requested"
-
-    unmatched = list(blocking_findings)
-    critic_reports: list[str] = []
-    for idx, profile in enumerate(CRITIC_PROFILES, start=1):
-        focused = [finding for finding in blocking_findings if finding.code in profile.focus]
-        accepted_focused = [finding for finding in accepted_findings if finding.code in profile.focus]
-        if idx == 1:
-            focused.extend(finding for finding in blocking_findings if all(finding.code not in p.focus for p in CRITIC_PROFILES))
-            accepted_focused.extend(
-                finding for finding in accepted_findings if all(finding.code not in p.focus for p in CRITIC_PROFILES)
-            )
-        for finding in focused:
-            if finding in unmatched:
-                unmatched.remove(finding)
-        critic_report = _render_critic_report(
-            index=idx,
-            profile=profile,
-            findings=focused,
-            accepted_findings=accepted_focused,
-            deterministic_report=deterministic_report,
-            run_dir=run_dir,
-        )
-        critic_reports.append(critic_report)
-        (run_dir / critic_relpath(STAGE, round_number, idx)).write_text(critic_report, encoding="utf-8")
-
-    if unmatched:
-        fallback = (run_dir / critic_relpath(STAGE, round_number, 1)).read_text(encoding="utf-8")
-        fallback += "\n## Additional Unclassified Findings\n\n"
-        for finding in unmatched:
-            fallback += f"- `{finding.selector}` `{finding.code}`: {finding.message}\n"
-        (run_dir / critic_relpath(STAGE, round_number, 1)).write_text(fallback, encoding="utf-8")
-        critic_reports[0] = fallback
-
-    aggregate_report = _render_aggregate_report(
-        critic_reports=critic_reports,
-        blocking_findings=blocking_findings,
-        accepted_findings=accepted_findings,
-        status=status,
-        round_number=round_number,
-        deterministic_report=deterministic_report,
-        run_dir=run_dir,
-    )
-    if requires_arc_review:
-        arc_lines = ["", "## Full-run Arc Review", "", f"- status: {'passed' if not arc_findings else 'changes_requested'}"]
-        if arc_findings:
-            arc_lines.extend(f"- {finding}" for finding in arc_findings)
-        else:
-            arc_lines.append("- []")
-        aggregate_report = aggregate_report.rstrip() + "\n" + "\n".join(arc_lines) + "\n"
-    aggregate_path = run_dir / aggregated_review_relpath(STAGE, round_number)
-    aggregate_path.write_text(aggregate_report, encoding="utf-8")
-    final_path = run_dir / final_review_relpath(STAGE)
-    final_path.write_text(aggregate_report, encoding="utf-8")
-    if requires_arc_review:
-        _write_arc_review_to_manifest(
-            manifest_path=manifest_path,
-            manifest_text=manifest_text,
-            manifest=manifest,
-            status="passed" if status == "passed" else "changes_requested",
-            findings=arc_findings,
-            report=final_path,
-            run_dir=run_dir,
-        )
-
-    workflow = manifest.get("narration_workflow") if isinstance(manifest.get("narration_workflow"), dict) else {}
-    semantic_review = (
-        workflow.get("semantic_critic_review")
-        if isinstance(workflow.get("semantic_critic_review"), dict)
-        else {}
-    )
-    semantic_current = narration_semantic_review_is_current(
-        manifest,
-        semantic_review,
-        run_dir=run_dir,
-    )
-    full_review_passed = status == "passed" and (not requires_arc_review or semantic_current)
-    p720_status = "done" if full_review_passed else ("in_progress" if status == "passed" else "blocked")
-    updates = loop_state_updates(stage=STAGE, status=status, current_round=round_number)
-    updates.update(
-        {
-            f"eval.{STAGE}.loop.round_{round_number:02d}.completed_at": now_iso(),
-            f"eval.{STAGE}.loop.round_{round_number:02d}.aggregated_review": str(
-                aggregated_review_relpath(STAGE, round_number)
-            ),
-            f"eval.{STAGE}.loop.round_{round_number:02d}.deterministic_gate_report": _relative(run_dir, deterministic_report),
-            "slot.p720.status": p720_status,
-            "slot.p720.note": (
-                "deterministic review passed; waiting for five independent semantic critics"
-                if status == "passed" and requires_arc_review and not semantic_current
-                else "p720 deterministic and semantic reviews passed"
-                if full_review_passed
-                else "p720 deterministic review has unresolved findings"
-            ),
-            "slot.p720.review_loop.status": status,
-            "slot.p720.review_loop.current_round": str(round_number),
-            "review.narration.deterministic.status": status,
-            "review.narration.status": (
-                "approved" if full_review_passed else "pending" if status == "passed" else "changes_requested"
-            ),
-            "review.narration.report": str(final_review_relpath(STAGE)),
-        }
-    )
-    if status == "passed" and requires_arc_review and not semantic_current:
-        updates.update(
-            {
-                "slot.p730.status": "blocked",
-                "slot.p730.note": "waiting for hash-bound p720 semantic critics",
-                "gate.narration_review": "required",
-            }
-        )
+    del script_path, round_number  # retained for compatibility with old callers
+    _text, manifest = load_structured_document(manifest_path)
+    if not isinstance(manifest, dict):
+        raise RuntimeError(f"manifest has no structured YAML: {manifest_path}")
+    issues = validate_narration_contract(manifest)
+    status = "failed" if issues else "passed"
+    updates = {
+        "runtime.stage": "narration_contract_validation",
+        "runtime.narration.phase": "authoring",
+        "slot.p720.status": "done" if not issues else "blocked",
+        "slot.p720.note": (
+            "narration shape and TTS fields are valid"
+            if not issues
+            else "; ".join(issues)
+        ),
+        "stage.narration.status": "ready" if not issues else "blocked",
+        "runtime.duration_fit.at": now_iso(),
+    }
+    if issues:
+        updates["last_error"] = "; ".join(issues)
     append_state_snapshot(run_dir / "state.txt", updates)
     return status
 
@@ -555,8 +108,6 @@ def run_p720_l3(
     script_path: Path,
     round_number: int,
 ) -> str:
-    """Run p720 against one stable script/manifest revision."""
-
     with sync_file_lock(run_dir.resolve() / ".locks" / "run_artifacts.lock"):
         return _run_p720_l3_unlocked(
             run_dir=run_dir,
@@ -567,12 +118,14 @@ def run_p720_l3(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run automatic p720 narration L3 review before p730 TTS.")
-    parser.add_argument("--run-dir", default=None, help="Path to output/<topic>_<timestamp>")
-    parser.add_argument("--manifest", default=None, help="Path to video_manifest.md. Defaults to <run-dir>/video_manifest.md.")
-    parser.add_argument("--script", default=None, help="Path to script.md. Defaults to <run-dir>/script.md.")
-    parser.add_argument("--round", type=int, default=1, dest="round_number", help="Review round number, 1-5.")
-    parser.add_argument("--fail-on-findings", action="store_true", help="Exit non-zero if p720 status is changes_requested.")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-dir", default=None)
+    parser.add_argument("--manifest", default=None)
+    parser.add_argument("--script", default=None)
+    parser.add_argument("--round", type=int, default=1, dest="round_number")
+    # Kept for old automation; deterministic validation itself always reports
+    # its status and never creates a review artifact.
+    parser.add_argument("--fail-on-findings", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -582,15 +135,14 @@ def main() -> int:
     run_dir = Path(args.run_dir).resolve() if args.run_dir else (manifest_path.parent if manifest_path else None)
     if run_dir is None:
         raise SystemExit("one of --run-dir or --manifest is required")
-    if not run_dir.exists():
-        raise SystemExit(f"Run directory not found: {run_dir}")
     manifest_path = manifest_path or run_dir / "video_manifest.md"
     script_path = Path(args.script).resolve() if args.script else run_dir / "script.md"
-    if not manifest_path.exists():
+    if not run_dir.is_dir():
+        raise SystemExit(f"Run directory not found: {run_dir}")
+    if not manifest_path.is_file():
         raise SystemExit(f"Manifest not found: {manifest_path}")
-    if not script_path.exists():
+    if not script_path.is_file():
         raise SystemExit(f"Script not found: {script_path}")
-
     try:
         status = run_p720_l3(
             run_dir=run_dir,
@@ -600,10 +152,8 @@ def main() -> int:
         )
     except Exception as exc:
         raise SystemExit(str(exc)) from exc
-    print(f"p720 narration L3 review: {status}")
-    if args.fail_on_findings and status != "passed":
-        return 1
-    return 0
+    print(f"p720 narration contract validation: {status}")
+    return 1 if args.fail_on_findings and status != "passed" else 0
 
 
 if __name__ == "__main__":

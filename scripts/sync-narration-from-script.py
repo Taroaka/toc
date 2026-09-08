@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync reviewed script fields and human change requests into video_manifest.md."""
+"""Sync authored script fields and human change requests into video_manifest.md."""
 
 from __future__ import annotations
 
@@ -576,20 +576,9 @@ def _invalidate_audio_for_source_binding_migration(narration: dict[str, Any]) ->
         "approved_tts_hash": "",
         "approved_at": "",
     }
-    review = _as_dict(narration.get("review"))
-    review.update(
-        {
-            "status": "pending",
-            "agent_review_ok": None,
-            "agent_review_reason_keys": [],
-            "agent_review_reason_messages": [],
-            "human_review_ok": False,
-            "semantic": {"status": "stale", "reviewed_text_hash": ""},
-            "delivery": {"status": "stale", "reviewed_tts_hash": ""},
-            "arc": {"status": "stale", "narration_set_hash": ""},
-        }
-    )
-    narration["review"] = review
+    # Old runs may still contain a narration.review object.  Leave historical
+    # bytes alone; this synchronizer no longer creates or refreshes reviewer
+    # status, critic findings, or semantic report metadata.
 
 
 def _sync_narration_source_binding(
@@ -1054,16 +1043,14 @@ def _sync_narration_unlocked(*, script_path: Path, manifest_path: Path) -> tuple
                 state_path,
                 {
                     "status": "P720",
-                    "runtime.stage": "narration_script_sync_reopened",
-                    "runtime.narration.phase": "review",
+                    "runtime.stage": "narration_script_sync_updated",
+                    "runtime.narration.phase": "authoring",
                     "slot.p720.status": "in_progress",
-                    "slot.p720.note": "script/global narration changed; rerun the full-run review",
+                    "slot.p720.note": "script/global narration changed; regenerate bound audio",
                     "slot.p730.status": "pending",
                     "slot.p740.status": "pending",
                     "slot.p750.status": "pending",
                     "stage.narration.status": "in_progress",
-                    "review.narration.status": "pending",
-                    "gate.narration_review": "required",
                 },
             )
     except Exception:
@@ -1093,7 +1080,7 @@ def sync_narration(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Sync script review fields and human change requests into video_manifest.md.")
+    parser = argparse.ArgumentParser(description="Sync authored script fields and human change requests into video_manifest.md.")
     parser.add_argument("--script", required=True, help="Path to script.md")
     parser.add_argument("--manifest", required=True, help="Path to video_manifest.md")
     parser.add_argument(

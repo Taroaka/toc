@@ -1,0 +1,17 @@
+{
+  "run": "output/シンデレラ_20260908_0810",
+  "negative_verdict_contract_errors": [],
+  "semantic_status": "failed",
+  "semantic_passed": false,
+  "semantic_errors": [
+    "semantic review status must be passed, got failed"
+  ],
+  "run_mutated": false,
+  "targeted_tests": "59 passed, 29 subtests",
+  "broader_repair_tests": {
+    "passed": 7,
+    "failed": 5,
+    "baseline": "Same 5 failures reproduced with the selector helper restored in-memory to its pre-fix implementation; repository files were not reverted.",
+    "cause": "canonical scene repair cannot fall back to whole-file producer editing"
+  }
+}

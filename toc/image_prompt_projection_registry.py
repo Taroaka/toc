@@ -1,8 +1,8 @@
-"""Canonical key-to-prompt projection and review registry.
+"""Canonical key-to-prompt projection registry.
 
 The registry separates upstream design keys from provider prose.  It tells the
-compiler and reviewers which drawable group owns a key, when that group is
-active, and which deterministic and semantic checks must accompany it.
+compiler which drawable group owns a key, when that group is active, and which
+structural checks must accompany it.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 
-PROMPT_PROJECTION_REGISTRY_VERSION = "prompt_projection_registry_v2"
+PROMPT_PROJECTION_REGISTRY_VERSION = "prompt_projection_registry_v3"
 PROMPT_PROJECTION_RELEVANCE = {"required", "conditional", "none"}
 _OPAQUE_IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -84,19 +84,17 @@ class PromptProjectionRule:
     relevance: str
     transform: str
     deterministic_checks: tuple[str, ...]
-    semantic_checks: tuple[str, ...]
     group: str | None = None
     activation_dependency: str = ""
     value_prompt_template: str = ""
     exclusion_reason: str = ""
 
-    def as_review_dict(self, *, expected_value: str = "") -> dict[str, Any]:
+    def as_dict(self, *, expected_value: str = "") -> dict[str, Any]:
         payload: dict[str, Any] = {
             "source_keys": list(self.source_keys),
             "relevance": self.relevance,
             "transform": self.transform,
             "deterministic_checks": list(self.deterministic_checks),
-            "semantic_checks": list(self.semantic_checks),
         }
         if self.group:
             payload["target_group"] = self.group
@@ -122,7 +120,6 @@ _DRAWABLE_RULES = (
         relevance="required",
         transform="render_live_action_style_invariants",
         deterministic_checks=("required_group", "single_nonempty_fragment", "fragment_rendered"),
-        semantic_checks=("実写、映画照明、実物セット感がcut固有情報を妨げていないか",),
     ),
     PromptProjectionRule(
         group="story_time",
@@ -136,7 +133,6 @@ _DRAWABLE_RULES = (
             "single_nonempty_fragment",
             "fragment_rendered",
         ),
-        semantic_checks=("衣装、髪型、建築、生活道具、素材、技術水準が同じ時代に整合するか",),
         value_prompt_template="物語の時代背景は{value}",
     ),
     PromptProjectionRule(
@@ -151,7 +147,6 @@ _DRAWABLE_RULES = (
             "single_nonempty_fragment",
             "fragment_rendered",
         ),
-        semantic_checks=("空の明るさ、自然光、人工光、影、色温度がscene時間帯と矛盾しないか",),
         value_prompt_template="このシーンの時間帯は{value}",
     ),
     PromptProjectionRule(
@@ -161,7 +156,6 @@ _DRAWABLE_RULES = (
         activation_dependency="references",
         transform="bind_reference_roles_only",
         deterministic_checks=("dependency_binding", "required_group", "single_nonempty_fragment", "fragment_rendered"),
-        semantic_checks=("各参照が人物、物、場所のどの同一性を拘束するか明示されているか",),
     ),
     PromptProjectionRule(
         group="current_moment",
@@ -172,7 +166,6 @@ _DRAWABLE_RULES = (
         relevance="required",
         transform="single_drawable_first_frame_moment",
         deterministic_checks=("required_group", "single_nonempty_fragment", "fragment_rendered"),
-        semantic_checks=("一つの静止状態へ確定され、後続motionや完了結果を含まないか",),
     ),
     PromptProjectionRule(
         group="primary_subject",
@@ -180,7 +173,6 @@ _DRAWABLE_RULES = (
         relevance="conditional",
         transform="resolve_primary_subject_hierarchy",
         deterministic_checks=("required_group", "single_nonempty_fragment", "fragment_rendered"),
-        semantic_checks=("観客が最初に読む主被写体が一意で、構図と一致するか",),
     ),
     PromptProjectionRule(
         group="characters",
@@ -201,7 +193,6 @@ _DRAWABLE_RULES = (
             "fragment_rendered",
             "per_character_appearance_value_binding",
         ),
-        semantic_checks=("人物状態が人物別の衣装、表情、視線、姿勢、手足、距離として描画可能か",),
     ),
     PromptProjectionRule(
         group="objects",
@@ -210,7 +201,6 @@ _DRAWABLE_RULES = (
         activation_dependency="object_ids",
         transform="translate_object_state_and_contact",
         deterministic_checks=("dependency_binding", "required_group", "single_nonempty_fragment", "fragment_rendered"),
-        semantic_checks=("物の状態、接触、位置、物語上の証拠が一枚で読めるか",),
     ),
     PromptProjectionRule(
         group="location",
@@ -219,7 +209,6 @@ _DRAWABLE_RULES = (
         activation_dependency="location_ids",
         transform="translate_location_to_screen_geography",
         deterministic_checks=("dependency_binding", "required_group", "single_nonempty_fragment", "fragment_rendered"),
-        semantic_checks=("場所の前景、中景、背景と人物の導線が具体的か",),
     ),
     PromptProjectionRule(
         group="composition",
@@ -227,7 +216,6 @@ _DRAWABLE_RULES = (
         relevance="conditional",
         transform="translate_subject_priority_and_camera",
         deterministic_checks=("required_group", "single_nonempty_fragment", "fragment_rendered"),
-        semantic_checks=("画角、主被写体の優先順位、前景中景背景が同じ狙いを支えるか",),
     ),
     PromptProjectionRule(
         group="light_material",
@@ -235,7 +223,6 @@ _DRAWABLE_RULES = (
         relevance="conditional",
         transform="translate_cut_local_light_and_material",
         deterministic_checks=("required_group", "single_nonempty_fragment", "fragment_rendered"),
-        semantic_checks=("光源と素材がstory_time、time_of_day、参照場所と矛盾しないか",),
     ),
     PromptProjectionRule(
         group="current_state_delta",
@@ -243,7 +230,6 @@ _DRAWABLE_RULES = (
         relevance="conditional",
         transform="translate_previous_cut_delta",
         deterministic_checks=("required_group", "single_nonempty_fragment", "fragment_rendered"),
-        semantic_checks=("前cutとの差が画角だけでなく具体的な人物、物、位置、状態の変化になっているか",),
     ),
     PromptProjectionRule(
         group="constraints",
@@ -254,7 +240,6 @@ _DRAWABLE_RULES = (
         relevance="required",
         transform="render_drawable_constraints_without_positive_conflict",
         deterministic_checks=("required_group", "single_nonempty_fragment", "fragment_rendered"),
-        semantic_checks=("must-showとnot-yetが同じ人物、物、状態を同時に要求禁止していないか",),
     ),
 )
 
@@ -262,13 +247,10 @@ _EXCLUDED_RULES = (
     PromptProjectionRule(
         source_keys=("story.script.scenes[].visualizable_action",),
         relevance="none",
-        transform="review_scene_overview_but_project_cut_local_drawable_evidence",
+        transform="exclude_scene_overview_from_cut_local_prompt",
         deterministic_checks=(
             "must_not_render_scene_overview",
             "reject_sequential_notation_in_positive_fragment",
-        ),
-        semantic_checks=(
-            "story/scene全体の出来事列をreview contextに留め、担当cutの一瞬だけをfirst-frame planへ投影しているか",
         ),
         exclusion_reason="scene overview may span multiple beats; cut-local event evidence is canonical for one still",
     ),
@@ -283,28 +265,21 @@ _EXCLUDED_RULES = (
             "raw_values_must_not_render",
             "resolved_name_does_not_activate_dependency",
         ),
-        semantic_checks=(
-            "既知の人物・物assetへ完全一致で解決できる値だけがnot-yet禁止文へ入り、抽象情報IDはreview metadataに留まるか",
-        ),
-        exclusion_reason="raw reveal IDs are review metadata; only resolved drawable names may enter the constraints group",
+        exclusion_reason="raw reveal IDs are internal metadata; only resolved drawable names may enter the constraints group",
     ),
     PromptProjectionRule(
         source_keys=("cut_contract.motion_contract.motion_brief",),
         relevance="none",
         transform="exclude_video_motion_from_still_prompt",
         deterministic_checks=("must_not_render",),
-        semantic_checks=("動画内の後続動作や完了状態がfirst-frame promptへ漏れていないか",),
         exclusion_reason="p800 video generation only",
     ),
     PromptProjectionRule(
         source_keys=("scenes[].time_of_day_visual_basis",),
         relevance="none",
-        transform="review_derived_daypart_basis_without_duplicate_prompt_source",
+        transform="exclude_derived_daypart_basis_from_prompt",
         deterministic_checks=("must_not_create_second_authoring_root",),
-        semantic_checks=(
-            "scene.time_of_dayから導いた光源、明るさ、影、色温度の根拠が矛盾しないか",
-        ),
-        exclusion_reason="derived review evidence; scenes[].time_of_day remains canonical",
+        exclusion_reason="derived daypart evidence; scenes[].time_of_day remains canonical",
     ),
     PromptProjectionRule(
         source_keys=(
@@ -313,9 +288,8 @@ _EXCLUDED_RULES = (
             "scenes[].location_segments",
         ),
         relevance="none",
-        transform="review_scene_location_sequence_but_project_one_cut_location",
+        transform="exclude_scene_route_from_cut_local_prompt",
         deterministic_checks=("one_cut_one_location_dependency",),
-        semantic_checks=("sceneの場所順序を保ちつつ、静止画には担当cutの一場所だけを投影しているか",),
         exclusion_reason="scene routing metadata; cut location dependency is canonical for one still",
     ),
 )
@@ -354,7 +328,7 @@ def render_projection_value_marker(group: str, value: str) -> str:
 
 
 def normalize_drawable_prompt_text(value: Any) -> str:
-    """Normalize one scalar with the same drawable boundary used by projection review."""
+    """Normalize one scalar with the drawable prompt boundary."""
 
     text = _WHITESPACE_RE.sub(" ", str(value or "")).strip(" 、。:：/\n\t")
     if not text:
@@ -385,8 +359,8 @@ def projection_registry_contract_issues() -> list[str]:
             issues.append(f"missing_source_keys:{rule.group or rule.transform}")
         if not rule.transform:
             issues.append(f"missing_transform:{rule.group or rule.source_keys[0]}")
-        if not rule.deterministic_checks or not rule.semantic_checks:
-            issues.append(f"missing_review_checks:{rule.group or rule.source_keys[0]}")
+        if not rule.deterministic_checks:
+            issues.append(f"missing_deterministic_checks:{rule.group or rule.source_keys[0]}")
         if rule.relevance == "none" and (rule.group or not rule.exclusion_reason):
             issues.append(f"invalid_excluded_rule:{rule.source_keys[0]}")
         if rule.relevance != "none" and not rule.group:
@@ -397,7 +371,7 @@ def projection_registry_contract_issues() -> list[str]:
     return issues
 
 
-def build_projection_review_contract(
+def build_projection_contract(
     *,
     story_time: str = "",
     time_of_day: str = "",
@@ -421,15 +395,15 @@ def build_projection_review_contract(
             plan=plan,
         )
         target = active_rules if active else inactive_rules
-        target.append(rule.as_review_dict(expected_value=expected_value))
+        target.append(rule.as_dict(expected_value=expected_value))
     return {
         "registry_version": PROMPT_PROJECTION_REGISTRY_VERSION,
         "invariant_principles": list(INVARIANT_PROMPT_AUTHORING_PRINCIPLES),
         "active_rules": active_rules,
         "inactive_rules": inactive_rules,
-        "excluded_rules": [rule.as_review_dict() for rule in _EXCLUDED_RULES],
+        "excluded_rules": [rule.as_dict() for rule in _EXCLUDED_RULES],
         "expected_required_groups": [item["target_group"] for item in active_rules],
-        "review_operations": ["include", "omit", "add", "replace"],
+        "projection_operations": ["include", "omit", "add", "replace"],
     }
 
 
@@ -445,8 +419,8 @@ def projection_trace_issues(
     """Validate source -> dependency -> required group -> fragment -> prompt.
 
     Callers retain their own manifest/dependency type checks.  This helper owns
-    the registry-specific completeness and exact-value trace so deterministic
-    and semantic review cannot silently diverge when a design key is added.
+    the registry-specific completeness and exact-value trace so a design-key
+    change cannot silently diverge from the provider prompt.
     """
 
     normalized_dependencies = dict(dependencies or {})
@@ -476,7 +450,7 @@ def projection_trace_issues(
         if expected_time_of_day is not None
         else str(normalized_dependencies.get("time_of_day") or "").strip()
     )
-    contract = build_projection_review_contract(
+    contract = build_projection_contract(
         story_time=resolved_story_time,
         time_of_day=resolved_time_of_day,
         dependencies=normalized_dependencies,

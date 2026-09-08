@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from toc.harness import load_structured_document
+from toc.story_authoring import build_research_registry
 
 
 SUPPORTED_STAGES = {"research", "story"}
@@ -58,24 +59,23 @@ def _research_core(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _known_research_ids(research: dict[str, Any]) -> dict[str, set[str]]:
-    materials = _dict(research.get("story_materials"))
-    return {
-        "story_materials.chronological_events": {
-            _text(item.get("event_id"))
-            for item in _list(materials.get("chronological_events"))
-            if isinstance(item, dict) and _text(item.get("event_id"))
-        },
-        "source_passages": {
-            _text(item.get("passage_id"))
-            for item in _list(research.get("source_passages"))
-            if isinstance(item, dict) and _text(item.get("passage_id"))
-        },
-        "conflicts": {
-            _text(item.get("conflict_id"))
-            for item in _list(research.get("conflicts"))
-            if isinstance(item, dict) and _text(item.get("conflict_id"))
-        },
+    # Match the authoring registry, including its stable IDs for legacy records
+    # that do not carry explicit IDs in research.md.
+    registry = build_research_registry(research)
+    sections = {
+        "story_materials.chronological_events": "events",
+        "source_passages": "passages",
+        "conflicts": "conflicts",
+        "story_materials.characters": "characters",
+        "story_materials.setting.places": "places",
+        "story_materials.setting.world_rules": "world_rules",
+        "story_materials.symbols_and_themes": "symbols",
+        "source_inventory": "sources",
+        "variants": "variants",
+        "facts.items": "facts",
+        "engagement.hooks": "hooks",
     }
+    return {section: set(registry[category]) for section, category in sections.items()}
 
 
 def _story_reference_diagnostics(research: dict[str, Any], scenes: list[dict[str, Any]]) -> dict[str, Any]:
@@ -118,7 +118,9 @@ _REQUIRED_LOCATION_SEGMENT_LIST_FIELDS = (
 )
 
 
-def _scene_location_route_status(scene: dict[str, Any], index: int) -> dict[str, Any]:
+def _scene_location_route_status(
+    scene: dict[str, Any], index: int, *, require_production_segments: bool = True
+) -> dict[str, Any]:
     """Summarize whether an authored multi-location route is cut-design ready.
 
     Missing legacy location data stays distinguishable from a malformed declared
@@ -160,6 +162,19 @@ def _scene_location_route_status(scene: dict[str, Any], index: int) -> dict[str,
         if any(not value for value in sequence):
             errors.append("location_sequence_blank")
         result["status"] = "invalid" if errors else "valid_single"
+        if errors:
+            result["errors"] = errors
+        return result
+
+    if not require_production_segments:
+        errors: list[str] = []
+        if not isinstance(raw_sequence, list):
+            errors.append("location_sequence_invalid_type")
+        if not sequence or any(not value for value in sequence):
+            errors.append("location_sequence_missing_or_blank")
+        if len(set(sequence)) != len(sequence):
+            errors.append("location_sequence_duplicate")
+        result["status"] = "invalid" if errors else "authored_semantic_route"
         if errors:
             result["errors"] = errors
         return result
@@ -272,8 +287,16 @@ def _story_entry(run_dir: Path) -> dict[str, Any]:
         elif status == "invalid_type":
             item["raw_value"] = raw_time_of_day
         scene_time_of_day_statuses.append(item)
+    semantic_scene_contract = (
+        _text(story_metadata.get("scene_authoring_contract"))
+        == "story_scene_contract_v1"
+    )
     scene_location_route_statuses = [
-        _scene_location_route_status(scene, index)
+        _scene_location_route_status(
+            scene,
+            index,
+            require_production_segments=not semantic_scene_contract,
+        )
         for index, scene in enumerate(scenes, start=1)
     ]
     return {

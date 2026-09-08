@@ -72,11 +72,6 @@ def resolve_script_cut_elevenlabs_prompt(cut: dict[str, Any]) -> dict[str, Any]:
 
 
 def resolve_script_cut_tts_text(cut: dict[str, Any]) -> str:
-    review = _as_dict(cut.get("human_review"))
-    approved_tts = _as_text(review.get("approved_tts_text"))
-    if approved_tts:
-        return approved_tts
-
     explicit_tts = _as_text(cut.get("tts_text"))
     if explicit_tts:
         return explicit_tts
@@ -89,10 +84,6 @@ def resolve_script_cut_tts_text(cut: dict[str, Any]) -> str:
     )
     if materialized:
         return materialized
-
-    approved_narration = _as_text(review.get("approved_narration"))
-    if approved_narration:
-        return approved_narration
     return _as_text(cut.get("narration"))
 
 

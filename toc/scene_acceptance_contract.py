@@ -7,8 +7,8 @@ validator.  Provider-facing code can use the result objects here without having
 to know about the implementation details of the validator.
 
 The validator is intentionally conservative: IDs and ownership are exact
-references, while prose is treated as a semantic hint only.  A generic sentence
-cannot satisfy a missing event/evidence/role reference.
+references, while prose cannot substitute for an explicit contract value.  A
+generic sentence cannot satisfy a missing event/evidence/role reference.
 """
 
 from __future__ import annotations
@@ -47,128 +47,72 @@ REGISTRY_DIGEST_DOMAIN = "toc.scene_acceptance.registry.v1"
 
 
 # Keep the old reason key as a stable compatibility value.  ``canonical_reason_key``
-# is the namespaced value emitted by new report writers.  The registry is the one
-# source of truth for prompt projection and deterministic routing.
+# is the namespaced value emitted by artifact writers.  The registry is the one
+# source of truth for authoring projection and deterministic routing.
 SCENE_ACCEPTANCE_CRITERIA: tuple[dict[str, Any], ...] = (
     {
         "criterion_id": "scene.canonical_event_ownership",
         "reason_key": "scene_event_canonical_event_missing",
         "canonical_reason_key": "scene_set.scene_event_canonical_event_missing",
         "owner": "deterministic",
-        "first_enforced_stage": "scene_authoring_preflight",
-        "semantic_recheck_stages": [],
-        "provider_repair_allowed": False,
         "required_inputs": ["canonical_event_ledger", "scene_event.event_sequence"],
         "authoring_instruction": "割り当てられた source event を同順の owned beat として出力する",
-        "reviewer_instruction": "原作上の出来事と意味が scene event で保たれているか確認する",
     },
     {
         "criterion_id": "scene.canonical_event_order",
         "reason_key": "scene_event_canonical_order_broken",
         "canonical_reason_key": "scene_set.scene_event_canonical_order_broken",
         "owner": "deterministic",
-        "first_enforced_stage": "scene_authoring_preflight",
-        "semantic_recheck_stages": [],
-        "provider_repair_allowed": False,
         "required_inputs": ["canonical_event_ledger", "ordered_scene_list"],
         "authoring_instruction": "canonical order を変更せずに scene の順序へ投影する",
-        "reviewer_instruction": "原典の出来事の順序が保たれているか確認する",
     },
     {
         "criterion_id": "scene.reveal_monotonicity",
         "reason_key": "reveal_state_rollback",
         "canonical_reason_key": "scene_set.reveal_state_rollback",
         "owner": "deterministic",
-        "first_enforced_stage": "scene_authoring_preflight",
-        "semantic_recheck_stages": [],
-        "provider_repair_allowed": False,
         "required_inputs": ["reveal_ledger", "scene.reveal_state_before", "scene.reveal_state_after"],
         "authoring_instruction": "情報の開示状態を withheld から逆行させない",
-        "reviewer_instruction": "開示順序と観客の知識が連続しているか確認する",
     },
     {
         "criterion_id": "scene.role_visibility_closure",
         "reason_key": "role_coverage_missing",
         "canonical_reason_key": "scene_set.role_coverage_missing",
         "owner": "deterministic",
-        "first_enforced_stage": "scene_authoring_preflight",
-        "semantic_recheck_stages": ["scene_set"],
-        "provider_repair_allowed": False,
         "required_inputs": ["scene.required_beat_specs", "participants", "role_bindings"],
         "authoring_instruction": "required role と character を visible participant として閉じる",
-        "reviewer_instruction": "物語上必要な人物の行動が画面で確認できるか判断する",
     },
     {
         "criterion_id": "scene.handoff_chain",
         "reason_key": "handoff_state_mismatch",
         "canonical_reason_key": "scene_set.handoff_state_mismatch",
         "owner": "deterministic",
-        "first_enforced_stage": "scene_authoring_preflight",
-        "semantic_recheck_stages": ["scene_set"],
-        "provider_repair_allowed": False,
         "required_inputs": ["handoff_chain", "handoff_refs"],
         "authoring_instruction": "前 scene の出力と次 scene の入力を同じ anchor/state で参照する",
-        "reviewer_instruction": "場面転換で必要な状態が引き継がれているか確認する",
     },
     {
         "criterion_id": "scene.time_location_transition",
         "reason_key": "time_transition_cue_missing",
         "canonical_reason_key": "scene_set.time_transition_cue_missing",
         "owner": "deterministic",
-        "first_enforced_stage": "scene_authoring_preflight",
-        "semantic_recheck_stages": ["scene_set"],
-        "provider_repair_allowed": False,
         "required_inputs": ["time_location_transition", "transition_cues"],
         "authoring_instruction": "時刻または場所の断絶には具体的な transition cue を割り当てる",
-        "reviewer_instruction": "時間と場所の移動が観客に伝わるか確認する",
     },
     {
         "criterion_id": "scene.source_grounding",
         "reason_key": "scene_event_missing_source_grounding",
         "canonical_reason_key": "scene_set.scene_event_missing_source_grounding",
         "owner": "deterministic",
-        "first_enforced_stage": "scene_authoring_preflight",
-        "semantic_recheck_stages": ["scene_set"],
-        "provider_repair_allowed": False,
         "required_inputs": ["source_refs", "evidence_catalog", "non_replaceable_elements"],
         "authoring_instruction": "generic prose ではなく source-specific evidence ID を出力する",
-        "reviewer_instruction": "原作固有の証拠が視覚化されているか確認する",
     },
     {
         "criterion_id": "scene.causal_proof_references",
         "reason_key": "causal_proof_weak",
         "canonical_reason_key": "scene_set.causal_proof_weak",
         "owner": "deterministic",
-        "first_enforced_stage": "scene_authoring_preflight",
-        "semantic_recheck_stages": ["scene_set"],
-        "provider_repair_allowed": False,
         "required_inputs": ["causal_proof_contract", "event_sequence"],
         "authoring_instruction": "cause/action/result/evidence を同じ beat の ID へ結合する",
-        "reviewer_instruction": "因果が画面上の行動と結果として説得力を持つか確認する",
-    },
-    {
-        "criterion_id": "scene.causal_proof_visual_quality",
-        "reason_key": "causal_proof_visually_unconvincing",
-        "canonical_reason_key": "scene_set.causal_proof_visually_unconvincing",
-        "owner": "independent_semantic",
-        "first_enforced_stage": "scene_set_review",
-        "semantic_recheck_stages": ["scene_set"],
-        "provider_repair_allowed": True,
-        "required_inputs": ["scene_event", "cut_coverage", "visual_evidence"],
-        "authoring_instruction": "因果の見える行動を意識して記述する",
-        "reviewer_instruction": "行動と結果が観客へ明確に伝わるか判断する",
-    },
-    {
-        "criterion_id": "scene.story_specificity",
-        "reason_key": "scene_event_concrete_but_not_story_specific",
-        "canonical_reason_key": "scene_set.scene_event_concrete_but_not_story_specific",
-        "owner": "authoring_semantic",
-        "first_enforced_stage": "scene_authoring",
-        "semantic_recheck_stages": ["scene_set"],
-        "provider_repair_allowed": True,
-        "required_inputs": ["source_refs", "evidence_catalog", "scene_event"],
-        "authoring_instruction": "汎用的な姿勢・手元・痕跡ではなく物語固有の行動を書く",
-        "reviewer_instruction": "映像がこの物語固有の出来事を扱っているか判断する",
     },
 )
 
@@ -993,8 +937,8 @@ def validate_scene_set_authoring_contract(
 
     # A scene's before-state must be the previous scene's after-state.  This is
     # the cross-scene check that catches the common "revealed, then withheld"
-    # Cinderella failure even when each individual scene is otherwise shaped
-    # correctly.
+    # reveal rollback failure even when each individual scene is otherwise
+    # shaped correctly.
     ordered_scenes = [scene for _, scene in sorted(scenes.items(), key=lambda item: scene_positions[item[0]])]
     previous_after: dict[str, Any] = {}
     for scene_index, scene in enumerate(ordered_scenes):

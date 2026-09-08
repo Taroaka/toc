@@ -39,7 +39,6 @@ if str(REPO_ROOT) not in sys.path:
 from toc.harness import (
     append_state_snapshot as _append_state_snapshot,
     load_structured_document,
-    now_iso as harness_now_iso,
     parse_state_file as _parse_canonical_state,
 )
 from toc.adaptation_value_contract import (
@@ -59,27 +58,6 @@ from toc.cut_design_logging import (
     write_cut_design_failure_log as _raw_write_cut_design_failure_log,
     write_scene_design_json as _raw_write_scene_design_json,
 )
-from toc.review_loop import (
-    REVIEW_LOOP_CRITIC_COUNT,
-    REVIEW_LOOP_SPECS,
-    aggregated_review_relpath,
-    aggregator_prompt_relpath,
-    build_review_input_snapshot,
-    critic_prompt_relpath,
-    critic_relpath,
-    final_review_relpath,
-    loop_state_updates,
-    render_aggregator_prompt,
-    render_aggregated_review,
-    render_critic_prompt,
-    review_input_digest,
-    review_input_snapshot_relpath,
-    review_input_snapshot_issues,
-    write_review_input_snapshot as _write_review_input_snapshot,
-)
-from toc.review_loop_runner import (
-    materialize_review_loop_round as _materialize_review_loop_round,
-)
 from toc.scene_acceptance_contract import (
     CRITERION_REGISTRY_VERSION,
     SCENE_ACCEPTANCE_CONTRACT_VERSION,
@@ -97,15 +75,14 @@ from toc.scene_acceptance_contract import (
     validate_scene_set_preflight,
 )
 from toc.run_index import write_run_index as _write_run_index
-from toc.review_mode import review_mode_is_bound_preapproved
 from toc.run_root_binding import (
     bind_run_root,
     current_run_root_binding,
     read_run_file_bytes_serialized,
 )
-from toc.semantic_review import check_semantic_review
-from toc.stage_evaluator import check_manifest_single, check_script_single, check_visual_value
+from toc.stage_evaluator import check_manifest_single
 from toc.story_duration import build_duration_plan, normalize_target_duration
+from toc.story_authoring import build_research_registry, validate_story_document
 from scripts.world_walk_source import (
     PathIdentity,
     copy_regular_file_atomic_nofollow,
@@ -125,51 +102,29 @@ from scripts.world_walk_source import (
 P650_SLOTS = (
     "p110",
     "p120",
-    "p130",
     "p210",
     "p220",
-    "p230",
     "p310",
-    "p320",
     "p330",
     "p410",
     "p420",
-    "p430",
     "p440",
     "p450",
     "p510",
     "p520",
     "p530",
-    "p540",
     "p550",
     "p560",
     "p570",
     "p610",
     "p620",
-    "p630",
-    "p640",
     "p650",
 )
 P680_SLOTS = (*P650_SLOTS, "p660", "p670", "p680")
-AWAITING_ALLOWED = {"p130", "p230", "p320", "p330", "p430", "p540", "p570", "p630", "p640", "p680"}
-P400_REVIEW_STAGES = (
-    "visual_value",
-    "scene_set",
-    "scene_detail",
-    "cut_blueprint",
-    "script",
-    "production_readiness",
-)
-DOWNSTREAM_REVIEW_STAGES = (
-    "asset",
-    "scene_implementation_hard",
-    "scene_implementation_judgment",
-)
+AWAITING_ALLOWED = {"p330", "p570", "p680"}
 CREATE_INPUT_SCHEMA_VERSION = "toc.create_input.v1"
 CREATE_INPUT_REL_PATH = Path("logs/orchestration/create_input.json")
-REVIEW_MODES = {"standard", "preapproved"}
 MIN_MATERIALIZATION_FREE_BYTES = 512 * 1024 * 1024
-SEMANTIC_PACK_STDERR_TAIL_CHARS = 4096
 _ACTIVE_MATERIALIZATION_ROOT: ContextVar[
     tuple[str, PathIdentity, int, bool] | None
 ] = ContextVar(
@@ -219,7 +174,7 @@ def _write_create_input_contract(
     experience: str,
     source_run: Path | None,
     target_duration_seconds: int,
-    review_mode: str = "standard",
+    review_mode: str | None = None,
     expected_run_identity: PathIdentity | None = None,
 ) -> Path:
     """Persist the exact, non-derived input needed for deterministic resume."""
@@ -237,8 +192,10 @@ def _write_create_input_contract(
             "source_run is only valid for world_walk create input"
         )
     normalized_duration = normalize_target_duration(target_duration_seconds)
-    if review_mode not in REVIEW_MODES:
-        raise ValueError("review_mode must be standard or preapproved")
+    # ``review_mode`` remains an accepted input for old server clients.  The
+    # production create lane has one behavior now, so the compatibility value
+    # must not become state or a reason to materialize synthetic reports.
+    del review_mode
     source_run_rel = (
         source_run.relative_to(REPO_ROOT).as_posix()
         if source_run is not None
@@ -263,7 +220,6 @@ def _write_create_input_contract(
                 "experience": experience,
                 "source_run": source_run_rel,
                 "target_duration_seconds": normalized_duration,
-                "review_mode": review_mode,
             },
             ensure_ascii=False,
             indent=2,
@@ -295,35 +251,29 @@ def _fresh_materialized_media_slot_updates(stop_target: str) -> dict[str, str]:
         "slot.p520.status": "done",
         "slot.p520.note": "asset inventory materialized from the production manifest",
         "slot.p530.status": "done",
-        "slot.p530.note": "asset plan materialized; semantic review pending",
-        "slot.p540.status": "pending",
-        "slot.p540.note": "asset semantic review has not completed",
+        "slot.p530.note": "asset plan materialized from the production manifest",
         "slot.p550.status": "pending",
         "slot.p550.note": "candidate asset requests exist but provider submission has not completed",
         "slot.p560.status": "pending",
         "slot.p560.note": "asset generation has not completed",
         "slot.p570.status": "pending",
-        "slot.p570.note": "asset continuity review has not completed",
+        "slot.p570.note": "asset output validation has not completed",
         "slot.p610.status": "pending",
         "slot.p610.note": "scene implementation grounding has not completed",
         "slot.p620.status": "done",
         "slot.p620.note": "production manifest materialized into candidate scene requests",
-        "slot.p630.status": "pending",
-        "slot.p630.note": "scene implementation hard review has not completed",
-        "slot.p640.status": "pending",
-        "slot.p640.note": "scene implementation judgment has not completed",
         "slot.p650.status": "pending",
-        "slot.p650.note": "candidate requests materialized; waiting for semantic review, repair, and final freeze",
+        "slot.p650.note": "concrete scene requests are materialized; provider freeze is pending",
     }
     if stop_target == "p680":
         updates.update(
             {
                 "slot.p660.status": "pending",
-                "slot.p660.note": "waiting for image-prompt semantic review and final request freeze",
+                "slot.p660.note": "waiting for provider-ready scene request freeze",
                 "slot.p670.status": "pending",
                 "slot.p670.note": "waiting for scene image generation to finish",
                 "slot.p680.status": "pending",
-                "slot.p680.note": "frontend image review is not ready until every scene image exists",
+                "slot.p680.note": "scene image handoff is not ready until every scene image exists",
             }
         )
     return updates
@@ -339,8 +289,7 @@ DEFAULT_SCENE_TITLES = [
     "時間に追われる逃走",
     "証が名を取り戻す場所",
 ]
-DEFAULT_SCENE_TIMES_OF_DAY = ["朝", "昼", "夕方", "夜", "夜", "夜", "真夜中", "翌朝"]
-CINDERELLA_SCENE_TIMES_OF_DAY = ["朝", "夜", "夜", "夜", "夜", "夜", "真夜中", "昼"]
+DEFAULT_SCENE_TIMES_OF_DAY = ["朝", "昼", "夕方", "夜", "夜", "夜", "夜", "翌朝"]
 SCENE_TIME_OF_DAY_CONTRACT = "required_v1"
 SCENE_TIME_OF_DAY_VISUAL_BASIS_CONTRACT = "required_v1"
 PHASES = ["opening", "development", "development", "ordeal", "ordeal", "transformation", "transformation", "ending"]
@@ -366,7 +315,7 @@ RUN_VARIANTS = [
         "focus": "記憶が物証へ変わる過程",
         "scene_titles": ["記憶が残る場所", "願いが試される壁", "導きが触れる夜", "古い生活を離れる道", "知らない場所のしるし", "記憶が照らされる場", "証だけが残る瞬間", "物証が語る部屋"],
         "motifs": ["記憶", "擦れた素材", "月の白さ", "影", "手の跡"],
-        "places": ["記憶のある部屋", "立ちはだかる壁際", "夜の庭", "古い道", "見知らぬ入口", "明るい集いの場", "静かな階段", "物証を確かめる部屋"],
+        "places": ["記憶のある部屋", "立ちはだかる壁際", "植栽のある庭", "古い道", "見知らぬ入口", "明るい集いの場", "静かな階段", "物証を確かめる部屋"],
         "artifact": "古い飾り紐",
     },
     {
@@ -374,7 +323,7 @@ RUN_VARIANTS = [
         "focus": "越境と逃走の身体感覚",
         "scene_titles": ["出口のない日常", "踏み出せない境界", "助力が出口を開く", "夜の道へ出る", "高い入口を越える", "中心で息を止める", "追いつく時間", "戻ってきた証"],
         "motifs": ["出口", "足音", "風", "暗い青", "手元の光"],
-        "places": ["出口のない家", "狭い境界", "風が通る場所", "夜道", "高い入口", "中心の広間", "追われる通路", "証が置かれる部屋"],
+        "places": ["出口のない家", "狭い境界", "風が通る場所", "境界へ続く道", "高い入口", "中心の広間", "追われる通路", "証が置かれる部屋"],
         "artifact": "道を示す小片",
     },
 ]
@@ -399,13 +348,8 @@ def _run_variant(topic: str, source: str, variant_seed: str) -> dict[str, Any]:
     return variant
 
 
-def _is_cinderella_topic(topic: str, source: str) -> bool:
-    normalized = f"{topic}\n{source}".lower()
-    return "シンデレラ" in normalized or "cinderella" in normalized
 
 
-def _profile_is_cinderella(profile: dict[str, Any]) -> bool:
-    return profile.get("story_key") == "cinderella" or profile.get("slug") == "cinderella"
 
 
 def _safe_asset_id(prefix: str, text: str, index: int) -> str:
@@ -419,376 +363,9 @@ def _safe_asset_id(prefix: str, text: str, index: int) -> str:
 def _story_profile(topic: str, source: str, variant_seed: str = "") -> dict[str, Any]:
     """Build topic-aware names used by authored artifacts and image requests."""
 
-    normalized = f"{topic}\n{source}".lower()
-    if os.environ.get("TOC_ENABLE_LEGACY_CINDERELLA_PROFILE") == "1" and _is_cinderella_topic(topic, source):
-        return {
-            "slug": "cinderella",
-            "story_key": "cinderella",
-            "topic_label": "シンデレラ",
-            "story_time": "17世紀末フランス・ルイ14世時代",
-            "protagonist_name": "シンデレラ",
-            "protagonist_asset_id": "cinderella_fullbody",
-            "protagonist_transformed_asset_id": "cinderella_transformed_fullbody",
-            "protagonist_post_midnight_asset_id": "cinderella_post_midnight_fullbody",
-            "protagonist_asset_subject": "シンデレラの変身前の全身参照。灰の台所で働く、粗い布で仕立てた使い込まれた質素な作業着。自然な顔立ち、同じ髪と体格",
-            "protagonist_transformed_asset_subject": "シンデレラの変身後の全身参照。参照元の変身前シンデレラと同じ顔・髪・体格を維持し、舞踏会へ進めるドレス姿だけに変える、実写映画の礼装",
-            "protagonist_post_midnight_asset_subject": "真夜中に魔法が解けた後のシンデレラの全身参照。参照元の変身前シンデレラと同じ顔・髪・体格を維持し、舞踏会ドレスではない質素な衣装だけに戻す、靴合わせの部屋へつながる実写映画の人物状態",
-            "artifact_name": "ガラスの靴",
-            "artifact_asset_id": "glass_slipper",
-            "dance_partner_asset_id": "prince_dance_partner",
-            "carriage_asset_id": "pumpkin_carriage",
-            "artifact_output_dir": "objects",
-            "artifact_role": "身元を証明する主役級アイテム",
-            "artifact_visual": "透明なガラスの靴、光を受ける実物の反射と屈折、実物の質感",
-            "artifact_fixed_prompt": "透明なガラス、繊細な靴、光源に応じた反射と屈折、読める文字なし",
-            "places": ["灰の台所", "月明かりの庭", "宮殿", "大階段"],
-            "scene_locations": [
-                "灰の台所",
-                "閉ざされた扉の前",
-                "月明かりの庭",
-                "馬車が待つ門前",
-                "宮殿の階段",
-                "舞踏会の大広間",
-                "真夜中の大階段",
-                "靴合わせの部屋",
-            ],
-            "scene_location_sequences": [
-                ["灰の台所"],
-                ["閉ざされた扉の前", "屋敷の裏口", "月明かりの庭"],
-                ["月明かりの庭"],
-                ["馬車が待つ門前", "宮殿へ続く石畳"],
-                ["宮殿の階段", "舞踏会の大広間"],
-                ["舞踏会の大広間"],
-                ["真夜中の大階段"],
-                ["王宮の命令の間", "町の家々", "靴合わせの部屋"],
-            ],
-            "scene_location_segments": [
-                [], [], [], [], [], [], [],
-                [
-                    {
-                        "location": "王宮の命令の間",
-                        "responsibility": "王子が片方のガラスの靴を示し、王宮の使者へその持ち主の探索を命じる",
-                        "primary_subject": "王子",
-                        "visible_action": "王子が片方のガラスの靴を王宮の使者へ差し出し、使者はその前で一礼している",
-                        "visible_reaction": "王宮の使者の視線がガラスの靴へ向き、命令を受ける姿勢が見える",
-                        "required_visual_evidence": ["王子", "王宮の使者", "片方のガラスの靴"],
-                        "required_roles": ["prince", "royal_envoy"],
-                        "motion_brief": "王子が片方のガラスの靴を使者へ差し出し、使者が両手で受け取る",
-                        "motion_end_state": "ガラスの靴が使者の両手に収まり、王子の手が離れている",
-                    },
-                    {
-                        "location": "町の家々",
-                        "responsibility": "王宮の使者が町の家々を巡った末に義姉たちへ順にガラスの靴を試し、どちらにも合わないことを確認する。継母は奥の戸口を塞いでシンデレラを試着から排除しようとする",
-                        "primary_subject": "王宮の使者",
-                        "visible_action": "試着を終えた義姉たちが足を引く前で王宮の使者がガラスの靴を支え、継母は奥の戸口を身体で塞いでいる",
-                        "visible_reaction": "義姉たちは合わなかった足を隠し、泥の付いた靴と外套の使者は継母が塞ぐ戸口へ視線を向けている",
-                        "required_visual_evidence": ["義姉たちの足に合わなかったガラスの靴", "戸口を塞ぐ継母", "泥の付いた使者の靴と外套", "奥の部屋へ続く戸口"],
-                        "required_roles": ["royal_envoy", "stepmother", "stepsisters"],
-                        "visible_character_state": {
-                            "posture": "王宮の使者が試着を終えた義姉たちと戸口を塞ぐ継母の間に立つ姿勢",
-                            "gaze": "継母が塞ぐ奥の戸口へ向けた視線",
-                            "expression": "排除の不自然さに気づいて動きを止めた表情",
-                            "hands": "両手が義姉たちに合わなかったガラスの靴を支えている",
-                            "feet": "泥の付いた両足が奥の戸口へ向きを変えて止まっている",
-                        },
-                        "motion_attention_target": "継母が塞ぐ奥の戸口",
-                        "motion_brief": "王宮の使者がガラスの靴を箱へ戻しかけた手を止め、義姉たちの足元から継母が塞ぐ奥の戸口へ顔を向ける",
-                        "motion_end_state": "王宮の使者がガラスの靴を両手で支えたまま継母の塞ぐ戸口を見て、義姉たちは試着を終えて脇へ退いている",
-                    },
-                    {
-                        "location": "靴合わせの部屋",
-                        "responsibility": "王宮の使者が排除を退けてシンデレラにも試着させ、足に合うガラスの靴を証人の前で確認する",
-                        "primary_subject": "シンデレラ",
-                        "primary_subject_by_function": {"turn": "シンデレラ", "payoff": "シンデレラ"},
-                        "beat_overrides": {
-                            "turn": {
-                                "primary_subject": "シンデレラ",
-                                "visible_action": "シンデレラは椅子の横に立ち、薄い靴下を履いた片足を床に置いている",
-                                "visible_reaction": "王宮の使者はガラスの靴を床際で支え、周囲の証人はシンデレラと空いた椅子を見ている",
-                                "required_visual_evidence": ["空いた椅子の横に立つシンデレラ", "床際で靴を支える王宮の使者", "見守る証人"],
-                                "required_roles": ["protagonist", "royal_envoy", "stepmother", "stepsisters"],
-                                "visible_character_state": {
-                                    "posture": "シンデレラが空いた椅子の横に立ち、身体を椅子へ向けた姿勢",
-                                    "gaze": "床際のガラスの靴へ下ろした視線",
-                                    "expression": "口元を閉じ、試着へ集中している表情",
-                                    "hands": "片手が椅子の背もたれの手前で止まっている",
-                                    "feet": "薄い靴下を履いた両足が椅子の横の床に置かれている",
-                                },
-                                "motion_attention_target": "空いた椅子",
-                                "motion_brief": "シンデレラが空いた椅子へ腰を下ろし、薄い靴下を履いた片足をガラスの靴の数センチ手前まで一度だけ伸ばす",
-                                "motion_end_state": "シンデレラが椅子に座り、薄い靴下を履いた片足が王宮の使者の支えるガラスの靴の数センチ手前で止まっている",
-                            },
-                            "payoff": {
-                                "primary_subject": "シンデレラ",
-                                "obligation_overrides": {
-                                    "symbolic_proof": {
-                                        "primary_subject": "シンデレラ",
-                                        "visible_action": "シンデレラは椅子に座り、薄い靴下を履いた片足をガラスの靴の数センチ手前に止めている",
-                                        "visible_reaction": "王宮の使者と周囲の証人は、まだ靴に入っていないシンデレラの足先を見ている",
-                                        "required_visual_evidence": ["ガラスの靴の手前で止まった足先", "床際で靴を支える王宮の使者", "見守る証人"],
-                                        "required_roles": ["protagonist", "royal_envoy", "stepmother", "stepsisters"],
-                                        "motion_attention_target": "足に合ったガラスの靴",
-                                        "motion_brief": "シンデレラが片足を一度だけ前へ滑らせ、王宮の使者が支えるガラスの靴へ踵まで入れる",
-                                        "motion_end_state": "ガラスの靴がシンデレラの足に隙間なく合い、使者と証人の視線がその足元に集まっている",
-                                    },
-                                    "reaction_after_change": {
-                                        "visible_character_state": {
-                                            "posture": "シンデレラは椅子に座り、両肩をまだわずかに上げている",
-                                            "gaze": "足に合ったガラスの靴へ下ろした視線",
-                                            "expression": "安堵する直前の緊張が眉と口元に残る表情",
-                                            "hands": "両手が膝の上で止まっている",
-                                            "feet": "ガラスの靴を履いた片足が床に置かれ、踵まで隙間なく合っている",
-                                        },
-                                        "motion_attention_target": "足に合ったガラスの靴",
-                                        "motion_brief": "シンデレラがガラスの靴を履いた足首を一度だけわずかに曲げる",
-                                        "motion_end_state": "ガラスの靴が足からずれず、踵まで隙間なく合っている",
-                                        "emotional_change": "王宮の使者と証人の視線が、ずれないガラスの靴へ集まる",
-                                    },
-                                    "terminal_resolution": {
-                                        "primary_subject": "王宮の使者",
-                                        "visible_character_state": {
-                                            "posture": "王宮の使者が床際で片膝を曲げ、シンデレラの足元へ身体を向けた姿勢",
-                                            "gaze": "足に合ったガラスの靴へ下ろした視線",
-                                            "expression": "適合を確認し、うなずく直前の落ち着いた表情",
-                                            "hands": "片手がガラスの靴の踵を支えている",
-                                            "feet": "両足がシンデレラの椅子の前で止まっている",
-                                        },
-                                        "required_visual_evidence": ["シンデレラの足に合うガラスの靴", "床際の王宮の使者", "見守る継母と義姉たち"],
-                                        "required_roles": ["protagonist", "royal_envoy", "stepmother", "stepsisters"],
-                                        "motion_attention_target": "シンデレラの顔",
-                                        "motion_brief": "王宮の使者がガラスの靴からシンデレラの顔へ視線を上げ、確認するよう一度うなずく",
-                                        "motion_end_state": "シンデレラの足に靴が合ったまま、王宮の使者と証人の視線が彼女に集まっている",
-                                    }
-                                },
-                            },
-                        },
-                        "visible_action": "シンデレラの足にガラスの靴が隙間なく合い、王宮の使者と周囲の証人がその足元を見ている",
-                        "visible_reaction": "継母と義姉たちは画面端で動きを止め、王宮の使者の視線はガラスの靴に留まっている",
-                        "required_visual_evidence": ["シンデレラ", "足に合うガラスの靴", "王宮の使者", "証人の視線"],
-                        "required_roles": ["protagonist", "royal_envoy", "stepmother", "stepsisters"],
-                        "motion_brief": "王宮の使者がガラスの靴からシンデレラの顔へ視線を上げ、確認するよう一度うなずく",
-                        "motion_end_state": "シンデレラの足に靴が合ったまま、使者と証人の視線が彼女に集まる",
-                    },
-                ],
-            ],
-            "motifs": ["灰", "布", "月光", "ガラス", "階段"],
-            "scene_titles": [
-                "灰の台所",
-                "閉ざされた扉",
-                "月下の変身",
-                "馬車の出発",
-                "宮殿の階段",
-                "舞踏会の中心",
-                "真夜中の逃走",
-                "靴が名前を取り戻す部屋",
-            ],
-            "scene_times_of_day": list(CINDERELLA_SCENE_TIMES_OF_DAY),
-            "artifact_scene_indices": [3, 7, 8],
-            "summary": "継母と義姉に家事を押しつけられ灰まみれで暮らす若い女性が、魔法の助けで舞踏会へ向かい、真夜中に逃げ、残されたガラスの靴によって自分の名を取り戻す。",
-            "aliases": ["灰かぶり", "Cinderella", "Cendrillon"],
-            "events": [
-                "母の不在後、継母と義姉たちが入り、主人公は家の中で孤立する。",
-                "主人公は台所と灰のそばで眠り、名前の代わりに灰かぶりとして扱われる。",
-                "宮殿の舞踏会の知らせが届き、家中の欲望が露わになる。",
-                "主人公は参加を望むが、仕事と衣装の欠如を理由に拒まれる。",
-                "魔法の助力によって馬車、ドレス、ガラスの靴が現れる。",
-                "主人公は宮殿に入り、誰も知らない姿で王子と踊る。",
-                "真夜中の鐘で魔法が解け始め、主人公は階段を駆け下りる。",
-                "片方のガラスの靴が階段に残る。",
-                "使者が靴の持ち主を探し、家々を巡る。",
-                "主人公の足に靴が合い、隠されていた身元が明らかになる。",
-            ],
-        }
-
     variant = _run_variant(topic, source, variant_seed)
     slug = _stable_slug(f"{topic}\n{source}\n{variant['label']}\n{variant['seed']}")
     topic_label = topic.strip() or "物語"
-    if _is_cinderella_topic(topic, source):
-        return {
-            "slug": slug,
-            "story_key": "cinderella",
-            "topic_label": "シンデレラ",
-            "story_time": "17世紀末フランス・ルイ14世時代",
-            "run_variant": {
-                "seed": variant["seed"],
-                "index": variant["index"],
-                "label": variant["label"],
-                "focus": variant["focus"],
-                "source": variant["source"],
-            },
-            "protagonist_name": "シンデレラ",
-            "protagonist_asset_id": f"{slug}_protagonist_fullbody",
-            "protagonist_transformed_asset_id": f"{slug}_transformed_fullbody",
-            "protagonist_post_midnight_asset_id": f"{slug}_post_midnight_fullbody",
-            "protagonist_transformed_asset_subject": "シンデレラの変身後の全身参照。変身前と同じ顔・髪・体格を維持し、舞踏会へ進めるドレス姿だけに変える、実写映画の礼装",
-            "protagonist_post_midnight_asset_subject": "真夜中に魔法が解けた後のシンデレラの全身参照。変身前と同じ顔・髪・体格を維持し、舞踏会ドレスではない質素な衣装へ戻す",
-            "artifact_name": "ガラスの靴",
-            "artifact_asset_id": f"{slug}_signature_artifact",
-            "dance_partner_asset_id": f"{slug}_dance_partner",
-            "carriage_asset_id": f"{slug}_carriage_setpiece",
-            "artifact_output_dir": "objects",
-            "artifact_role": "身元を証明する主役級アイテム",
-            "artifact_visual": "片方だけ残る透明なガラスの靴。足に合うことで身元を証明する、実物の質感を持つ靴",
-            "artifact_fixed_prompt": "透明なガラスの靴、片方だけの証拠、実物の反射、読める文字なし",
-            "places": ["灰の台所", "閉ざされた扉", "月明かりの庭", "宮殿の大階段"],
-            "scene_locations": [
-                "灰の台所",
-                "閉ざされた扉の前",
-                "月明かりの庭",
-                "馬車が待つ門前",
-                "宮殿の階段",
-                "舞踏会の大広間",
-                "真夜中の大階段",
-                "靴合わせの部屋",
-            ],
-            "scene_location_sequences": [
-                ["灰の台所"],
-                ["閉ざされた扉の前", "屋敷の裏口", "月明かりの庭"],
-                ["月明かりの庭"],
-                ["馬車が待つ門前", "宮殿へ続く石畳"],
-                ["宮殿の階段", "舞踏会の大広間"],
-                ["舞踏会の大広間"],
-                ["真夜中の大階段"],
-                ["王宮の命令の間", "町の家々", "靴合わせの部屋"],
-            ],
-            "scene_location_segments": [
-                [], [], [], [], [], [], [],
-                [
-                    {
-                        "location": "王宮の命令の間",
-                        "responsibility": "王子が片方のガラスの靴を示し、王宮の使者へその持ち主の探索を命じる",
-                        "primary_subject": "王子",
-                        "visible_action": "王子が片方のガラスの靴を王宮の使者へ差し出し、使者はその前で一礼している",
-                        "visible_reaction": "王宮の使者の視線がガラスの靴へ向き、命令を受ける姿勢が見える",
-                        "required_visual_evidence": ["王子", "王宮の使者", "片方のガラスの靴"],
-                        "required_roles": ["prince", "royal_envoy"],
-                        "motion_brief": "王子が片方のガラスの靴を使者へ差し出し、使者が両手で受け取る",
-                        "motion_end_state": "ガラスの靴が使者の両手に収まり、王子の手が離れている",
-                    },
-                    {
-                        "location": "町の家々",
-                        "responsibility": "王宮の使者が町の家々を巡った末に義姉たちへ順にガラスの靴を試し、どちらにも合わないことを確認する。継母は奥の戸口を塞いでシンデレラを試着から排除しようとする",
-                        "primary_subject": "王宮の使者",
-                        "visible_action": "試着を終えた義姉たちが足を引く前で王宮の使者がガラスの靴を支え、継母は奥の戸口を身体で塞いでいる",
-                        "visible_reaction": "義姉たちは合わなかった足を隠し、泥の付いた靴と外套の使者は継母が塞ぐ戸口へ視線を向けている",
-                        "required_visual_evidence": ["義姉たちの足に合わなかったガラスの靴", "戸口を塞ぐ継母", "泥の付いた使者の靴と外套", "奥の部屋へ続く戸口"],
-                        "required_roles": ["royal_envoy", "stepmother", "stepsisters"],
-                        "visible_character_state": {
-                            "posture": "王宮の使者が試着を終えた義姉たちと戸口を塞ぐ継母の間に立つ姿勢",
-                            "gaze": "継母が塞ぐ奥の戸口へ向けた視線",
-                            "expression": "排除の不自然さに気づいて動きを止めた表情",
-                            "hands": "両手が義姉たちに合わなかったガラスの靴を支えている",
-                            "feet": "泥の付いた両足が奥の戸口へ向きを変えて止まっている",
-                        },
-                        "motion_attention_target": "継母が塞ぐ奥の戸口",
-                        "motion_brief": "王宮の使者がガラスの靴を箱へ戻しかけた手を止め、義姉たちの足元から継母が塞ぐ奥の戸口へ顔を向ける",
-                        "motion_end_state": "王宮の使者がガラスの靴を両手で支えたまま継母の塞ぐ戸口を見て、義姉たちは試着を終えて脇へ退いている",
-                    },
-                    {
-                        "location": "靴合わせの部屋",
-                        "responsibility": "王宮の使者が排除を退けてシンデレラにも試着させ、足に合うガラスの靴を証人の前で確認する",
-                        "primary_subject": "シンデレラ",
-                        "primary_subject_by_function": {"turn": "シンデレラ", "payoff": "シンデレラ"},
-                        "beat_overrides": {
-                            "turn": {
-                                "primary_subject": "シンデレラ",
-                                "visible_action": "シンデレラは椅子の横に立ち、薄い靴下を履いた片足を床に置いている",
-                                "visible_reaction": "王宮の使者はガラスの靴を床際で支え、周囲の証人はシンデレラと空いた椅子を見ている",
-                                "required_visual_evidence": ["空いた椅子の横に立つシンデレラ", "床際で靴を支える王宮の使者", "見守る証人"],
-                                "required_roles": ["protagonist", "royal_envoy", "stepmother", "stepsisters"],
-                                "visible_character_state": {
-                                    "posture": "シンデレラが空いた椅子の横に立ち、身体を椅子へ向けた姿勢",
-                                    "gaze": "床際のガラスの靴へ下ろした視線",
-                                    "expression": "口元を閉じ、試着へ集中している表情",
-                                    "hands": "片手が椅子の背もたれの手前で止まっている",
-                                    "feet": "薄い靴下を履いた両足が椅子の横の床に置かれている",
-                                },
-                                "motion_attention_target": "空いた椅子",
-                                "motion_brief": "シンデレラが空いた椅子へ腰を下ろし、薄い靴下を履いた片足をガラスの靴の数センチ手前まで一度だけ伸ばす",
-                                "motion_end_state": "シンデレラが椅子に座り、薄い靴下を履いた片足が王宮の使者の支えるガラスの靴の数センチ手前で止まっている",
-                            },
-                            "payoff": {
-                                "primary_subject": "シンデレラ",
-                                "obligation_overrides": {
-                                    "symbolic_proof": {
-                                        "primary_subject": "シンデレラ",
-                                        "visible_action": "シンデレラは椅子に座り、薄い靴下を履いた片足をガラスの靴の数センチ手前に止めている",
-                                        "visible_reaction": "王宮の使者と周囲の証人は、まだ靴に入っていないシンデレラの足先を見ている",
-                                        "required_visual_evidence": ["ガラスの靴の手前で止まった足先", "床際で靴を支える王宮の使者", "見守る証人"],
-                                        "required_roles": ["protagonist", "royal_envoy", "stepmother", "stepsisters"],
-                                        "motion_attention_target": "足に合ったガラスの靴",
-                                        "motion_brief": "シンデレラが片足を一度だけ前へ滑らせ、王宮の使者が支えるガラスの靴へ踵まで入れる",
-                                        "motion_end_state": "ガラスの靴がシンデレラの足に隙間なく合い、使者と証人の視線がその足元に集まっている",
-                                    },
-                                    "reaction_after_change": {
-                                        "visible_character_state": {
-                                            "posture": "シンデレラは椅子に座り、両肩をまだわずかに上げている",
-                                            "gaze": "足に合ったガラスの靴へ下ろした視線",
-                                            "expression": "安堵する直前の緊張が眉と口元に残る表情",
-                                            "hands": "両手が膝の上で止まっている",
-                                            "feet": "ガラスの靴を履いた片足が床に置かれ、踵まで隙間なく合っている",
-                                        },
-                                        "motion_attention_target": "足に合ったガラスの靴",
-                                        "motion_brief": "シンデレラがガラスの靴を履いた足首を一度だけわずかに曲げる",
-                                        "motion_end_state": "ガラスの靴が足からずれず、踵まで隙間なく合っている",
-                                        "emotional_change": "王宮の使者と証人の視線が、ずれないガラスの靴へ集まる",
-                                    },
-                                    "terminal_resolution": {
-                                        "primary_subject": "王宮の使者",
-                                        "visible_character_state": {
-                                            "posture": "王宮の使者が床際で片膝を曲げ、シンデレラの足元へ身体を向けた姿勢",
-                                            "gaze": "足に合ったガラスの靴へ下ろした視線",
-                                            "expression": "適合を確認し、うなずく直前の落ち着いた表情",
-                                            "hands": "片手がガラスの靴の踵を支えている",
-                                            "feet": "両足がシンデレラの椅子の前で止まっている",
-                                        },
-                                        "required_visual_evidence": ["シンデレラの足に合うガラスの靴", "床際の王宮の使者", "見守る継母と義姉たち"],
-                                        "required_roles": ["protagonist", "royal_envoy", "stepmother", "stepsisters"],
-                                        "motion_attention_target": "シンデレラの顔",
-                                        "motion_brief": "王宮の使者がガラスの靴からシンデレラの顔へ視線を上げ、確認するよう一度うなずく",
-                                        "motion_end_state": "シンデレラの足に靴が合ったまま、王宮の使者と証人の視線が彼女に集まっている",
-                                    }
-                                },
-                            },
-                        },
-                        "visible_action": "シンデレラの足にガラスの靴が隙間なく合い、王宮の使者と周囲の証人がその足元を見ている",
-                        "visible_reaction": "継母と義姉たちは画面端で動きを止め、王宮の使者の視線はガラスの靴に留まっている",
-                        "required_visual_evidence": ["シンデレラ", "足に合うガラスの靴", "王宮の使者", "証人の視線"],
-                        "required_roles": ["protagonist", "royal_envoy", "stepmother", "stepsisters"],
-                        "motion_brief": "王宮の使者がガラスの靴からシンデレラの顔へ視線を上げ、確認するよう一度うなずく",
-                        "motion_end_state": "シンデレラの足に靴が合ったまま、使者と証人の視線が彼女に集まる",
-                    },
-                ],
-            ],
-            "motifs": ["灰", "破れた布", "月光", "ガラス", "階段"],
-            "scene_titles": [
-                "灰の台所",
-                "舞踏会へ行けない扉",
-                "月下の変身",
-                "かぼちゃの馬車の出発",
-                "宮殿の階段",
-                "舞踏会の中心",
-                "真夜中の逃走",
-                "靴が名前を取り戻す部屋",
-            ],
-            "scene_times_of_day": list(CINDERELLA_SCENE_TIMES_OF_DAY),
-            "artifact_scene_indices": [3, 7, 8],
-            "summary": "継母と義姉に家事を押しつけられ灰まみれで暮らすシンデレラが、魔法の助けで舞踏会へ向かい、真夜中に逃げ、残されたガラスの靴によって自分の名を取り戻す。",
-            "aliases": ["灰かぶり", "Cinderella", "Cendrillon"],
-            "events": [
-                "継母と義姉たちが家の支配を握り、シンデレラは灰の台所で家事を押しつけられる。",
-                "王宮の舞踏会の知らせが届き、義姉たちは着飾る一方でシンデレラだけが参加を願う。",
-                "継母が仕事と衣装の欠如を理由にシンデレラを舞踏会から排除して正面扉を閉ざす。家族が去った後、シンデレラは仕事を終えて裏口から月明かりの庭へ出る。",
-                "月明かりの庭で人物として現れた魔法の助力者が真夜中までの期限を告げ、かぼちゃの馬車、ドレス、ガラスの靴を整える。",
-                "シンデレラ自身が馬車に乗って出発すると選び、家の門を越えて宮殿へ向かう。",
-                "宮殿の階段を上がったシンデレラが、群衆と王子の視線を集めて舞踏会の中心へ入る。",
-                "王子と踊る間、誰も灰かぶりの彼女だと知らず、シンデレラは初めて公の場で認識される。",
-                "真夜中の鐘で魔法が解け始め、シンデレラは大階段を駆け下りて片方のガラスの靴を残す。",
-                "王子が残されたガラスの靴から持ち主の探索を命じ、王宮の使者が家々を巡る一方、義姉たちは靴に足を合わせようとする。",
-                "王宮の使者が継母と義姉の排除を退けてシンデレラにも試着させ、ガラスの靴の適合によって彼女の名と価値を公に確認する。",
-            ],
-        }
-
     artifact_name = f"{topic_label}の{variant['artifact']}"
     return {
         "slug": slug,
@@ -836,6 +413,42 @@ def _duration_aware_profile(profile: dict[str, Any], *, target_duration_seconds:
     """Expand canonical story beats into ordered runtime scenes for the target length."""
 
     plan = build_duration_plan(target_duration_seconds)
+    authored_scene_ids = [
+        str(value).strip()
+        for value in profile.get("scene_ids") or []
+        if str(value).strip()
+    ]
+    authored_titles = [
+        str(value).strip()
+        for value in profile.get("scene_titles") or []
+        if str(value).strip()
+    ]
+    if authored_scene_ids and len(authored_scene_ids) == len(authored_titles):
+        # A story_scene_contract_v1 scene is a semantic boundary authored from
+        # research. Target duration may change timing density, but must never
+        # clone or split those scenes into generic runtime padding.
+        scene_base, scene_remainder = divmod(
+            plan.target_seconds, len(authored_scene_ids)
+        )
+        expanded = dict(profile)
+        expanded.update(
+            {
+                "scene_target_durations": [
+                    scene_base + (1 if index < scene_remainder else 0)
+                    for index in range(len(authored_scene_ids))
+                ],
+                "canonical_scene_indices": list(
+                    range(1, len(authored_scene_ids) + 1)
+                ),
+                "canonical_scene_count": len(authored_scene_ids),
+                "scene_segment_positions": [1] * len(authored_scene_ids),
+                "scene_segment_counts": [1] * len(authored_scene_ids),
+                "scene_segment_roles": ["semantic_scene"]
+                * len(authored_scene_ids),
+                "duration_plan": plan.to_dict(),
+            }
+        )
+        return expanded
     canonical_titles = [str(value) for value in profile.get("scene_titles") or DEFAULT_SCENE_TITLES]
     canonical_locations = [str(value) for value in profile.get("scene_locations") or profile.get("places") or canonical_titles]
     raw_location_sequences = profile.get("scene_location_sequences")
@@ -877,38 +490,10 @@ def _duration_aware_profile(profile: dict[str, Any], *, target_duration_seconds:
 
     runtime_count = max(len(canonical_titles), plan.minimum_scene_count)
     canonical_count = len(canonical_titles)
-    if _profile_is_cinderella(profile) and runtime_count > canonical_count:
-        # Preserve room for the proof/search finale instead of assigning every
-        # extra scene from the start of the story.  The former left canonical
-        # scene 8 as one overloaded 40-second scene at the 600-second target.
-        group_counts_list = [1] * canonical_count
-        preferred_order = [canonical_count, *range(2, canonical_count), 1]
-        remaining = runtime_count - canonical_count
-        while remaining:
-            made_progress = False
-            for canonical_index in preferred_order:
-                if remaining == 0:
-                    break
-                group_index = canonical_index - 1
-                if group_counts_list[group_index] >= 4:
-                    continue
-                group_counts_list[group_index] += 1
-                remaining -= 1
-                made_progress = True
-            if not made_progress:
-                raise RuntimeError(
-                    "Cinderella duration expansion exceeds authored semantic beat capacity"
-                )
-        canonical_scene_indices = [
-            canonical_index
-            for canonical_index, count in enumerate(group_counts_list, start=1)
-            for _ in range(count)
-        ]
-    else:
-        canonical_scene_indices = [
-            min(canonical_count, ((runtime_index - 1) * canonical_count) // runtime_count + 1)
-            for runtime_index in range(1, runtime_count + 1)
-        ]
+    canonical_scene_indices = [
+        min(canonical_count, ((runtime_index - 1) * canonical_count) // runtime_count + 1)
+        for runtime_index in range(1, runtime_count + 1)
+    ]
     group_counts = {
         canonical_index: canonical_scene_indices.count(canonical_index)
         for canonical_index in range(1, canonical_count + 1)
@@ -955,46 +540,6 @@ def _duration_aware_profile(profile: dict[str, Any], *, target_duration_seconds:
             or [beat_function_order[min(function_start, len(beat_function_order) - 1)]]
         )
         runtime_location_sequence = list(canonical_location_sequence)
-        if _profile_is_cinderella(profile) and count > 1:
-            function_location_indices = {
-                2: {
-                    "setup": (0,),
-                    "pressure": (0,),
-                    "turn": (1,),
-                    "payoff": (2,),
-                },
-                4: {
-                    "setup": (0,),
-                    "pressure": (0,),
-                    "turn": (0,),
-                    "payoff": (0, 1),
-                },
-                5: {
-                    "setup": (0,),
-                    "pressure": (0,),
-                    "turn": (0,),
-                    "payoff": (1,),
-                },
-                8: {
-                    "setup": (0,),
-                    "pressure": (1,),
-                    "turn": (2,),
-                    "payoff": (2,),
-                },
-            }.get(canonical_index)
-            if function_location_indices:
-                active_location_indices = {
-                    route_index
-                    for function in allowed_segment_functions
-                    for route_index in function_location_indices.get(function, ())
-                    if route_index < len(canonical_location_sequence)
-                }
-                if active_location_indices:
-                    runtime_location_sequence = [
-                        location
-                        for route_index, location in enumerate(canonical_location_sequence)
-                        if route_index in active_location_indices
-                    ]
         runtime_location = runtime_location_sequence[0]
         runtime_segments: list[dict[str, Any]] = []
         for segment_index, canonical_segment in enumerate(canonical_segments):
@@ -1555,239 +1100,6 @@ def _write_cut_design_failure_log(
     )
 
 
-def write_review_input_snapshot(
-    *,
-    run_dir: Path,
-    stage: str,
-    round_number: int,
-    snapshot: dict[str, Any],
-    prompt_relpaths: tuple[Path, ...] = (),
-) -> Path:
-    active_root = _active_materialization_root(run_dir)
-    if active_root is None:
-        return _write_review_input_snapshot(
-            run_dir=run_dir,
-            stage=stage,
-            round_number=round_number,
-            snapshot=snapshot,
-            prompt_relpaths=prompt_relpaths,
-        )
-    prompt_sha256s: dict[str, str] = {}
-    for relpath in prompt_relpaths:
-        prompt_sha256s[relpath.as_posix()] = hashlib.sha256(
-            _read_active_root_file(
-                run_dir=run_dir,
-                relative_path=relpath,
-                active_root=active_root,
-            )
-        ).hexdigest()
-    payload = dict(snapshot)
-    payload["prompt_sha256s"] = prompt_sha256s
-    output_path = run_dir / review_input_snapshot_relpath(
-        stage,
-        round_number,
-    )
-    _write_run_text_nofollow(
-        run_dir,
-        output_path,
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-    )
-    return output_path
-
-
-def _unlink_active_root_regular_file(
-    *,
-    run_dir: Path,
-    relative_path: str | Path,
-    active_root: tuple[str, PathIdentity, int, bool],
-) -> None:
-    relative = Path(relative_path)
-    if (
-        not relative.parts
-        or any(part in {"", ".", ".."} for part in relative.parts)
-    ):
-        raise ValueError(f"unsafe run artifact path: {relative}")
-    _verify_active_materialization_root(run_dir, active_root)
-    parent_descriptor = os.dup(active_root[2])
-    try:
-        for part in relative.parts[:-1]:
-            try:
-                child_descriptor = os.open(
-                    part,
-                    os.O_RDONLY
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_DIRECTORY", 0)
-                    | getattr(os, "O_NOFOLLOW", 0),
-                    dir_fd=parent_descriptor,
-                )
-            except FileNotFoundError:
-                return
-            os.close(parent_descriptor)
-            parent_descriptor = child_descriptor
-        try:
-            entry = os.stat(
-                relative.parts[-1],
-                dir_fd=parent_descriptor,
-                follow_symlinks=False,
-            )
-        except FileNotFoundError:
-            return
-        if not stat.S_ISREG(entry.st_mode):
-            raise ValueError(
-                f"review artifact must be a regular file: {relative}"
-            )
-        os.unlink(relative.parts[-1], dir_fd=parent_descriptor)
-        os.fsync(parent_descriptor)
-    finally:
-        os.close(parent_descriptor)
-    _verify_active_materialization_root(run_dir, active_root)
-
-
-def materialize_review_loop_round(
-    *,
-    run_dir: Path,
-    stage: str,
-    round_number: int,
-    source_fingerprint_cache: dict[tuple[object, ...], object] | None = None,
-) -> dict[str, str]:
-    active_root = _active_materialization_root(run_dir)
-    if active_root is None:
-        return _materialize_review_loop_round(
-            run_dir=run_dir,
-            stage=stage,
-            round_number=round_number,
-            source_fingerprint_cache=source_fingerprint_cache,
-        )
-    if stage not in REVIEW_LOOP_SPECS:
-        known = ", ".join(sorted(REVIEW_LOOP_SPECS))
-        raise ValueError(
-            f"unknown review-loop stage: {stage}; known stages: {known}"
-        )
-    spec = REVIEW_LOOP_SPECS[stage]
-    missing: list[str] = []
-    for relpath in spec.source_artifacts:
-        try:
-            _read_active_root_file(
-                run_dir=run_dir,
-                relative_path=relpath,
-                active_root=active_root,
-            )
-        except FileNotFoundError:
-            missing.append(relpath)
-    if missing:
-        raise FileNotFoundError(
-            "review-loop source artifacts are missing: "
-            + ", ".join(missing)
-        )
-
-    stale_paths: list[Path] = [
-        aggregated_review_relpath(stage, round_number),
-        aggregator_prompt_relpath(stage, round_number),
-        review_input_snapshot_relpath(stage, round_number),
-        final_review_relpath(stage),
-    ]
-    for critic_number in range(1, REVIEW_LOOP_CRITIC_COUNT + 1):
-        stale_paths.extend(
-            (
-                critic_relpath(stage, round_number, critic_number),
-                critic_prompt_relpath(
-                    stage,
-                    round_number,
-                    critic_number,
-                ),
-            )
-        )
-    for stale_path in stale_paths:
-        _unlink_active_root_regular_file(
-            run_dir=run_dir,
-            relative_path=stale_path,
-            active_root=active_root,
-        )
-
-    snapshot = build_review_input_snapshot(
-        run_dir=run_dir,
-        stage=stage,
-        round_number=round_number,
-        source_fingerprint_cache=source_fingerprint_cache,
-    )
-    input_digest = str(snapshot["input_digest"])
-    updates = loop_state_updates(
-        stage=stage,
-        status="running",
-        current_round=round_number,
-    )
-    round_prefix = f"eval.{stage}.loop.round_{round_number:02d}"
-    updates[f"{round_prefix}.started_at"] = harness_now_iso()
-    updates[f"{round_prefix}.aggregated_review"] = str(
-        aggregated_review_relpath(stage, round_number)
-    )
-
-    prompt_relpaths: list[Path] = []
-    for critic_number in range(1, REVIEW_LOOP_CRITIC_COUNT + 1):
-        report_relpath = critic_relpath(
-            stage,
-            round_number,
-            critic_number,
-        )
-        prompt_relpath = critic_prompt_relpath(
-            stage,
-            round_number,
-            critic_number,
-        )
-        _write_run_text_nofollow(
-            run_dir,
-            run_dir / prompt_relpath,
-            render_critic_prompt(
-                run_dir=run_dir,
-                stage=stage,
-                round_number=round_number,
-                critic_number=critic_number,
-                input_digest=input_digest,
-            )
-            + "\n",
-        )
-        updates[f"{round_prefix}.critic_{critic_number}"] = str(
-            report_relpath
-        )
-        updates[f"{round_prefix}.critic_{critic_number}_prompt"] = str(
-            prompt_relpath
-        )
-        prompt_relpaths.append(prompt_relpath)
-
-    aggregate_prompt_relpath = aggregator_prompt_relpath(
-        stage,
-        round_number,
-    )
-    _write_run_text_nofollow(
-        run_dir,
-        run_dir / aggregate_prompt_relpath,
-        render_aggregator_prompt(
-            run_dir=run_dir,
-            stage=stage,
-            round_number=round_number,
-            input_digest=input_digest,
-        )
-        + "\n",
-    )
-    prompt_relpaths.append(aggregate_prompt_relpath)
-    updates[f"{round_prefix}.aggregator_prompt"] = str(
-        aggregate_prompt_relpath
-    )
-    snapshot_path = write_review_input_snapshot(
-        run_dir=run_dir,
-        stage=stage,
-        round_number=round_number,
-        snapshot=snapshot,
-        prompt_relpaths=tuple(prompt_relpaths),
-    )
-    updates[f"{round_prefix}.input_snapshot"] = str(
-        snapshot_path.relative_to(run_dir)
-    )
-    updates[f"{round_prefix}.input_digest"] = input_digest
-    append_state_snapshot(run_dir / "state.txt", updates)
-    return updates
-
-
 def _rewrite_subprocess_run_paths(
     command: list[str | os.PathLike[str]],
     *,
@@ -2068,6 +1380,18 @@ def _profile_from_reviewed_story(profile: dict[str, Any], story: dict[str, Any])
         str(scene.get("title") or (existing_titles[index] if index < len(existing_titles) else f"scene {index + 1}")).strip()
         for index, scene in enumerate(scenes)
     ]
+    reviewed["scene_ids"] = [
+        str(scene.get("scene_id") or f"scene_{index + 1:02d}").strip()
+        for index, scene in enumerate(scenes)
+    ]
+    reviewed["scene_semantic_responsibility_ids"] = [
+        str(
+            scene.get("semantic_scene_responsibility_id")
+            or scene.get("scene_id")
+            or f"scene_{index + 1:02d}"
+        ).strip()
+        for index, scene in enumerate(scenes)
+    ]
 
     def resized(values: Any, fallback: Any) -> list[Any]:
         source_values = list(values) if isinstance(values, list) else []
@@ -2080,6 +1404,7 @@ def _profile_from_reviewed_story(profile: dict[str, Any], story: dict[str, Any])
     existing_location_sequences = resized(profile.get("scene_location_sequences"), [])
     existing_location_segments = resized(profile.get("scene_location_segments"), [])
     reviewed_locations: list[str] = []
+    reviewed_location_ids: list[str] = []
     reviewed_location_sequences: list[list[str]] = []
     reviewed_location_segments: list[list[dict[str, Any]]] = []
     for scene, fallback_name, fallback_sequence, fallback_segments in zip(
@@ -2091,6 +1416,9 @@ def _profile_from_reviewed_story(profile: dict[str, Any], story: dict[str, Any])
     ):
         location = scene.get("location") if isinstance(scene.get("location"), dict) else {}
         location_name = str(location.get("name") or fallback_name).strip()
+        reviewed_location_ids.append(
+            str(location.get("location_id") or location.get("place_id") or "").strip()
+        )
         raw_sequence = location.get("sequence")
         if isinstance(raw_sequence, list):
             sequence = [str(value).strip() for value in raw_sequence if str(value).strip()]
@@ -2112,6 +1440,7 @@ def _profile_from_reviewed_story(profile: dict[str, Any], story: dict[str, Any])
         reviewed_location_sequences.append(normalized_sequence)
         reviewed_location_segments.append(segments)
     reviewed["scene_locations"] = reviewed_locations
+    reviewed["scene_location_ids"] = reviewed_location_ids
     reviewed["scene_location_sequences"] = reviewed_location_sequences
     reviewed["scene_location_segments"] = reviewed_location_segments
     existing_times_of_day = resized(profile.get("scene_times_of_day"), "")
@@ -2247,7 +1576,11 @@ def _reviewed_story_duration_contract_errors(
     script = story.get("script") if isinstance(story.get("script"), dict) else {}
     raw_scenes = script.get("scenes")
     scenes = [scene for scene in raw_scenes if isinstance(scene, dict)] if isinstance(raw_scenes, list) else []
-    if len(scenes) < plan.minimum_scene_count:
+    semantic_scene_contract = (
+        str(metadata.get("scene_authoring_contract") or "").strip()
+        == "story_scene_contract_v1"
+    )
+    if not semantic_scene_contract and len(scenes) < plan.minimum_scene_count:
         errors.append(f"scene count below duration floor ({len(scenes)}<{plan.minimum_scene_count})")
     if not isinstance(raw_scenes, list) or len(scenes) != len(raw_scenes):
         errors.append("script.scenes must contain only scene objects")
@@ -2305,6 +1638,10 @@ def _validate_reviewed_story_duration_contract(
 
 def _reviewed_story_time_of_day_contract_errors(story: dict[str, Any]) -> list[str]:
     metadata = story.get("story_metadata") if isinstance(story.get("story_metadata"), dict) else {}
+    semantic_scene_contract = (
+        str(metadata.get("scene_authoring_contract") or "").strip()
+        == "story_scene_contract_v1"
+    )
     errors: list[str] = []
     if metadata.get("scene_time_of_day_contract") != SCENE_TIME_OF_DAY_CONTRACT:
         errors.append(
@@ -2352,7 +1689,10 @@ def _reviewed_story_time_of_day_contract_errors(story: dict[str, Any]) -> list[s
             for item in (raw_sequence if isinstance(raw_sequence, list) else [])
             if str(item).strip()
         ]
-        if str(location.get("mode") or "") == "sequence" or len(sequence) > 1:
+        if (
+            not semantic_scene_contract
+            and (str(location.get("mode") or "") == "sequence" or len(sequence) > 1)
+        ):
             raw_segments = location.get("segments")
             segments = [
                 segment
@@ -2405,17 +1745,6 @@ def _validate_reviewed_story_time_of_day_contract(story: dict[str, Any]) -> None
         )
 
 
-def _run_foundation_semantic_review(run_dir: Path, stage: str) -> None:
-    """Use the real Codex app-server semantic review/repair loop for foundations."""
-
-    from server import image_gen_app
-
-    asyncio.run(image_gen_app._run_semantic_review("toc-immersive-frontend-run", run_dir=run_dir, stage=stage))
-    result = check_semantic_review(run_dir, stage)
-    if not result.passed:
-        raise RuntimeError(f"{stage} semantic review did not pass: {'; '.join(result.errors)}")
-
-
 def _location_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
     places = [str(value) for value in profile.get("scene_locations") or profile["places"]]
     for raw_sequence in profile.get("scene_location_sequences") or []:
@@ -2423,24 +1752,8 @@ def _location_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
             places.extend(str(value) for value in raw_sequence if str(value).strip())
     specs: list[dict[str, Any]] = []
     unique_places = list(dict.fromkeys(str(place) for place in places))
-    cinderella_subjects = {
-        "灰の台所": "灰の台所。灰と布、石床、作業台、小窓、狭い動線が読める屋内、人物なし",
-        "閉ざされた扉の前の暗い屋内": "閉ざされた扉の前の暗い屋内。重い扉、狭い廊下、遮られた光、人物なし",
-        "閉ざされた扉の前": "閉ざされた正面扉と裏口のある屋敷内。重い木扉、掛け金、狭い廊下、遮られた光、人物なし",
-        "月明かりの庭": "屋敷の庭。植栽、園路、変身が起きる余白が読める空間、人物なし",
-        "馬車が待つ門前の道": "宮殿へ向かう門前の道。門、塀、馬車が通れる道幅が読める空間、人物なし、馬車なし",
-        "馬車が待つ門前": "屋敷の門前。門、塀、轍、馬車が通れる道幅と宮殿方向への出口が読める空間、人物なし、馬車なし",
-        "宮殿へ続く石畳": "屋敷の門から宮殿方向へ続く石畳。轍、道幅、遠方の宮殿の灯りが読める夜道、人物なし、馬車なし",
-        "宮殿の階段": "宮殿の階段。踊り場、手すり、上方向の導線、固定された照明器具が読める空間、人物なし",
-        "舞踏会の大広間": "宮殿の舞踏会用大広間。シャンデリアの構造、群衆や踊りを置ける広い床、出入口が読める空間、人物なし",
-        "真夜中の大階段": "宮殿の大階段。時計後の逃走を置ける段差、踊り場、手すりが読める空間、人物なし、ガラスの靴なし、靴なし、物語アイテムなし",
-        "靴合わせが行われる部屋": "靴合わせが行われる部屋。人物が囲める空間、終幕の証明に向く椅子と床、人物なし",
-        "靴合わせの部屋": "靴合わせの部屋。人物が囲める空間、終幕の証明に向く椅子と床、人物なし",
-        "王宮の命令の間": "王宮の命令の間。命令を受け渡すための広さと権威ある調度、人物なし、読める文字なし",
-        "町の家々": "王宮の使者が順に訪ねられる複数の家の外観と戸口、人物なし、読める文字なし",
-    }
     for index, place in enumerate(unique_places, start=1):
-        subject = cinderella_subjects.get(str(place), f"{place}の場所参照。人物なし")
+        subject = f"{place}の場所参照。人物なし"
         specs.append(
             {
                 "asset_id": _safe_asset_id("location", place, index),
@@ -2683,41 +1996,11 @@ def _scene_artifact_state(profile: dict[str, Any], scene_index: int) -> str:
     segment_position, segment_count, _segment_role = _scene_segment(
         profile, scene_index
     )
-    if _profile_is_cinderella(profile) and segment_count > 1:
-        segment_contract = _cinderella_segment_contract(
-            canonical_index,
-            segment_position,
-            segment_count,
-        )
-        artifact_name = str(profile.get("artifact_name") or "")
-        if artifact_name in str(segment_contract["responsibility"]):
-            return "focal"
-        for prior_scene_index in range(1, scene_index):
-            prior_canonical_index = _canonical_scene_index(
-                profile, prior_scene_index
-            )
-            prior_position, prior_count, _prior_role = _scene_segment(
-                profile, prior_scene_index
-            )
-            prior_contract = _cinderella_segment_contract(
-                prior_canonical_index,
-                prior_position,
-                prior_count,
-            )
-            if artifact_name in str(prior_contract["responsibility"]):
-                return "carried"
-        return "not_yet_revealed"
     artifact_scene_indices = {
         int(value) for value in profile.get("artifact_scene_indices", [])
     }
     if canonical_index in artifact_scene_indices:
         return "focal"
-    if (
-        _profile_is_cinderella(profile)
-        and artifact_scene_indices
-        and canonical_index > min(artifact_scene_indices)
-    ):
-        return "carried"
     return "not_yet_revealed"
 
 
@@ -2740,79 +2023,15 @@ def _artifact_first_scene_index(profile: dict[str, Any]) -> int:
 
 def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
     specs: list[dict[str, Any]] = []
-    if _profile_is_cinderella(profile):
-        specs.append(
-            {
-                "character_id": profile["protagonist_transformed_asset_id"],
-                "name": "変身後のシンデレラ",
-                "reference_images": [f"assets/characters/{profile['protagonist_transformed_asset_id']}.png"],
-                "scene_indices": [3, 4, 5, 6, 7],
-                "story_purpose": "変身後から真夜中に魔法が解ける瞬間まで、同じ人物の顔と体格を保ちながら舞踏会衣装状態を固定する",
-                "visual_subject": profile["protagonist_transformed_asset_subject"],
-                "identity_name": profile["protagonist_name"],
-                "appearance_continuity": {
-                    "costume_state": "舞踏会ドレス姿",
-                    "forbidden_costume_states": ["質素な普段着"],
-                },
-                "subject_contract": {"identity_scope": "individual", "subject_count": 1, "member_ids": []},
-                "appearance_contract": {
-                    "social_position": "屋敷で酷使される若い女性",
-                    "occupation_or_role": "舞踏会へ向かう主人公",
-                    "occasion_or_state": "舞踏会ドレス姿",
-                    "materials": "物語時代に整合する上質な布、手仕事の装飾",
-                    "must_avoid": ["質素な普段着", "現代服"],
-                },
-                "reuse_contract": {"mode": "state_variant", "derived_from_asset_id": profile["protagonist_asset_id"]},
-            }
-        )
-        specs.append(
-            {
-                "character_id": profile["protagonist_post_midnight_asset_id"],
-                "name": "魔法が解けた後のシンデレラ",
-                "reference_images": [f"assets/characters/{profile['protagonist_post_midnight_asset_id']}.png"],
-                "scene_indices": [7, 8],
-                "story_purpose": "真夜中の逃走後と靴合わせの部屋で、舞踏会ドレスではない同一人物の状態を固定する",
-                "visual_subject": profile["protagonist_post_midnight_asset_subject"],
-                "identity_name": profile["protagonist_name"],
-                "appearance_continuity": {
-                    "costume_state": "魔法が解けた後の質素な衣装",
-                    "forbidden_costume_states": ["舞踏会ドレス"],
-                },
-                "subject_contract": {"identity_scope": "individual", "subject_count": 1, "member_ids": []},
-                "appearance_contract": {
-                    "social_position": "屋敷で酷使される若い女性",
-                    "occupation_or_role": "魔法が解けた後の主人公",
-                    "occasion_or_state": "質素な作業着",
-                    "materials": "物語時代に整合する粗い布、使い込まれた仕立て",
-                    "must_avoid": ["舞踏会ドレス", "現代服"],
-                },
-                "reuse_contract": {"mode": "state_variant", "derived_from_asset_id": profile["protagonist_asset_id"]},
-            }
-        )
 
     research = profile.get("reviewed_research")
     materials = research.get("story_materials") if isinstance(research, dict) else {}
     raw_characters = materials.get("characters") if isinstance(materials, dict) else []
     character_records = [item for item in raw_characters or [] if isinstance(item, dict)]
-    if _profile_is_cinderella(profile) and not character_records:
-        character_records = [
-            {"character_id": "stepmother", "name": "継母", "role": "家の支配者・主要な抑圧者"},
-            {"character_id": "stepsisters", "name": "義姉たち", "role": "共同抑圧者・競争者"},
-            {"character_id": "helper", "name": "魔法の助力者", "role": "期限付きの援助者"},
-            {"character_id": "prince", "name": "王子", "role": "舞踏会で主人公を認識する人物"},
-            {"character_id": "royal_envoy", "name": "王宮の使者", "role": "探索と公的確認を実行する人物"},
-        ]
 
     reviewed_story = profile.get("reviewed_story")
     story_script = reviewed_story.get("script") if isinstance(reviewed_story, dict) else {}
     story_scenes = story_script.get("scenes") if isinstance(story_script, dict) else []
-    fallback_cinderella_scenes = {
-        "stepmother": [1, 2, 8],
-        "stepsisters": [1, 2, 8],
-        "helper": [3, 4, 7],
-        "prince": [5, 6, 7, 8],
-        "royal_envoy": [8],
-    }
     slug = str(profile.get("slug") or "story")
     for index, record in enumerate(character_records, start=1):
         source_character_id = str(record.get("character_id") or "").strip()
@@ -2825,14 +2044,10 @@ def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str,
             and source_character_id
             in {str(value).strip() for value in scene.get("character_ids") or [] if str(value).strip()}
         ]
-        if not scene_indices and _profile_is_cinderella(profile):
-            scene_indices = fallback_cinderella_scenes.get(source_character_id, [])
         if not scene_indices:
             continue
         normalized_source_id = re.sub(r"[^a-zA-Z0-9]+", "_", source_character_id).strip("_").lower()
-        if source_character_id == "prince" and _profile_is_cinderella(profile):
-            asset_id = str(profile.get("dance_partner_asset_id") or f"{slug}_prince_fullbody")
-        elif normalized_source_id:
+        if normalized_source_id:
             asset_id = f"{slug}_{normalized_source_id}_fullbody"
         else:
             asset_id = _safe_asset_id("character", f"{slug}_{source_character_id}", index)
@@ -2857,11 +2072,11 @@ def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str,
         role_probe = f"{source_character_id} {name} {role}".lower()
         role_tags: list[str] = []
         for terms, tag in (
-            (("stepmother", "opposition", "抑圧", "妨げ", "支配"), "opponent"),
-            (("stepsister", "競争", "偽", "候補"), "contrast_or_false_claimant"),
+            (("opposition", "抑圧", "妨げ", "支配"), "opponent"),
+            (("競争", "偽", "候補"), "contrast_or_false_claimant"),
             (("helper", "助力", "援助", "導く"), "helper"),
-            (("envoy", "使者", "公的", "権威"), "authority_or_community"),
-            (("prince", "王子", "見届け", "認識"), "witness"),
+            (("公的", "権威"), "authority_or_community"),
+            (("witness", "見届け", "認識"), "witness"),
         ):
             if any(term in role_probe for term in terms):
                 role_tags.append(tag)
@@ -2942,62 +2157,23 @@ def _protagonist_appearance_contract(profile: dict[str, Any]) -> dict[str, Any]:
 
 
 def _protagonist_asset_for_cut(profile: dict[str, Any], scene_index: int, obligation_id: str) -> str:
-    if _profile_is_cinderella(profile):
-        canonical_index = _canonical_scene_index(profile, scene_index)
-        transformed_id = str(profile.get("protagonist_transformed_asset_id") or "")
-        post_midnight_id = str(profile.get("protagonist_post_midnight_asset_id") or "")
-        if post_midnight_id and (
-            canonical_index == 8
-            or (
-                canonical_index == 7
-                and obligation_id
-                in {"symbolic_proof", "reaction_after_change"}
-            )
-        ):
-            return post_midnight_id
-        if transformed_id and (
-            canonical_index >= 4
-            or (canonical_index == 3 and obligation_id not in {"scene_pressure", "visible_value_shift"})
-        ):
-            return transformed_id
     return str(profile["protagonist_asset_id"])
 
 
 def _protagonist_reference_for_asset(profile: dict[str, Any], asset_id: str) -> str:
-    if asset_id == str(profile.get("protagonist_transformed_asset_id") or ""):
-        return f"assets/characters/{asset_id}.png"
-    if asset_id == str(profile.get("protagonist_post_midnight_asset_id") or ""):
-        return f"assets/characters/{asset_id}.png"
     return f"assets/characters/{profile['protagonist_asset_id']}.png"
 
 
 def _supporting_object_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
-    if not _profile_is_cinderella(profile):
-        return []
-    return [
-        {
-            "object_id": str(profile.get("carriage_asset_id") or "carriage"),
-            "name": "馬車",
-            "reference_images": [f"assets/objects/{profile.get('carriage_asset_id') or 'carriage'}.png"],
-            "scene_indices": [4],
-            "story_purpose": "門前から宮殿へ出発するための大型舞台装置",
-            "visual_subject": "実写映画の馬車。重厚な車体、車輪、扉、乗降口の構造が読める。背景なし、読める文字なし",
-            "reuse_contract": {"mode": "neutral_anchor"},
-        }
-    ]
+    return []
 
 
 def _supporting_character_ids_for_scene(profile: dict[str, Any], scene_index: int) -> list[str]:
     canonical_index = _canonical_scene_index(profile, scene_index)
-    protagonist_variant_ids = {
-        str(profile.get("protagonist_transformed_asset_id") or ""),
-        str(profile.get("protagonist_post_midnight_asset_id") or ""),
-    }
     return [
         str(spec["character_id"])
         for spec in _supporting_character_asset_specs(profile)
         if canonical_index in {int(value) for value in spec.get("scene_indices", [])}
-        and str(spec["character_id"]) not in protagonist_variant_ids
     ]
 
 
@@ -3212,10 +2388,6 @@ def _supporting_character_reference(profile: dict[str, Any], character_id: str) 
 def _character_name_for_asset(profile: dict[str, Any], character_id: str) -> str:
     if character_id == str(profile.get("protagonist_asset_id") or ""):
         return str(profile["protagonist_name"])
-    if character_id == str(profile.get("protagonist_transformed_asset_id") or ""):
-        return f"変身後の{profile['protagonist_name']}"
-    if character_id == str(profile.get("protagonist_post_midnight_asset_id") or ""):
-        return f"魔法が解けた後の{profile['protagonist_name']}"
     for spec in _supporting_character_asset_specs(profile):
         if str(spec.get("character_id") or "") == character_id:
             return str(spec.get("name") or character_id)
@@ -3270,8 +2442,6 @@ def _character_asset_for_subject(
     normalized_subject = str(subject or "").strip()
     protagonist_names = {
         str(profile.get("protagonist_name") or "").strip(),
-        f"変身後の{profile.get('protagonist_name') or ''}",
-        f"魔法が解けた後の{profile.get('protagonist_name') or ''}",
         "protagonist",
     }
     overrides = {
@@ -3309,8 +2479,6 @@ def _character_asset_for_subject(
 def _character_reference_for_asset(profile: dict[str, Any], character_id: str) -> str:
     protagonist_ids = {
         str(profile.get("protagonist_asset_id") or ""),
-        str(profile.get("protagonist_transformed_asset_id") or ""),
-        str(profile.get("protagonist_post_midnight_asset_id") or ""),
     }
     if character_id in protagonist_ids:
         return _protagonist_reference_for_asset(profile, character_id)
@@ -3318,11 +2486,6 @@ def _character_reference_for_asset(profile: dict[str, Any], character_id: str) -
 
 
 def _asset_reference_inputs_for_plan(profile: dict[str, Any], asset_id: str) -> list[str]:
-    if _profile_is_cinderella(profile) and asset_id in {
-        str(profile.get("protagonist_transformed_asset_id") or ""),
-        str(profile.get("protagonist_post_midnight_asset_id") or ""),
-    }:
-        return [f"assets/characters/{profile['protagonist_asset_id']}.png"]
     return []
 
 
@@ -3365,8 +2528,6 @@ def _character_identity_catalog(
     protagonist_name = str(profile.get("protagonist_name") or "").strip()
     protagonist_ids = {
         str(profile.get("protagonist_asset_id") or "").strip(),
-        str(profile.get("protagonist_transformed_asset_id") or "").strip(),
-        str(profile.get("protagonist_post_midnight_asset_id") or "").strip(),
     }
     protagonist_ids.discard("")
     protagonist_identity = (
@@ -3374,10 +2535,6 @@ def _character_identity_catalog(
     )
     protagonist_aliases = {
         protagonist_name,
-        f"変身後の{protagonist_name}" if protagonist_name else "",
-        f"魔法が解けた後の{protagonist_name}" if protagonist_name else "",
-        f"質素な普段着へ戻った{protagonist_name}" if protagonist_name else "",
-        f"普段着の{protagonist_name}" if protagonist_name else "",
         "protagonist",
     }
     for asset_id in protagonist_ids:
@@ -3715,12 +2872,6 @@ def _drawable_forbidden_reveal_names_for_scaffold(
         profile.get("protagonist_asset_id"),
         profile.get("protagonist_aliases") or [],
     )
-    transformed_name = f"変身後の{protagonist_name}" if protagonist_name else ""
-    register(transformed_name, profile.get("protagonist_transformed_asset_id"))
-    post_midnight_name = (
-        f"魔法が解けた後の{protagonist_name}" if protagonist_name else ""
-    )
-    register(post_midnight_name, profile.get("protagonist_post_midnight_asset_id"))
     register(
         profile.get("artifact_name"),
         profile.get("artifact_asset_id"),
@@ -3753,46 +2904,10 @@ def _drawable_forbidden_reveal_names_for_scaffold(
 
 
 def _artifact_scene_role(profile: dict[str, Any], scene_index: int) -> str:
-    if _profile_is_cinderella(profile):
-        canonical_index = _canonical_scene_index(profile, scene_index)
-        return {
-            3: "変身で初めて現れる贈り物として、衣装と足元の変化を証明する",
-            4: "馬車に乗る足元の連続性として控えめに見える。主役は馬車の出発",
-            5: "宮殿階段を進む足元の連続性として控えめに見える。主役は公的空間への境界",
-            6: "踊りの中で足元に光る連続性として控えめに見える。主役は他者の視線と認識",
-            7: "脱げて階段に残り、次の靴合わせへ渡る証拠になる",
-            8: "主人公の身元と価値を証明して物語を閉じる決定的な証",
-        }.get(canonical_index, profile["artifact_role"])
     return profile["artifact_role"]
 
 
 def _cut_uses_artifact(profile: dict[str, Any], scene_index: int, obligation_id: str, *, include_artifact: bool) -> bool:
-    if not _profile_is_cinderella(profile):
-        return include_artifact
-    canonical_index = _canonical_scene_index(profile, scene_index)
-    if canonical_index == 3:
-        if not include_artifact:
-            return False
-        return obligation_id not in {"scene_pressure", "visible_value_shift"}
-    if canonical_index == 4:
-        return obligation_id == "carriage_departure"
-    if canonical_index == 5:
-        return obligation_id == "palace_entry_boundary"
-    if canonical_index == 6:
-        return obligation_id == "public_recognition_dance"
-    if canonical_index == 7:
-        if not include_artifact:
-            return False
-        return obligation_id in {
-            "visible_value_shift",
-            "midnight_lost_slipper_handoff",
-            "causal_handoff",
-            "audience_context",
-            "symbolic_proof",
-            "spatial_transition",
-            "time_or_deadline_pressure",
-            "reaction_after_change",
-        }
     return include_artifact
 
 
@@ -3806,23 +2921,6 @@ def _prompt_for_asset(entry: dict[str, Any], profile: dict[str, Any]) -> str:
 
 
 
-def _is_cinderella_fitted_slipper_proof(profile: dict[str, Any], object_ids: list[str], *texts: Any) -> bool:
-    if not _profile_is_cinderella(profile):
-        return False
-    if str(profile.get("artifact_asset_id") or "") not in {str(object_id) for object_id in object_ids}:
-        return False
-    joined = " / ".join(str(text or "") for text in texts)
-    return any(
-        term in joined
-        for term in (
-            "足にガラスの靴が合",
-            "足にガラスの靴が隙間なく合",
-            "足に靴が合",
-            "ガラスの靴を履いた足",
-            "足に隙間なく合",
-            "踵まで隙間なく合",
-        )
-    )
 
 
 def _visible_behavior_from_cut(
@@ -3860,15 +2958,6 @@ def _visible_behavior_from_cut(
         object_focus = str(cut_plan.get("foreground") or "出入口を狭める具体物")
     else:
         object_focus = "手元に差す光と画面内の出入口"
-    fitted_slipper_proof = _is_cinderella_fitted_slipper_proof(
-        profile,
-        object_ids,
-        location_name,
-        evidence,
-        cut_blueprint.get("target_beat"),
-        cut_blueprint.get("causal_proof"),
-        cut_blueprint.get("dramatic_job"),
-    )
     face = "声に出さず、圧力を受け止めている表情"
     gaze = f"{object_focus}へ向く視線"
     hands = f"{focal_name}の手元が行為直前の位置にあり、緊張が読める"
@@ -3889,8 +2978,6 @@ def _visible_behavior_from_cut(
             "指を伸ばし切らず、直前の動きが終わった位置にある"
         )
         feet = "両足は前景に残る痕跡のそばで止まり、重心は安定している"
-    if fitted_slipper_proof:
-        feet = f"{profile['artifact_name']}が{profile['protagonist_name']}の足に合っていることが読める足元"
     projected_state = (
         cut_plan.get("visible_character_state")
         if isinstance(cut_plan.get("visible_character_state"), dict)
@@ -3930,18 +3017,6 @@ def _scene_character_state_timeline_for_scaffold(
 ) -> dict[str, Any]:
     sequence = [beat for beat in scene_event.get("event_sequence", []) if isinstance(beat, dict)]
     protagonist_identity_id = str(profile["protagonist_asset_id"])
-    protagonist_variant_ids = {
-        str(profile.get("protagonist_transformed_asset_id") or ""),
-        str(profile.get("protagonist_post_midnight_asset_id") or ""),
-    }
-    protagonist_appearance_asset_ids = list(
-        dict.fromkeys(
-            character_id
-            for character_id in major_character_ids
-            if character_id
-            in {protagonist_identity_id, *protagonist_variant_ids}
-        )
-    )
     supporting_specs_by_id = {
         str(spec.get("character_id") or ""): spec
         for spec in _supporting_character_asset_specs(profile)
@@ -4003,8 +3078,6 @@ def _scene_character_state_timeline_for_scaffold(
         is_beat_primary = beat_primary_subject in {
             character_name,
             "protagonist" if is_primary else "",
-            "変身後のシンデレラ" if is_primary else "",
-            "魔法が解けた後のシンデレラ" if is_primary else "",
         }
 
         def named_clause(value: str) -> str:
@@ -4018,20 +3091,6 @@ def _scene_character_state_timeline_for_scaffold(
                 "",
             )
 
-        if "二人が踊り始め" in visible_action and character_name in {
-            str(profile.get("protagonist_name") or ""),
-            _character_name_for_asset(
-                profile, str(profile.get("dance_partner_asset_id") or "")
-            ),
-        }:
-            other_name = (
-                _character_name_for_asset(
-                    profile, str(profile.get("dance_partner_asset_id") or "")
-                )
-                if is_primary
-                else str(profile.get("protagonist_name") or "主人公")
-            )
-            return f"{character_name}自身の行動: {other_name}と踊り始める"
         if is_beat_primary:
             own_action = (
                 named_clause(visible_action)
@@ -4099,38 +3158,15 @@ def _scene_character_state_timeline_for_scaffold(
         for character_id in major_character_ids
         if str(character_id).strip()
     ]
-    if _profile_is_cinderella(profile):
-        raw_character_ids = [
-            (
-                protagonist_identity_id
-                if character_id in protagonist_variant_ids
-                else character_id
-            )
-            for character_id in raw_character_ids
-        ]
     character_ids = list(dict.fromkeys(raw_character_ids))
-    if _profile_is_cinderella(profile):
-        character_ids = [
-            character_id
-            for character_id in character_ids
-            if any(participates(character_id, beat) for beat in sequence)
-        ]
-    elif not character_ids:
+    if not character_ids:
         character_ids = [str(profile["protagonist_asset_id"])]
 
     characters = []
     for character_id in character_ids:
         character_name = _character_name_for_asset(profile, character_id)
-        is_primary = (
-            character_id == protagonist_identity_id
-            if _profile_is_cinderella(profile)
-            else character_id == character_ids[0]
-        )
-        character_sequence = (
-            [beat for beat in sequence if participates(character_id, beat)]
-            if _profile_is_cinderella(profile)
-            else sequence
-        )
+        is_primary = character_id == character_ids[0]
+        character_sequence = sequence
         start_beat = character_sequence[0] if character_sequence else {}
         midpoint_beat = next(
             (
@@ -4159,13 +3195,6 @@ def _scene_character_state_timeline_for_scaffold(
                 "character_id": character_id,
                 "character_name": character_name,
                 "scene_role": scene_role,
-                **(
-                    {
-                        "appearance_asset_ids": protagonist_appearance_asset_ids,
-                    }
-                    if _profile_is_cinderella(profile) and is_primary
-                    else {}
-                ),
                 "objective_in_scene": str(scene_intent.get("dramatic_question") or "sceneの問いに身体で答える") if is_primary else "主人公の変化を受け取り、関係性の圧力や反応を画面に出す",
                 "emotional_arc_summary": f"{scene_intent.get('value_shift', {}).get('from', '圧力を受ける状態')}から{scene_intent.get('value_shift', {}).get('to', '次へ進む状態')}へ移る" if is_primary else "主人公の行為や証拠を受け、距離、視線、身体の向きが変わる",
                 "start_state": {
@@ -4326,7 +3355,6 @@ def _scene_state_progression_plan_for_scaffold(
         "出口",
         "道",
         "乗",
-        "馬車",
         "逃",
         "走",
         "追",
@@ -4505,24 +3533,8 @@ def _cut_film_grammar_contract_for_scaffold(
     function = str(primary_event_beat.get("beat_function") or cut_blueprint.get("cut_function") or "")
     reaction_required = function in {"turn", "payoff"} or bool(primary_event_beat.get("story_information_revealed_ids"))
     object_name = _object_name_for_asset(profile, object_ids[0]) if object_ids else ""
-    fitted_slipper_proof = _is_cinderella_fitted_slipper_proof(
-        profile,
-        object_ids,
-        selector,
-        location_name,
-        primary_event_beat.get("what_happens"),
-        primary_event_beat.get("visible_action"),
-        cut_blueprint.get("target_beat"),
-        cut_blueprint.get("visual_beat"),
-        cut_blueprint.get("causal_proof"),
-        cut_blueprint.get("dramatic_job"),
-    )
-    object_contact_state = "fitted_on_foot" if fitted_slipper_proof else ("reaching_toward" if object_ids else "not_visible")
-    object_story_meaning = (
-        f"{profile['artifact_name']}が{profile['protagonist_name']}の足に合い、身元を証明する"
-        if fitted_slipper_proof
-        else object_name or "場所と身体が証拠になる"
-    )
+    object_contact_state = "reaching_toward" if object_ids else "not_visible"
+    object_story_meaning = object_name or "場所と身体が証拠になる"
     return {
         "policy_version": "cut_film_grammar_v1",
         "required_modules": {
@@ -4599,7 +3611,7 @@ def _cut_film_grammar_contract_for_scaffold(
                     "distance": visible_behavior["distance"],
                     "gaze": visible_behavior["gaze"],
                     "body_orientation": visible_behavior["posture"],
-                    "touch_or_non_touch": "足に合っている接触状態" if fitted_slipper_proof else "接触直前または非接触の緊張",
+                    "touch_or_non_touch": "接触状態が読める" if object_ids else "非接触の状態",
                     "hierarchy_in_frame": "人物、小道具、場所の優先順位が読める",
                 },
                 "must_not_resolve_yet": [],
@@ -4656,7 +3668,6 @@ def _image_api_prompt_payload_for_scaffold(
     references: list[str],
     story_time: str = "",
     scene_time_of_day: str = "",
-    review_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compile only drawable first-frame information into the provider payload."""
 
@@ -4668,7 +3679,6 @@ def _image_api_prompt_payload_for_scaffold(
         reference_images=references,
         story_time=story_time,
         scene_time_of_day=scene_time_of_day,
-        review_metadata=review_metadata,
     )
 
 
@@ -4735,7 +3745,7 @@ def _scaffold_location_light(location_spec: dict[str, Any], location_name: str) 
         "濃い青の月明かり",
         "月明かり",
         "月光",
-        "舞踏会の光",
+        "集いの場の光",
         "遮られた光",
         "低い自然光",
         "落ち着いた光",
@@ -4952,17 +3962,6 @@ def _first_frame_visual_plan_for_scaffold(
             ),
         )
 
-    fitted_slipper_proof = _is_cinderella_fitted_slipper_proof(
-        profile,
-        object_ids,
-        selector,
-        location_name,
-        cut_blueprint.get("target_beat"),
-        cut_blueprint.get("visual_beat"),
-        cut_blueprint.get("causal_proof"),
-        cut_blueprint.get("dramatic_job"),
-        cut_blueprint.get("first_frame_brief"),
-    )
     character_state_bindings = _character_state_bindings_for_scaffold(
         profile, character_ids
     )
@@ -5009,12 +4008,7 @@ def _first_frame_visual_plan_for_scaffold(
                 "object_id": object_id,
                 "object_name": object_name,
                 "visibility_in_this_cut": "clearly_visible",
-                "object_state": (
-                    f"{profile['protagonist_name']}の足に隙間なく合っている"
-                    if fitted_slipper_proof
-                    and object_id == str(profile.get("artifact_asset_id") or "")
-                    else f"形、素材、現在位置が{'前景' if screen_position == 'foreground' else '中景'}で明確に見える"
-                ),
+                "object_state": f"形、素材、現在位置が{'前景' if screen_position == 'foreground' else '中景'}で明確に見える",
                 "story_meaning_in_this_cut": "",
                 "required_screen_position": screen_position,
             }
@@ -5158,11 +4152,7 @@ def _first_frame_visual_plan_for_scaffold(
             character_state_gate["hand_position"] = _drawable_phrase_for_scaffold(
                 visible_behavior.get("hands")
             )
-        if fitted_slipper_proof:
-            character_state_gate["foot_position"] = (
-                f"{profile['artifact_name']}が{profile['protagonist_name']}の足に合っている"
-            )
-        elif re.search(r"足|歩|走|踏|重心", visible_moment):
+        if re.search(r"足|歩|走|踏|重心", visible_moment):
             character_state_gate["foot_position"] = _drawable_phrase_for_scaffold(
                 visible_behavior.get("feet")
             )
@@ -5231,8 +4221,8 @@ def _first_frame_visual_plan_for_scaffold(
     )
     # `must_not_advance_beyond` is a progression-review boundary.  In the
     # scaffold it is commonly the next cut's *positive* first-frame brief, so
-    # projecting it into provider-facing `not_yet` prose reverses its polarity
-    # ("show the slipper" becomes "do not show the slipper").  Only explicit
+    # projecting it into provider-facing `not_yet` prose reverses its polarity.
+    # Only explicit
     # reveal/future-outcome constraints belong in the drawable negative list;
     # the progression boundary remains available in cut_state_progression for
     # the semantic reviewer.
@@ -5247,7 +4237,7 @@ def _first_frame_visual_plan_for_scaffold(
         part.strip()
         for part in location_texture.split("、")
         if part.strip()
-        and not re.search(r"(?:人物|靴|ガラスの靴|物語アイテム)なし$", part.strip())
+        and not re.search(r"(?:人物|物語アイテム)なし$", part.strip())
     )
     location_texture = str(
         _sanitize_first_frame_prose(
@@ -5269,13 +4259,9 @@ def _first_frame_visual_plan_for_scaffold(
 
     protagonist_reference_ids = {
         str(profile.get("protagonist_asset_id") or "").strip(),
-        str(profile.get("protagonist_transformed_asset_id") or "").strip(),
-        str(profile.get("protagonist_post_midnight_asset_id") or "").strip(),
     }
     protagonist_subject_names = {
         str(profile.get("protagonist_name") or "").strip(),
-        f"変身後の{profile.get('protagonist_name') or ''}".strip(),
-        f"魔法が解けた後の{profile.get('protagonist_name') or ''}".strip(),
     }
     character_identity_names = {
         str(binding.get("character_id") or "").strip(): str(
@@ -5424,172 +4410,14 @@ def _first_frame_visual_plan_for_scaffold(
     }
 
 
-def _image_prompt_review_metadata_for_scaffold(
-    *,
-    selector: str,
-    location_spec: dict[str, Any],
-    location_name: str,
-    cut_number: int,
-    cut_blueprint: dict[str, Any],
-    cut_contract: dict[str, Any],
-    object_ids: list[str],
-    cut_uses_artifact: bool,
-    first_frame_visual_plan: dict[str, Any],
-) -> dict[str, Any]:
-    shot_design = _scaffold_shot_design(
-        cut_number=cut_number,
-        cut_blueprint=cut_blueprint,
-        cut_uses_artifact=cut_uses_artifact,
-        object_ids=object_ids,
-    )
-    progression = (
-        cut_contract.get("cut_state_progression")
-        if isinstance(cut_contract.get("cut_state_progression"), dict)
-        else {}
-    )
-    visible_moment = str(
-        first_frame_visual_plan.get("temporal_boundary", {}).get("event_fact_visible_in_still")
-        or ""
-    )
-    visible_delta = str(progression.get("visible_state_delta_from_previous_cut") or visible_moment)
-    geography = first_frame_visual_plan.get("spatial_composition")
-    geography = geography if isinstance(geography, dict) else {}
-    location_zone = str(geography.get("foreground") or geography.get("midground") or location_name)
-    character_gate = first_frame_visual_plan.get("character_state_gate")
-    character_gate = character_gate if isinstance(character_gate, dict) else {}
-    return {
-        "shot_design_contract": shot_design,
-        "cut_location_frame_plan": {
-            "base_location_reference_id": location_spec["asset_id"],
-            "use_reference_as": "material_anchor",
-            "location_zone_id": re.sub(r"\s+", "_", location_zone)[:80],
-            "location_zone_description": location_zone,
-        },
-        "cut_visual_delta": {
-            "previous_cut_selector": (
-                ""
-                if cut_number == 1
-                else re.sub(r"cut\d+$", f"cut{cut_number - 1:02d}", selector)
-            ),
-            "previous_visible_state_summary": str(progression.get("state_after_previous_cut") or ""),
-            "this_cut_new_information": visible_delta,
-            "cut_delta_visible_in_still": visible_delta,
-        },
-        "blocking_and_interaction": {
-            "character_blocking": {
-                "gaze_target": str(character_gate.get("gaze") or ""),
-                "hand_position": str(character_gate.get("hand_position") or ""),
-                "foot_position": str(character_gate.get("foot_position") or ""),
-            },
-            "object_interaction": {
-                "object_id": object_ids[0] if object_ids else "",
-                "contact_state": "visible" if object_ids else "",
-                "object_screen_position": "foreground" if object_ids else "",
-            },
-        },
-    }
-
-
 def _scene_source_events(profile: dict[str, Any], idx: int) -> list[str]:
     reviewed_events = _reviewed_story_source_events(profile, idx)
     if reviewed_events:
         return reviewed_events
     events = [str(event) for event in profile.get("events", []) if str(event).strip()]
-    if profile.get("story_key") == "cinderella":
-        event_ids = [str(value) for value in profile.get("research_event_ids") or []]
-        event_by_id = dict(zip(event_ids, events))
-        cinderella_scene_events = {
-            1: ["E01"],
-            2: ["E02", "E03"],
-            3: ["E04"],
-            4: ["E05"],
-            5: ["E06"],
-            6: ["E07"],
-            7: ["E08"],
-            8: ["E09", "E10"],
-        }
-        canonical_index = _canonical_scene_index(profile, idx)
-        allocated = [event_by_id[event_id] for event_id in cinderella_scene_events.get(canonical_index, []) if event_id in event_by_id]
-        if allocated:
-            return allocated
-    scene_titles = [str(title) for title in profile.get("scene_titles") or []]
-    scene_count = max(1, len(profile.get("scene_titles") or []))
     if not events:
         return []
-    title = scene_titles[idx - 1] if 0 <= idx - 1 < len(scene_titles) else ""
-    keyword_bank = (
-        "灰",
-        "台所",
-        "孤立",
-        "扉",
-        "拒",
-        "仕事",
-        "衣装",
-        "知らせ",
-        "招待",
-        "助力",
-        "魔法",
-        "変身",
-        "馬車",
-        "出発",
-        "宮殿",
-        "階段",
-        "舞踏",
-        "踊",
-        "王子",
-        "真夜中",
-        "鐘",
-        "逃",
-        "失",
-        "靴",
-        "使者",
-        "探",
-        "合い",
-        "身元",
-        "名前",
-        "証明",
-        "解放",
-    )
-    title_keywords = [keyword for keyword in keyword_bank if keyword in title]
-    semantic_expansions = {
-        "扉": ["拒", "仕事", "衣装", "参加", "妨げ"],
-        "拒": ["扉", "仕事", "衣装", "参加", "妨げ"],
-        "変身": ["助力", "ドレス", "靴", "馬車", "現れる"],
-        "魔法": ["助力", "変身", "ドレス", "靴", "馬車", "現れる"],
-        "出発": ["馬車", "向かう", "宮殿", "越え"],
-        "馬車": ["出発", "向かう", "宮殿", "越え"],
-        "宮殿": ["階段", "入", "舞踏", "踊", "王子"],
-        "階段": ["宮殿", "入"],
-        "舞踏": ["踊", "王子", "知らない姿", "誰も知らない"],
-        "踊": ["舞踏", "王子", "知らない姿", "誰も知らない"],
-        "真夜中": ["鐘", "逃", "階段", "靴", "解け"],
-        "鐘": ["真夜中", "逃", "階段", "靴", "解け"],
-        "靴": ["ガラス", "使者", "探", "合い", "身元", "明らか", "証明"],
-        "名前": ["身元", "明らか", "合い", "証明", "解放"],
-        "証明": ["身元", "明らか", "合い", "靴", "解放"],
-    }
-    query_keywords = list(title_keywords)
-    for keyword in title_keywords:
-        query_keywords.extend(semantic_expansions.get(keyword, []))
-    query_keywords = list(dict.fromkeys(query_keywords))
-    if query_keywords:
-        expected_position = (idx - 1) * max(1, len(events) - 1) / max(1, scene_count - 1)
-        scored: list[tuple[int, float, int, str]] = []
-        for event_index, event in enumerate(events):
-            hit_count = sum(1 for keyword in query_keywords if keyword in event)
-            if hit_count <= 0:
-                continue
-            distance = abs(event_index - expected_position)
-            scored.append((hit_count, -distance, event_index, event))
-        if scored:
-            best_score = max(score for score, _, _, _ in scored)
-            selected = sorted(
-                [item for item in sorted(scored, reverse=True) if item[0] >= max(2, best_score - 1)][:2],
-                key=lambda item: item[2],
-            )
-            if not selected:
-                selected = sorted(scored, reverse=True)[:1]
-            return [event for _, _, _, event in selected]
+    scene_count = max(1, len(profile.get("scene_titles") or []))
     start = min(len(events) - 1, int((idx - 1) * len(events) / scene_count))
     window = max(1, int((len(events) + scene_count - 1) / scene_count))
     return events[start : min(len(events), start + window)]
@@ -5628,20 +4456,6 @@ def _scene_research_refs(
     elif profile is None:
         refs.append(f"research.source_passages[P{idx}]")
 
-    reviewed_research = profile.get("reviewed_research") if isinstance(profile, dict) else None
-    conflicts = reviewed_research.get("conflicts") if isinstance(reviewed_research, dict) else None
-    known_conflict_ids = {
-        str(item.get("conflict_id") or "").strip()
-        for item in conflicts or []
-        if isinstance(item, dict) and str(item.get("conflict_id") or "").strip()
-    }
-    if (
-        isinstance(profile, dict)
-        and _profile_is_cinderella(profile)
-        and _canonical_scene_index(profile, idx) in {3, 4, 7}
-        and "C1" in known_conflict_ids
-    ):
-        refs.append("research.conflicts[C1]")
     return list(dict.fromkeys(refs))
 
 
@@ -5817,147 +4631,6 @@ def _apply_reviewed_story_scene_to_blueprint(
     return merged
 
 
-_CINDERELLA_SEGMENT_BEATS: dict[int, tuple[str, ...]] = {
-    1: (
-        "灰の台所でシンデレラが一人だけ床と炉を掃除する",
-        "継母が新しい家事道具を置き、休む間もなく仕事を増やす",
-        "義姉たちが汚れた衣服を残し、名前ではなく灰かぶりと呼ぶ",
-        "継母と義姉が去り、灰の中にシンデレラだけが取り残される",
-    ),
-    2: (
-        "王宮の舞踏会の知らせを義姉たちが奪うように受け取る",
-        "シンデレラが自分も参加したいと継母へ願い出る",
-        "継母が山積みの仕事と破れた衣装を示して参加を拒む",
-        "正面扉が閉まり、仕事を終えたシンデレラが裏口から月明かりの庭へ出る",
-    ),
-    3: (
-        "月明かりの庭で願いを捨てないシンデレラの前に魔法の助力者が現れる",
-        "助力者が真夜中までという期限をシンデレラへ明確に告げる",
-        "かぼちゃが馬車へ変わり、ドレスとガラスの靴が実物として整う",
-        "シンデレラが馬車の扉へ歩き、自分で出発を選べる位置に立つ",
-    ),
-    4: (
-        "開いた馬車の扉の前でシンデレラが家と宮殿を見比べる",
-        "真夜中の期限を受け入れたシンデレラが馬車へ手を伸ばす",
-        "シンデレラ自身が馬車へ乗り込み、内側から扉を閉じる",
-        "動き出した馬車が家の門を越えることで出発を確定する",
-    ),
-    5: (
-        "宮殿へ到着したシンデレラが大階段の下で群衆を見上げる",
-        "礼装の客たちの視線を受けながら最初の一段へ足を置く",
-        "シンデレラが立ち止まらず階段を上り、公の空間へ入る",
-        "階段上へ着いたシンデレラを王子が認めて振り返る",
-    ),
-    6: (
-        "王子がシンデレラへ手を差し出し、踊りへの選択を委ねる",
-        "二人が踊り始め、群衆の視線がシンデレラへ集まる",
-        "王子が灰かぶりではない一人の人物として彼女を記憶する",
-        "時計の予兆に気づいたシンデレラの身体が大階段へ向く",
-    ),
-    7: (
-        "真夜中の鐘が鳴り、ドレスと馬車の魔法が解け始める",
-        "シンデレラが王子の前を離れ、大階段を駆け下りる",
-        "片方のガラスの靴が脱げ、シンデレラだけが宮殿を去る",
-        "王子が階段に残ったガラスの靴を見つけて手に取る",
-    ),
-    8: (
-        "王子が片方のガラスの靴を示し、王宮の使者へその持ち主の探索を命じる",
-        "王宮の使者が町の家々を巡った末に義姉たちへ順にガラスの靴を試し、どちらにも合わないことを確認する。継母は奥の戸口を塞いでシンデレラを試着から排除しようとする",
-        "王宮の使者が排除を退けてシンデレラにも試着させ、足に合うガラスの靴を証人の前で確認する",
-        "王宮の使者がシンデレラの身元と価値を公に確認する",
-    ),
-}
-
-
-_CINDERELLA_SEGMENT_BEAT_ROLES: dict[int, tuple[tuple[str, ...], ...]] = {
-    1: (
-        ("protagonist",),
-        ("protagonist", "stepmother"),
-        ("protagonist", "stepsisters"),
-        ("protagonist", "stepmother", "stepsisters"),
-    ),
-    2: (
-        ("stepsisters",),
-        ("protagonist", "stepmother"),
-        ("protagonist", "stepmother"),
-        ("protagonist",),
-    ),
-    3: (
-        ("protagonist", "helper"),
-        ("protagonist", "helper"),
-        ("protagonist", "helper"),
-        ("protagonist",),
-    ),
-    4: (("protagonist",),) * 4,
-    5: (
-        ("protagonist",),
-        ("protagonist",),
-        ("protagonist",),
-        ("protagonist", "prince"),
-    ),
-    6: (
-        ("protagonist", "prince"),
-        ("protagonist", "prince"),
-        ("protagonist", "prince"),
-        ("protagonist",),
-    ),
-    7: (
-        ("protagonist",),
-        ("protagonist", "prince"),
-        ("protagonist",),
-        ("prince",),
-    ),
-    8: (
-        ("prince", "royal_envoy"),
-        ("protagonist", "royal_envoy", "stepmother", "stepsisters"),
-        ("protagonist", "royal_envoy", "stepmother", "stepsisters"),
-        ("protagonist", "royal_envoy", "stepmother", "stepsisters"),
-    ),
-}
-
-
-_CINDERELLA_SEGMENT_BEAT_PRIMARY_ROLES: dict[int, tuple[str, ...]] = {
-    1: ("protagonist", "stepmother", "stepsisters", "protagonist"),
-    2: ("stepsisters", "protagonist", "stepmother", "protagonist"),
-    3: ("helper", "helper", "helper", "protagonist"),
-    4: ("protagonist",) * 4,
-    5: ("protagonist", "protagonist", "protagonist", "prince"),
-    6: ("prince", "protagonist", "prince", "protagonist"),
-    7: ("protagonist", "protagonist", "protagonist", "prince"),
-    8: ("prince", "royal_envoy", "royal_envoy", "royal_envoy"),
-}
-
-
-_CINDERELLA_MISALIGNED_SEGMENT_OVERRIDE_IDS = frozenset(
-    {
-        "C01-B03",
-        "C02-B01",
-        "C02-B02",
-        "C02-B03",
-        "C06-B03",
-        "C07-B01",
-        "C07-B02",
-    }
-)
-
-
-def _cinderella_segment_contract(
-    canonical_index: int,
-    position: int,
-    count: int,
-) -> dict[str, Any]:
-    beats = list(_CINDERELLA_SEGMENT_BEATS[canonical_index])
-    start = (position - 1) * len(beats) // count
-    end = position * len(beats) // count
-    selected = beats[start:end] or [beats[min(start, len(beats) - 1)]]
-    return {
-        "responsibility_id": f"cinderella_c{canonical_index:02d}_s{position:02d}",
-        "beat_ids": [f"C{canonical_index:02d}-B{beat_index + 1:02d}" for beat_index in range(start, end)],
-        "responsibility": " → ".join(selected),
-        "first_action": selected[0],
-        "last_action": selected[-1],
-        "next_action": beats[end] if end < len(beats) else "",
-    }
 
 
 def _project_beat_overrides_to_segment_locations(
@@ -6016,783 +4689,6 @@ def _scene_blueprint(
     primary_evidence = evidence_terms[0] if evidence_terms else location_name
     second_evidence = evidence_terms[1] if len(evidence_terms) > 1 else protagonist
     artifact_term = artifact if include_artifact else f"{artifact}をまだ隠す条件"
-    if _profile_is_cinderella(profile):
-        canonical_index = _canonical_scene_index(profile, idx)
-        segment_position, segment_count, segment_role = _scene_segment(profile, idx)
-        scene_specifics = {
-            1: {
-                "question": "灰と家事に縛られたシンデレラは、家の中で尊厳を失わずにいられるか",
-                "desire": "課された家事の中でも、自分の意思と尊厳を保ちたい",
-                "obstacle": "継母と義姉たちが家事と灰の台所へ彼女を押し戻す",
-                "stakes": "家の序列が固定されれば、彼女は名前ではなく灰かぶりとして扱われ続ける",
-                "turn": "継母と義姉が家事道具を置き、シンデレラだけを灰の台所に残して家の序列を固定する",
-                "payoff": "台所の灰、積まれた仕事、遠ざかる足音が、次に届く外界の知らせとの落差を作る",
-                "handoff": "灰だらけの手元と、家の奥へ遠ざかる継母たちの足音",
-                "pressure_source": "継母と義姉たちの足元",
-                "turn_motion_target": "継母と義姉たちの足元と床へ伸びる影",
-                "payoff_focus": "灰の床に積まれた家事道具",
-                # The first pressure item becomes the cut-local physical
-                # anchor.  Use an actual obstruction here; the floor remains
-                # texture/evidence and must not be described as blocking the
-                # route to the exit.
-                "pressure": ["積み上がる家事道具", "灰の床", "継母と義姉たちの足音"],
-                "beat_overrides": {
-                    "turn": {
-                        "primary_subject": "継母",
-                        "visible_action": "継母が家事道具を入れた籠を持ち、シンデレラは灰の床際で手を止めている",
-                        "visible_reaction": "義姉たちは出入口側に立ち、シンデレラは籠を置かれる床を見ている",
-                        "required_visual_evidence": ["家事道具を入れた籠", "灰の床際のシンデレラ", "出入口側の義姉たち"],
-                        "required_roles": ["stepmother", "stepsisters", "protagonist"],
-                        "motion_attention_target": "灰の床",
-                        "motion_brief": "継母が家事道具を入れた籠を灰の床へ置き、そのまま義姉たちと出入口へ二歩進んで画面外へ出る",
-                        "motion_end_state": "家事道具の籠が灰の床に残り、シンデレラだけが台所に立ち、出入口の向こうへ継母と義姉たちの背中が消えている",
-                    },
-                    "payoff": {
-                        "primary_subject": "シンデレラ",
-                        "obligation_overrides": {
-                            "spatial_transition": {
-                                "required_visual_evidence": ["灰の床に残った家事道具の籠", "一人で台所に残ったシンデレラ", "空いた出入口"],
-                                "required_roles": ["protagonist"],
-                                "motion_attention_target": "灰の床に残った家事道具の籠",
-                                "motion_brief": "シンデレラが空いた出入口から灰の床の籠へ顔を戻し、籠の取っ手へ片手を一度だけ伸ばす",
-                                "motion_end_state": "シンデレラの指先が籠の取っ手に触れ、空いた出入口の前には誰もいない",
-                            }
-                        },
-                    },
-                },
-            },
-            2: {
-                "question": "閉ざされた扉の前でシンデレラは、継母の条件を越えられるか",
-                "desire": "舞踏会へ行く許しと着ていける衣装を得たい",
-                "obstacle": "継母が仕事と衣装の欠如を理由に参加を拒み、義姉たちが扉の外へ出る",
-                "stakes": "扉が閉まれば、彼女の願いは家の中で消える",
-                "turn": "家族が去った後に仕事を終えたシンデレラが、願いを捨てず裏口から月明かりの庭へ出る",
-                "payoff": "排除されても庭へ出た行動が、月明かりの下で魔法の助力者と出会う条件になる",
-                "handoff": "裏口を通って月明かりの庭に立つシンデレラと、背後で閉じた正面扉",
-                "pressure_source": "閉ざされた扉",
-                "turn_motion_target": "画面内の裏口",
-                "payoff_focus": "開いた裏口と背後の閉ざされた扉",
-                "pressure": ["閉ざされた扉", "破れた衣装", "山積みの仕事"],
-                "beat_overrides": {
-                    "setup": {
-                        "location": "閉ざされた扉の前",
-                        "what_happens": "継母が舞踏会への参加を拒み、正面扉の前にシンデレラを残す",
-                        "obligation_overrides": {
-                            "scene_pressure": {
-                                "visible_action": "正面扉が開いたまま、シンデレラが山積みの仕事を抱えて継母の前に立っている",
-                                "visible_reaction": "継母は敷居で片腕を横へ伸ばし、義姉たちは招待状を持って扉の外にいる",
-                                "required_visual_evidence": ["開いた正面扉", "山積みの仕事を抱えたシンデレラ", "敷居で進路を遮る継母"],
-                                "required_roles": ["protagonist", "stepmother", "stepsisters"],
-                                "motion_attention_target": "敷居で進路を遮る継母の腕",
-                                "motion_brief": "シンデレラが抱えた仕事の上から片手を一度だけ継母へ伸ばす",
-                                "motion_end_state": "シンデレラの片手が継母の遮る腕の手前で止まり、正面扉はまだ開いている",
-                            }
-                        },
-                    },
-                    "pressure": {
-                        "location": "閉ざされた扉の前",
-                        "what_happens": "舞踏会の知らせを受けたシンデレラが参加を願い出るが、継母が破れた衣装と山積みの仕事を示して拒み、義姉たちと正面扉を閉じる",
-                        "primary_subject": "シンデレラ",
-                        "visible_action": "シンデレラが山積みの仕事を抱えて正面扉の内側に立ち、継母が開いた扉越しに片腕で進路を遮っている",
-                        "visible_reaction": "義姉たちは敷居の外で舞踏会の招待状を持ち、シンデレラは継母と閉じかけた扉を見ている",
-                        "required_visual_evidence": ["山積みの仕事を抱えたシンデレラ", "正面扉を閉じる継母", "敷居の外で招待状を持つ義姉たち"],
-                        "required_roles": ["protagonist", "stepmother", "stepsisters"],
-                        "motion_attention_target": "閉じかけた正面扉",
-                        "motion_brief": "継母が正面扉を閉じ、シンデレラが山積みの仕事を抱えたまま屋敷の奥へ続く廊下へ身体を向ける",
-                        "motion_end_state": "正面扉が閉まり、山積みの仕事を抱えたシンデレラの足先と視線が屋敷の奥の廊下を向いている",
-                        "obligation_overrides": {
-                            "visible_value_shift": {
-                                "visible_action": "シンデレラの片手が継母の遮る腕の手前で止まり、正面扉はまだ開いている",
-                                "visible_reaction": "継母が扉の取っ手を引き、義姉たちは敷居の外へ退いている",
-                                "required_visual_evidence": ["継母の腕の手前で止まった片手", "正面扉の取っ手を引く継母", "敷居の外の義姉たち"],
-                                "required_roles": ["protagonist", "stepmother", "stepsisters"],
-                                "motion_attention_target": "閉じる正面扉",
-                                "motion_brief": "継母が正面扉を閉じ、シンデレラが山積みの仕事を抱えたまま屋敷の奥へ続く廊下へ身体を向ける",
-                                "motion_end_state": "正面扉が閉まり、山積みの仕事を抱えたシンデレラの足先と視線が屋敷の奥の廊下を向いている",
-                            }
-                        },
-                    },
-                    "turn": {
-                        "location": "屋敷の裏口",
-                        "primary_subject": "シンデレラ",
-                        "visible_action": "シンデレラが閉じた裏口の掛け金へ片手を添え、片足を敷居の手前に置いている",
-                        "visible_reaction": "閉ざされた正面扉は背後に残り、裏口の隙間から低い月光が差している",
-                        "required_visual_evidence": ["裏口の掛け金", "敷居の手前の片足", "背後の閉ざされた正面扉"],
-                        "required_roles": ["protagonist"],
-                        "motion_attention_target": "裏口の敷居",
-                        "motion_brief": "シンデレラが裏口の掛け金を外し、扉を身体一人分だけ開けて敷居を越え、両足で月明かりの庭へ出る",
-                        "motion_end_state": "裏口が身体一人分だけ開き、シンデレラの両足が月明かりの庭に置かれ、閉ざされた正面扉は背後に残っている",
-                        "obligation_overrides": {
-                            "causal_handoff": {
-                                "allowed_new_reveal_elements": ["月明かりの庭"],
-                                "use_next_cut_first_frame_as_last_frame": True,
-                            }
-                        },
-                    },
-                    "payoff": {
-                        "location": "月明かりの庭",
-                        "primary_subject": "シンデレラ",
-                        "obligation_overrides": {
-                            "audience_context": {
-                                "required_visual_evidence": ["月明かりの庭に立つシンデレラ", "身体一人分だけ開いた裏口", "背後の閉ざされた正面扉"],
-                                "required_roles": ["protagonist"],
-                                "motion_attention_target": "身体一人分だけ開いた裏口",
-                                "motion_brief": "シンデレラが月明かりの庭から片手を伸ばし、開いた裏口を庭側から閉じる",
-                                "motion_end_state": "シンデレラが月明かりの庭に立ち、閉じた裏口から片手を離している",
-                            },
-                            "spatial_transition": {
-                                "required_visual_evidence": ["月明かりの庭", "閉じた裏口", "庭の奥へ続く月光の導線"],
-                                "required_roles": ["protagonist"],
-                                "motion_attention_target": "庭の奥へ続く月光の導線",
-                                "motion_brief": "シンデレラが閉じた裏口から身体を離し、月明かりの庭の奥へ二歩だけ進む",
-                                "motion_end_state": "シンデレラが月明かりの庭の中で止まり、閉じた裏口が二歩後方に残っている",
-                            },
-                        },
-                    },
-                },
-            },
-            3: {
-                "question": "月明かりの庭でシンデレラは、助力を受け取って別人の姿へ踏み出せるか",
-                "desire": "舞踏会へ行ける姿と移動手段を得たい",
-                "obstacle": "人物として現れた魔法の助力者が告げる、真夜中までという期限と一時的な魔法の条件",
-                "stakes": "助力を受け取れなければ、舞踏会の夜は家の外へ出ないまま終わる",
-                "turn": "魔法の助力者が真夜中までの期限を告げ、かぼちゃの馬車、ドレス、ガラスの靴を整えて、彼女が出発を選べる状態にする",
-                "payoff": "変身後の姿と馬車が、門前の出発へ直接つながる",
-                "handoff": "月明かりの庭に置かれた馬車の扉と、足元で光るガラスの靴",
-                "pressure_source": "魔法の助力者",
-                "pressure_source_visible_from": "pressure",
-                "turn_motion_target": "足元で光るガラスの靴",
-                "payoff_focus": "月明かりの庭に置かれた馬車の扉",
-                "pressure": ["月明かり", "かぼちゃの馬車", "変化したドレス", "ガラスの靴"],
-                "beat_overrides": {
-                    "setup": {
-                        "primary_subject": "魔法の助力者",
-                        "visible_action": "普段着のシンデレラが庭のかぼちゃの横に立ち、魔法の助力者の姿が月光の外の庭木の陰に半分だけ見えている",
-                        "visible_reaction": "シンデレラは庭木の陰に現れた魔法の助力者へ顔を向けている",
-                        "required_visual_evidence": ["普段着のシンデレラ", "庭木の陰に半分見える魔法の助力者", "庭のかぼちゃ"],
-                        "required_roles": ["helper", "protagonist"],
-                        "motion_attention_target": "月光の中のシンデレラ",
-                        "motion_brief": "魔法の助力者が月光の外から一歩だけ月明かりへ進み、シンデレラの前で止まる",
-                        "motion_end_state": "魔法の助力者が月明かりの中でシンデレラの前に立ち、両手を身体の横に下ろしている",
-                    },
-                    "pressure": {
-                        "primary_subject": "魔法の助力者",
-                        "visible_action": "魔法の助力者がシンデレラの前に立ち、片手を身体の横に下ろしている",
-                        "visible_reaction": "背景の時計塔には真夜中直前を示す文字盤が見え、シンデレラは助力者を見ている",
-                        "required_visual_evidence": ["普段着のシンデレラ", "片手を下ろした魔法の助力者", "真夜中直前を示す文字盤", "庭のかぼちゃ"],
-                        "required_roles": ["helper", "protagonist"],
-                        "motion_attention_target": "真夜中直前を示す文字盤",
-                        "motion_brief": "魔法の助力者が片手を上げ、真夜中直前を示す文字盤へ人差し指を一度だけ向ける",
-                        "motion_end_state": "魔法の助力者の人差し指が時計塔の文字盤を指し、シンデレラの視線も文字盤へ向いている",
-                    },
-                    "turn": {
-                        "primary_subject": "魔法の助力者",
-                        "visible_action": "魔法の助力者が文字盤を指した片手を上げたまま、普段着のシンデレラと庭のかぼちゃへ身体を向けている",
-                        "visible_reaction": "普段着のシンデレラと庭のかぼちゃはまだ変化せず、月光の中の同じ位置にある",
-                        "required_visual_evidence": ["普段着のシンデレラ", "上げた片手を持つ魔法の助力者", "庭のかぼちゃ"],
-                        "required_roles": ["helper", "protagonist"],
-                        "motion_attention_target": "シンデレラと庭のかぼちゃ",
-                        "motion_brief": "魔法の助力者が上げた片手を一度だけ振り下ろすと、光がシンデレラと庭のかぼちゃを包み、ドレス、ガラスの靴、馬車の形へ変える",
-                        "motion_end_state": "変身後のシンデレラがガラスの靴で立ち、隣に完成したかぼちゃの馬車が扉を開いて止まり、魔法の助力者が同じ場所に立っている",
-                        "obligation_overrides": {
-                            "causal_handoff": {
-                                "first_frame_character_asset_overrides": {
-                                    "シンデレラ": profile[
-                                        "protagonist_asset_id"
-                                    ],
-                                    "protagonist": profile[
-                                        "protagonist_asset_id"
-                                    ],
-                                },
-                                "first_frame_excluded_object_ids": [
-                                    profile["artifact_asset_id"],
-                                    profile["carriage_asset_id"],
-                                ],
-                                "allowed_new_reveal_elements": [
-                                    "変身後のシンデレラ",
-                                    "ガラスの靴",
-                                    "完成したかぼちゃの馬車",
-                                ],
-                                "use_next_cut_first_frame_as_last_frame": True,
-                            }
-                        },
-                    },
-                    "payoff": {
-                        "primary_subject": "シンデレラ",
-                        "obligation_overrides": {
-                            "symbolic_proof": {
-                                "required_visual_evidence": ["変身後のシンデレラ", "ガラスの靴を履いた足元", "完成したかぼちゃの馬車", "魔法の助力者"],
-                                "required_roles": ["protagonist", "helper"],
-                                "motion_attention_target": "ガラスの靴を履いた足元",
-                                "motion_brief": "変身後のシンデレラがドレスの裾を片手で少し上げ、ガラスの靴を履いた足元を一度だけ見る",
-                                "motion_end_state": "変身後のシンデレラがガラスの靴を履いた足を見下ろし、完成した馬車と魔法の助力者が同じ位置に残っている",
-                            },
-                            "spatial_transition": {
-                                "required_visual_evidence": ["変身後のシンデレラ", "開いた馬車扉", "完成したかぼちゃの馬車", "魔法の助力者"],
-                                "required_roles": ["protagonist", "helper"],
-                                "motion_attention_target": "開いた馬車扉",
-                                "motion_brief": "変身後のシンデレラが開いた馬車扉へ一歩だけ進む",
-                                "motion_end_state": "変身後のシンデレラが開いた馬車扉の一歩手前で止まり、ガラスの靴を履いた足先を扉へ向けている",
-                            },
-                            "reaction_after_change": {
-                                "required_visual_evidence": ["変身後のシンデレラ", "開いた馬車扉", "扉枠", "魔法の助力者"],
-                                "required_roles": ["protagonist", "helper"],
-                                "motion_attention_target": "開いた馬車扉",
-                                "motion_brief": "変身後のシンデレラが馬車の扉枠へ片手を一度だけ添え、顔を客室へ向ける",
-                                "motion_end_state": "変身後のシンデレラが開いた馬車扉の前で片手を扉枠に添え、乗り込む直前で止まっている",
-                            },
-                        },
-                    },
-                },
-            },
-            4: {
-                "purpose": "馬車が待つ門前で、助力を受けた後も主人公自身が出発を選び、家の境界を越えるE05のagency beatを成立させる",
-                "question": "門前でシンデレラは、家の境界を越えて宮殿へ向かえるか",
-                "desire": "馬車に乗って舞踏会へ出発したい",
-                "obstacle": "家に戻される恐れと、真夜中までという条件",
-                "stakes": "出発をためらえば、魔法の時間を失う",
-                "turn": "シンデレラが馬車へ乗り込み、家の門を越えて宮殿へ向かう",
-                "payoff": "門を離れる馬車の車輪跡が、宮殿階段の到着を準備する",
-                "handoff": "門を越える馬車の車輪跡と遠くに見える宮殿の灯り",
-                "pressure_source": "馬車の扉",
-                "turn_motion_target": "馬車の扉",
-                "payoff_focus": "門を越えた馬車の車輪跡",
-                "pressure": ["馬車の扉", "門の境界", "宮殿の灯り"],
-                "beat_overrides": {
-                    "setup": {
-                        "location": "馬車が待つ門前",
-                        "obligation_overrides": {
-                            "scene_pressure": {
-                                "visible_action": "変身後のシンデレラが開いた馬車扉と家の門の間に立ち、両手を身体の横に下ろしている",
-                                "visible_reaction": "空の馬車客室と家へ戻る門が、シンデレラの左右に見えている",
-                                "required_visual_evidence": ["開いた馬車扉", "家へ戻る門", "両手を下ろした変身後のシンデレラ"],
-                                "required_roles": ["protagonist"],
-                                "motion_attention_target": "開いた馬車扉",
-                                "motion_brief": "変身後のシンデレラが家の門から開いた馬車扉へ顔を一度だけ向ける",
-                                "motion_end_state": "変身後のシンデレラの顔と視線が開いた馬車扉を向き、両足と両手は門前の同じ位置に残っている",
-                            }
-                        },
-                    },
-                    "pressure": {
-                        "location": "馬車が待つ門前",
-                        "obligation_overrides": {
-                            "visible_value_shift": {
-                                "visible_action": "変身後のシンデレラが開いた馬車扉を向き、両足を門前の地面に置いている",
-                                "visible_reaction": "片手と扉枠の間にはまだ数センチの隙間があり、馬車客室は空いている",
-                                "required_visual_evidence": ["開いた馬車扉", "扉枠の手前にある片手", "門前に残る両足"],
-                                "required_roles": ["protagonist"],
-                                "motion_attention_target": "馬車の扉枠",
-                                "motion_brief": "変身後のシンデレラが片手を開いた馬車の扉枠へ一度だけ伸ばす",
-                                "motion_end_state": "変身後のシンデレラの片手が馬車の扉枠に触れ、両足は門前の地面に残っている",
-                            }
-                        },
-                    },
-                    "turn": {
-                        "location": "馬車が待つ門前",
-                        "primary_subject": "シンデレラ",
-                        "visible_action": "シンデレラが開いた馬車扉の前に立ち、片手を扉枠へ添えている",
-                        "visible_reaction": "馬車の客室は空いており、家の門から宮殿方向へ続く道が背景に見える",
-                        "required_visual_evidence": ["開いた馬車扉", "空いた馬車の客室", "宮殿方向へ続く道"],
-                        "required_roles": ["protagonist"],
-                        "motion_attention_target": "馬車の客室",
-                        "motion_brief": "シンデレラが片足を馬車の客室へ置き、身体を一度だけ客室内へ乗り入れる",
-                        "motion_end_state": "シンデレラの身体が馬車の客室内に収まり、片手が内側の扉枠を支えている",
-                        "obligation_overrides": {
-                            "causal_handoff": {
-                                "visible_action": "変身後のシンデレラの片手が馬車の扉枠に触れ、両足は門前の地面に残っている",
-                                "visible_reaction": "空の馬車客室が正面に開き、家の門は背後に見えている",
-                                "required_visual_evidence": ["扉枠に触れた片手", "門前に残る両足", "空の馬車客室"],
-                                "required_roles": ["protagonist"],
-                                "motion_attention_target": "馬車の客室",
-                                "motion_brief": "シンデレラが片足を馬車の客室へ置き、身体を一度だけ客室内へ乗り入れる",
-                                "motion_end_state": "シンデレラの身体が馬車の客室内に収まり、片手が内側の扉枠を支えている",
-                            }
-                        },
-                    },
-                    "payoff": {
-                        "location": "馬車が待つ門前",
-                        "primary_subject": "シンデレラ",
-                        "obligation_overrides": {
-                            "audience_context": {
-                                "location": "馬車が待つ門前",
-                                "visible_action": "シンデレラを乗せたかぼちゃの馬車が家の門の手前で宮殿方向を向いている",
-                                "visible_reaction": "馬車の車輪は門の轍に揃い、門の先に宮殿方向へ続く道が見える",
-                                "required_visual_evidence": ["シンデレラを乗せたかぼちゃの馬車", "家の門", "宮殿方向へ続く轍"],
-                                "required_roles": ["protagonist"],
-                                "motion_attention_target": "家の門の先へ続く道",
-                                "motion_brief": "シンデレラを乗せたかぼちゃの馬車が車輪を回し、家の門を一度だけ通過する",
-                                "motion_end_state": "かぼちゃの馬車の全体が家の門の外へ出て、車輪が宮殿へ続く石畳の轍に載っている",
-                                "allowed_new_reveal_elements": ["宮殿へ続く石畳"],
-                                "use_next_cut_first_frame_as_last_frame": True,
-                            },
-                            "spatial_transition": {
-                                "location": "宮殿へ続く石畳",
-                                "primary_subject": "シンデレラ",
-                                "required_visual_evidence": ["シンデレラを乗せたかぼちゃの馬車", "門外の轍", "宮殿方向へ続く石畳"],
-                                "required_roles": ["protagonist"],
-                                "motion_attention_target": "宮殿方向へ続く石畳",
-                                "motion_brief": "シンデレラを乗せたかぼちゃの馬車が門外の轍に沿って一台分だけ前へ進む",
-                                "motion_end_state": "かぼちゃの馬車が家の門から一台分離れ、車輪が宮殿方向へ続く石畳に揃っている",
-                            },
-                            "time_or_deadline_pressure": {
-                                "location": "宮殿へ続く石畳",
-                                "primary_subject": "シンデレラ",
-                                "required_visual_evidence": ["シンデレラを乗せたかぼちゃの馬車", "宮殿方向の石畳", "遠方の宮殿の灯り"],
-                                "required_roles": ["protagonist"],
-                                "motion_attention_target": "遠方の宮殿の灯り",
-                                "motion_brief": "シンデレラを乗せたかぼちゃの馬車が遠方の宮殿の灯りへ向け、石畳をもう一台分だけ進む",
-                                "motion_end_state": "かぼちゃの馬車が宮殿方向の石畳を進み、家の門が後方へ遠ざかっている",
-                            },
-                        },
-                    },
-                },
-            },
-            5: {
-                "question": "宮殿の階段でシンデレラは、見知らぬ公の場へ入れるか",
-                "desire": "誰にも灰かぶりと知られず舞踏会へ入場したい",
-                "obstacle": "階段上の視線、礼装の場の規則、身元を隠した状態",
-                "stakes": "入口で立ち止まれば、公の認識を得る前に夜が終わる",
-                "turn": "シンデレラが階段を上がり、宮殿の人々の視線を受けて広間へ入る",
-                "payoff": "階段上の視線と礼装の姿が、舞踏会の中心での出会いを始める",
-                "handoff": "階段上から広間へ流れる視線と、王子が振り返る動き",
-                "pressure_source": "階段上の群衆",
-                "turn_motion_target": "階段上の踊り場",
-                "payoff_focus": "大広間の入口",
-                "pressure": ["宮殿の階段", "群衆の視線", "礼装の境界"],
-                "beat_overrides": {
-                    "setup": {
-                        "location": "宮殿の階段",
-                        "obligation_overrides": {
-                            "scene_pressure": {
-                                "visible_action": "変身後のシンデレラが宮殿の大階段の最下段前で両足を揃え、顔を伏せている",
-                                "visible_reaction": "階段上の礼装客はまだ広間側を向き、大階段の中央には空いた導線がある",
-                                "required_visual_evidence": ["最下段前の変身後のシンデレラ", "空いた大階段の中央", "広間側を向く礼装客"],
-                                "required_roles": ["protagonist"],
-                                "motion_attention_target": "大階段の上端",
-                                "motion_brief": "変身後のシンデレラが伏せた顔を大階段の上端へ一度だけ上げる",
-                                "motion_end_state": "変身後のシンデレラの顔と視線が大階段の上端を向き、両足は最下段前の床に揃っている",
-                            }
-                        },
-                    },
-                    "pressure": {
-                        "location": "宮殿の階段",
-                        "obligation_overrides": {
-                            "visible_value_shift": {
-                                "visible_action": "変身後のシンデレラが大階段の上端を見上げ、両足を最下段前の床に揃えている",
-                                "visible_reaction": "階段上の礼装客が一人ずつ振り返り、視線を最下段へ向け始めている",
-                                "required_visual_evidence": ["最下段前に揃えた両足", "振り返る階段上の礼装客", "次の一段"],
-                                "required_roles": ["protagonist"],
-                                "motion_attention_target": "大階段の最初の一段",
-                                "motion_brief": "変身後のシンデレラが片足を大階段の最初の一段へ一度だけ置く",
-                                "motion_end_state": "変身後のシンデレラの片足が最初の一段に載り、もう片足は最下段前の床に残っている",
-                            }
-                        },
-                    },
-                    "turn": {
-                        "location": "宮殿の階段",
-                        "primary_subject": "シンデレラ",
-                        "visible_action": "シンデレラが宮殿の大階段の下段で上方を向き、片足を次の段へ置いている",
-                        "visible_reaction": "階段上の礼装客が立ち止まり、視線を下段のシンデレラへ向けている",
-                        "required_visual_evidence": ["次の段へ置いた片足", "階段上の礼装客", "大広間の入口"],
-                        "required_roles": ["protagonist"],
-                        "motion_attention_target": "大広間の入口",
-                        "motion_brief": "シンデレラが宮殿の大階段を上り切り、その先の舞踏会の大広間の敷居を一歩で越える",
-                        "motion_end_state": "シンデレラが舞踏会の大広間の敷居の内側で立ち止まり、階段上の礼装客の視線が彼女に集まっている",
-                        "obligation_overrides": {
-                            "causal_handoff": {
-                                "visible_action": "変身後のシンデレラの片足が大階段の最初の一段に載り、もう片足は最下段前の床に残っている",
-                                "visible_reaction": "階段上の礼装客がシンデレラへ視線を向け、大広間の入口までの中央導線が空いている",
-                                "required_visual_evidence": ["最初の一段に載った片足", "シンデレラを見る礼装客", "大広間の入口までの導線"],
-                                "required_roles": ["protagonist"],
-                                "motion_attention_target": "大広間の入口",
-                                "motion_brief": "シンデレラが宮殿の大階段を上り切り、その先の舞踏会の大広間の敷居を一歩で越える",
-                                "motion_end_state": "シンデレラが舞踏会の大広間の敷居の内側で立ち止まり、階段上の礼装客の視線が彼女に集まっている",
-                                "allowed_new_reveal_elements": ["舞踏会の大広間"],
-                                "use_next_cut_first_frame_as_last_frame": True,
-                            }
-                        },
-                    },
-                    "payoff": {
-                        "location": "舞踏会の大広間",
-                        "primary_subject": "王子",
-                        "obligation_overrides": {
-                            "audience_context": {
-                                "location": "舞踏会の大広間",
-                                "primary_subject": "王子",
-                                "required_visual_evidence": ["大広間の敷居の内側に立つシンデレラ", "広間中央の王子", "立ち止まった礼装客"],
-                                "required_roles": ["protagonist", "prince"],
-                                "motion_attention_target": "大広間の敷居に立つシンデレラ",
-                                "motion_brief": "王子が広間中央から大広間の敷居に立つシンデレラへ顔を一度だけ向ける",
-                                "motion_end_state": "王子の顔と視線がシンデレラを向き、シンデレラは大広間の敷居の内側に立っている",
-                            },
-                            "spatial_transition": {
-                                "location": "舞踏会の大広間",
-                                "primary_subject": "シンデレラ",
-                                "required_visual_evidence": ["シンデレラ", "視線を向けた王子", "大広間の内側へ続く空いた導線"],
-                                "required_roles": ["protagonist", "prince"],
-                                "motion_attention_target": "広間中央の王子",
-                                "motion_brief": "シンデレラが大広間の内側へ二歩だけ進み、視線を向けた王子の手前で止まる",
-                                "motion_end_state": "シンデレラが大広間の内側で王子と向き合い、二人の間に数歩分の空間が残っている",
-                            },
-                        },
-                    },
-                },
-            },
-            6: {
-                "question": "舞踏会の中心でシンデレラは、名乗らずに自分の価値を認識させられるか",
-                "desire": "王子と踊り、自分が一人の人物として見られたい",
-                "obstacle": "正体を明かせないことと、魔法の助力者から告げられた真夜中が近づく時間制限",
-                "stakes": "誰にも認識されなければ、変身はただの幻で終わる",
-                "turn": "王子と踊るシンデレラに群衆の視線が集まり、灰かぶりではない存在として認識される",
-                "payoff": "広間の視線と王子の記憶が、真夜中の逃走で失われる証拠を必要にする",
-                "handoff": "踊りの輪の中で響く時計の気配と、階段へ向くシンデレラの身体",
-                "pressure_source": "壁時計",
-                "turn_motion_target": "王子の差し出した手",
-                "payoff_focus": "王子と群衆の視線",
-                "pressure": ["王子の手", "群衆の輪", "迫る時刻"],
-                "beat_overrides": {
-                    "turn": {
-                        "primary_subject": "シンデレラ",
-                        "visible_action": "王子が片手を差し出し、シンデレラの片手はその数センチ手前で止まっている",
-                        "visible_reaction": "周囲の群衆は二人のために輪を空け、視線をシンデレラへ向けている",
-                        "required_visual_evidence": ["差し出された王子の手", "数センチ手前のシンデレラの手", "空いた踊りの輪"],
-                        "required_roles": ["protagonist", "prince"],
-                        "motion_attention_target": "差し出された王子の手",
-                        "motion_brief": "シンデレラが王子の差し出した手を取り、二人で最初の一歩だけ踊り始める",
-                        "motion_end_state": "シンデレラと王子の手が結ばれ、二人の足が踊りの最初の位置で止まり、群衆の視線が彼女へ集まっている",
-                    },
-                    "payoff": {
-                        "primary_subject": "シンデレラ",
-                        "obligation_overrides": {
-                            "audience_context": {
-                                "required_visual_evidence": ["手を結んだシンデレラと王子", "空いた踊りの輪", "二人を見る群衆"],
-                                "required_roles": ["protagonist", "prince"],
-                                "motion_attention_target": "踊りの輪の進行方向",
-                                "motion_brief": "手を結んだシンデレラと王子の二人が踊りの輪の中で半回転だけ進む",
-                                "motion_end_state": "シンデレラと王子が半回転後の位置で向き合い、群衆の視線が二人へ集まっている",
-                            },
-                            "spatial_transition": {
-                                "required_visual_evidence": ["向き合うシンデレラと王子", "壁時計", "大階段へ続く広間の出入口"],
-                                "required_roles": ["protagonist", "prince"],
-                                "motion_attention_target": "壁時計",
-                                "motion_brief": "シンデレラが王子と向き合ったまま、顔だけを壁時計へ一度向ける",
-                                "motion_end_state": "シンデレラの視線が壁時計に止まり、身体の向きが大階段へ続く出入口側へわずかに変わっている",
-                            },
-                        },
-                    },
-                },
-            },
-            7: {
-                "question": "真夜中の大階段でシンデレラは、魔法が解ける前に逃げ切れるか",
-                "desire": "正体が露見する前に宮殿を離れたい",
-                "obstacle": "魔法の助力者から告げられた真夜中の鐘、解け始める魔法、追いかける視線",
-                "stakes": "遅れれば、変身の秘密と身元がその場で崩れる",
-                "turn": "シンデレラが大階段を駆け下りて片方のガラスの靴を残し、王子がその物証を見つけて手に取る",
-                "payoff": "王子の手元に残ったガラスの靴を見つめる視線と姿勢に、持ち主を探索する決意が現れる",
-                "handoff": "持ち主の探索の起点となる片方のガラスの靴と、階段の先へ消えたシンデレラを追う王子の視線",
-                "pressure_source": "真夜中を告げる時計",
-                "turn_motion_target": "大階段の下方",
-                "payoff_focus": "階段に残った片方のガラスの靴",
-                "pressure": ["真夜中の鐘", "大階段", "片方のガラスの靴"],
-                "beat_overrides": {
-                    "setup": {
-                        "primary_subject": "シンデレラ",
-                        "visible_action": "大階段上のシンデレラは王子を向き、壁の大時計の振り子は真夜中の位置へ届く直前にある",
-                        "visible_reaction": "王子は数段上でシンデレラを見ており、大時計の鐘はまだ鳴っていない",
-                        "required_visual_evidence": ["王子を向くシンデレラ", "真夜中直前の大時計", "数段上の王子"],
-                        "required_roles": ["protagonist", "prince"],
-                        "motion_attention_target": "真夜中直前の大時計",
-                        "motion_brief": "大時計の鐘が最初の一打を鳴らし、シンデレラが王子から大時計へ顔を一度だけ向ける",
-                        "motion_end_state": "シンデレラの顔と視線が真夜中を告げる大時計へ向き、王子は数段上に止まっている",
-                    },
-                    "pressure": {
-                        "primary_subject": "シンデレラ",
-                        "visible_action": "シンデレラは真夜中の大階段の上段で出入口を向き、ガラスの靴を履いた片足を次の段の手前に止めている",
-                        "visible_reaction": "真夜中の鐘が鳴り、数段上の王子がシンデレラへ手を伸ばしかけている",
-                        "required_visual_evidence": ["真夜中を告げる鐘", "ガラスの靴を履いた片足", "数段上の王子"],
-                        "required_roles": ["protagonist", "prince"],
-                        "motion_attention_target": "大階段の下方",
-                        "motion_brief": "シンデレラが片足を次の段へ一度だけ下ろすと、ガラスの靴の踵が半分だけ外れる",
-                        "motion_end_state": "シンデレラが大階段の下方を向き、片足のガラスの靴が踵から半分外れている",
-                    },
-                    "turn": {
-                        "primary_subject": "シンデレラ",
-                        "visible_action": "シンデレラは真夜中の大階段の上段で身体を下方へ向け、片足のガラスの靴が踵から半分外れている",
-                        "visible_reaction": "王子は三段上で手を伸ばしかけ、階段下方への導線が空いている",
-                        "required_visual_evidence": ["真夜中の大階段", "踵から半分外れたガラスの靴", "三段上の王子"],
-                        "required_roles": ["protagonist", "prince"],
-                        "visible_character_state": {
-                            "posture": "シンデレラの身体が大階段の下方へ向き、片足を次の段へ出しかけた姿勢",
-                            "gaze": "大階段の下方へ向く視線",
-                            "expression": "眉と口元に切迫が残る表情",
-                            "hands": "片手が手すりの手前で開いている",
-                            "feet": "片足のガラスの靴が踵から半分外れている",
-                        },
-                        "motion_attention_target": "大階段の下方",
-                        "motion_brief": "シンデレラが大階段を二段だけ素早く下り、片方のガラスの靴が踵から外れて一段上に残る",
-                        "motion_end_state": "シンデレラは片方のガラスの靴が残った段の一段下で階段下方を向いている",
-                    },
-                    "payoff": {
-                        "primary_subject": "王子",
-                        "visible_action": "王子が階段に残った片方のガラスの靴を拾い、胸元で片手に支えている",
-                        "visible_reaction": "階段下方の出入口は空き、王子の視線が胸元のガラスの靴に留まっている",
-                        "required_visual_evidence": ["王子が胸元で支える片方のガラスの靴", "階段上の王子", "空いた階段下方の出入口"],
-                        "required_roles": ["prince", "protagonist"],
-                        "visible_character_state": {
-                            "posture": "王子が片方のガラスの靴を拾い、胸元で片手に支えた姿勢",
-                            "gaze": "胸元で支える片方のガラスの靴へ下ろした視線",
-                            "expression": "驚きと集中が眉に残る表情",
-                            "hands": "片手が片方のガラスの靴の踵を握り、胸元で支えている",
-                            "feet": "両足が靴を拾い上げた階段上で止まっている",
-                        },
-                        "motion_attention_target": "階段に残った片方のガラスの靴",
-                        "motion_brief": "王子がガラスの靴の踵を握り、階段から胸元まで一度だけ持ち上げる",
-                        "motion_end_state": "王子が片方のガラスの靴を胸元で支え、視線を靴へ向け、靴は階段から離れている",
-                        "obligation_overrides": {
-                            "audience_context": {
-                                "primary_subject": "シンデレラ",
-                                "required_visual_evidence": ["階段に残った片方のガラスの靴", "ガラスの靴の四段上にいる王子", "靴の一段下のシンデレラ"],
-                                "required_roles": ["prince", "protagonist"],
-                                "visible_character_state": {
-                                    "gaze": "階段下方の出入口へ向く視線",
-                                    "expression": "眉と口元に切迫が残る表情",
-                                    "hands": "片手が手すりの手前で開いている",
-                                    "feet": "片方のガラスの靴が残った段の一段下にある足元",
-                                },
-                                "motion_attention_target": "階段下方の出入口",
-                                "motion_brief": "シンデレラが階段を二段だけ下りる間に、舞踏会のドレスが質素な普段着へ戻る",
-                                "motion_end_state": "質素な普段着へ戻ったシンデレラがガラスの靴の三段下で階段下方を向いている",
-                                "first_frame_character_asset_overrides": {
-                                    "シンデレラ": profile[
-                                        "protagonist_transformed_asset_id"
-                                    ],
-                                    "protagonist": profile[
-                                        "protagonist_transformed_asset_id"
-                                    ],
-                                },
-                                "allowed_new_reveal_elements": [
-                                    "質素な普段着へ戻ったシンデレラ"
-                                ],
-                                "allowed_reveal_info_ids": ["時間制限の結果"],
-                                "use_next_cut_first_frame_as_last_frame": True,
-                            },
-                            "symbolic_proof": {
-                                "primary_subject": "シンデレラ",
-                                "visible_action": "質素な普段着へ戻ったシンデレラがガラスの靴の三段下で階段下方の出入口を向き、王子は靴の四段上にいる",
-                                "visible_reaction": "王子は階段に残ったガラスの靴を見下ろし、階段下方の出入口までの導線が空いている",
-                                "required_visual_evidence": ["階段に残った片方のガラスの靴", "四段上の王子", "出入口へ向く質素な普段着のシンデレラ"],
-                                "required_roles": ["prince", "protagonist"],
-                                "visible_character_state": {
-                                    "posture": "質素な普段着へ戻ったシンデレラが階段下方の出入口へ身体を向けた姿勢",
-                                    "gaze": "階段下方の出入口へ向く視線",
-                                    "expression": "眉と口元に切迫が残る表情",
-                                    "hands": "片手が手すりから離れ、身体の横で開いている",
-                                    "feet": "両足がガラスの靴の三段下で階段下方を向いている",
-                                },
-                                "motion_attention_target": "階段下方の出入口",
-                                "motion_brief": "質素な普段着へ戻ったシンデレラが大階段を三段だけ下り、そのまま階段下方の出入口から画面外へ出る",
-                                "motion_end_state": "階段に片方のガラスの靴が残り、王子が四段上から見下ろし、階段下方の出入口は空いている",
-                            },
-                            "spatial_transition": {
-                                "primary_subject": "王子",
-                                "visible_action": "階段に片方のガラスの靴が残り、王子が四段上からその靴を見下ろしている",
-                                "visible_reaction": "階段下方の出入口は空き、王子の片手は身体の横で止まっている",
-                                "required_visual_evidence": ["階段に残った片方のガラスの靴", "四段上の王子", "空いた階段下方"],
-                                "required_roles": ["prince"],
-                                "retain_carried_character_subjects": False,
-                                "visible_character_state": {
-                                    "gaze": "階段に残ったガラスの靴へ下ろした視線",
-                                    "expression": "驚きと集中が眉に残る表情",
-                                    "hands": "片手が身体の横で止まっている",
-                                    "feet": "両足がガラスの靴の四段上で止まっている",
-                                },
-                                "motion_attention_target": "階段に残った片方のガラスの靴",
-                                "motion_brief": "王子が階段に残った片方のガラスの靴へ三段だけ下りる",
-                                "motion_end_state": "王子がガラスの靴の一段上で止まり、視線を靴へ下ろしている",
-                            },
-                            "time_or_deadline_pressure": {
-                                "primary_subject": "王子",
-                                "required_visual_evidence": ["階段に残った片方のガラスの靴", "一段上の王子", "身体の横で止まった王子の片手"],
-                                "required_roles": ["prince"],
-                                "retain_carried_character_subjects": False,
-                                "visible_character_state": {
-                                    "gaze": "階段に残ったガラスの靴へ下ろした視線",
-                                    "expression": "驚きと集中が眉に残る表情",
-                                    "hands": "片手が身体の横で止まっている",
-                                    "feet": "両足がガラスの靴の一段上で止まっている",
-                                },
-                                "motion_attention_target": "ガラスの靴の踵",
-                                "motion_brief": "王子が階段に残った片方のガラスの靴へ片手を一度だけ伸ばす",
-                                "motion_end_state": "王子の指先がガラスの靴の踵に触れ、視線が靴に留まっている",
-                            },
-                            "reaction_after_change": {
-                                "primary_subject": "王子",
-                                "required_visual_evidence": ["王子の指先が触れたガラスの靴", "階段上の王子", "空いた階段下方"],
-                                "required_roles": ["prince"],
-                                "retain_carried_character_subjects": False,
-                                "visible_character_state": {
-                                    "gaze": "指先が触れたガラスの靴へ下ろした視線",
-                                    "expression": "驚きから探索の決意へ変わる直前の表情",
-                                    "hands": "片手の指先がガラスの靴の踵に触れている",
-                                    "feet": "両足がガラスの靴を拾った段の一段上で止まっている",
-                                },
-                                "motion_attention_target": "ガラスの靴",
-                                "motion_brief": "王子がガラスの靴の踵を握り、階段から胸元まで一度だけ持ち上げる",
-                                "motion_end_state": "王子が片方のガラスの靴を胸元で支え、視線を靴へ向け、靴は階段から離れている",
-                            },
-                        },
-                    },
-                },
-            },
-            8: {
-                "purpose": "王子が靴から起動した探索を王宮の使者が実行し、継母と義姉の排除を退けた試着でシンデレラの身元を公に確認する",
-                "question": "靴合わせの部屋でシンデレラは、隠された名を公に取り戻せるか",
-                "desire": "ガラスの靴が自分のものだと証明されたい",
-                "obstacle": "継母と義姉たちがシンデレラを試着から排除しようとすること、隠された立場、周囲の疑い",
-                "stakes": "靴が合わなければ、舞踏会で得た認識は誰のものか分からないまま失われる",
-                "turn": "王宮の使者が排除を退けてシンデレラにも試着させ、ガラスの靴の適合を証人の前で公に確認する",
-                "payoff": "靴、足、王宮の使者と証人の視線が一致し、シンデレラの名と価値が公に戻る",
-                "handoff": "ガラスの靴を履いた足と、それを見届ける王宮の使者・継母・義姉たちの視線",
-                "pressure_source": "継母と義姉たち",
-                "turn_motion_target": "足に合うガラスの靴",
-                "payoff_focus": "足に合うガラスの靴",
-                "pressure": ["ガラスの靴", "王宮の使者", "継母と義姉たちの排除", "証人の視線"],
-            },
-        }
-        if canonical_index in scene_specifics:
-            spec = dict(scene_specifics[canonical_index])
-            segment_contract = _cinderella_segment_contract(canonical_index, segment_position, segment_count)
-            beat_overrides = deepcopy(spec.get("beat_overrides") or {})
-            projected_source_events = source_events
-            projected_source_summary = source_summary
-            projected_incoming_trigger = (
-                source_events[0] if source_events else spec["pressure"][0]
-            )
-            value_from = "家や周囲に役割を押しつけられている状態"
-            value_to = (
-                "名と選択の根拠が画面内の物証として強まる状態"
-                if not is_terminal
-                else "ガラスの靴によって名と価値が公に証明された状態"
-            )
-            value_evidence = list(
-                dict.fromkeys(
-                    [
-                        *spec["pressure"],
-                        protagonist,
-                        *([artifact] if include_artifact else []),
-                    ]
-                )
-            )[:6]
-            if segment_count > 1:
-                allowed_segment_locations = set(_scene_location_sequence(profile, idx))
-                beat_function_order = ("setup", "pressure", "turn", "payoff")
-                allowed_segment_functions = {
-                    beat_function_order[int(beat_id.rsplit("B", 1)[-1]) - 1]
-                    for beat_id in segment_contract["beat_ids"]
-                    if beat_id.rsplit("B", 1)[-1].isdigit()
-                    and 1 <= int(beat_id.rsplit("B", 1)[-1]) <= len(beat_function_order)
-                }
-                beat_overrides = _project_beat_overrides_to_segment_locations(
-                    beat_overrides,
-                    allowed_locations=allowed_segment_locations,
-                    allowed_functions=allowed_segment_functions,
-                )
-                segment_note = f"{segment_role}区間 {segment_position}/{segment_count}"
-                base_turn = spec["turn"]
-                base_payoff = spec["payoff"]
-                spec["question"] = f"{segment_contract['responsibility']}を、{segment_note}の固有責務として完了できるか"
-                spec["turn"] = f"{segment_contract['last_action']}直後の人物の姿勢、手元、物の位置が同じ画面で読める"
-                if segment_position == segment_count:
-                    spec["turn"] = f"{spec['turn']}。その結果、{base_turn}"
-                    spec["payoff"] = base_payoff
-                else:
-                    spec["payoff"] = f"{segment_contract['last_action']}後の物理的な痕跡と、人物がまだ使っていない画面奥の導線が残る"
-                spec["handoff"] = f"{segment_contract['last_action']}後の人物の姿勢、手元、物の位置が画面内に残る"
-                # Segment actions are event clauses, not drawable physical
-                # anchors.  Keep them in the segment responsibility / turn /
-                # handoff fields above, and preserve ``pressure`` as the
-                # noun-valued evidence used to compose still and motion text.
-                # Mixing the two produced phrases such as
-                # ``床と炉を掃除するのそば`` in duration-expanded runs.
-                projected_source_summary = segment_contract["responsibility"]
-                projected_source_events = [
-                    _CINDERELLA_SEGMENT_BEATS[canonical_index][
-                        int(beat_id.rsplit("B", 1)[-1]) - 1
-                    ]
-                    for beat_id in segment_contract["beat_ids"]
-                ]
-                projected_incoming_trigger = segment_contract["first_action"]
-                spec["purpose"] = (
-                    f"{segment_contract['responsibility']}だけをこの runtime scene の"
-                    "因果として成立させる"
-                )
-                spec["obstacle"] = (
-                    f"{segment_contract['responsibility']}を進める間の、"
-                    "人物間の距離と手元の物理的な制約"
-                )
-                if canonical_index != 1:
-                    spec["pressure"] = _event_visual_evidence_terms(
-                        segment_contract["responsibility"],
-                        profile,
-                        include_artifact=include_artifact,
-                    )
-                spec["pressure_source"] = spec["pressure"][0]
-                spec["turn_motion_target"] = spec["pressure"][-1]
-                spec["payoff_focus"] = spec["pressure"][-1]
-                value_from = (
-                    f"{segment_contract['first_action']}が起きる直前の、"
-                    "人物・手元・小道具がまだ変化していない状態"
-                )
-                value_to = (
-                    f"{segment_contract['last_action']}が完了し、"
-                    "その直後の姿勢・手元・物の位置が画面内に残る状態"
-                )
-                value_evidence = list(
-                    dict.fromkeys(
-                        [
-                            location_name,
-                            protagonist,
-                            *spec["pressure"],
-                            *([artifact] if include_artifact else []),
-                        ]
-                    )
-                )[:6]
-            return {
-                "source_events": projected_source_events,
-                "research_refs": _downstream_scene_research_refs(idx, source_events, profile),
-                "semantic_scene_responsibility_id": segment_contract["responsibility_id"],
-                "segment_beat_ids": segment_contract["beat_ids"],
-                "segment_responsibility": segment_contract["responsibility"],
-                "dramatic_question": spec["question"],
-                "story_purpose": spec.get("purpose") or f"{title}で、シンデレラの出来事「{projected_source_summary}」を映像上の因果へ変換する",
-                "scene_spine": f"{spec['desire']} / {spec['obstacle']} / {spec['turn']}",
-                "desire": spec["desire"],
-                "obstacle": spec["obstacle"],
-                "stakes": spec["stakes"],
-                "escalation": f"{projected_source_summary}が、{', '.join(spec['pressure'][:2])}によって逃げ場のない選択へ狭まる",
-                "no_return_point": spec["turn"],
-                "visible_pressure": spec["pressure"],
-                "pressure_source": spec["pressure_source"],
-                "pressure_source_visible_from": spec.get(
-                    "pressure_source_visible_from", "setup"
-                ),
-                "turn_motion_target": spec.get(
-                    "turn_motion_target", spec["pressure"][0]
-                ),
-                "payoff_focus": spec.get("payoff_focus", spec["pressure"][0]),
-                "beat_overrides": beat_overrides,
-                "causal_turn": spec["turn"],
-                "payoff": spec["payoff"],
-                "handoff_anchor": spec["handoff"],
-                "incoming_trigger": f"{previous_title}から渡る物理的原因: {projected_incoming_trigger}",
-                "outgoing_pressure": "終端" if is_terminal else f"{spec['handoff']}が{next_title}の開始圧になる",
-                "value_from": value_from,
-                "value_to": value_to,
-                "visible_evidence": value_evidence,
-                "character_start": f"{protagonist}は{location_name}で、{spec['obstacle']}に押し返されている",
-                "character_end": f"{protagonist}は{spec['turn']}の後、次の出来事を始める物的根拠を残している",
-                "story_terms": list(dict.fromkeys([protagonist, artifact, location_name, *spec["pressure"]]))[:8],
-            }
     return {
         "source_events": source_events,
         "research_refs": _downstream_scene_research_refs(idx, source_events, profile),
@@ -6825,7 +4721,6 @@ def _scene_blueprint(
         "character_end": f"{protagonist}は{primary_evidence}を残し、後続場面を始める原因を持つ",
         "story_terms": list(dict.fromkeys([protagonist, artifact, location_name, *evidence_terms]))[:8],
     }
-
 
 def _canonical_event_coverage_matrix(
     profile: dict[str, Any],
@@ -7148,7 +5043,7 @@ def _event_visual_evidence_terms(event_text: str, profile: dict[str, Any], *, in
         (("助力", "魔法", "変身", "偶然", "記憶"), ["助力の発生源", "変化前後の差"]),
         (("境界", "越え", "出発", "向かう", "旅", "移動"), ["越えるべき境界", "進む先が分かる導線"]),
         (("視線", "踊", "認識", "中心", "知らない姿"), ["見届ける人物の視線", "主人公が場の中心に置かれた構図"]),
-        (("時間", "真夜中", "鐘", "追跡", "逃", "失"), ["期限を示す時計", "急ぐ身体と失われる証拠"]),
+        (("時間", "鐘", "追跡", "逃", "失"), ["期限を示す時計", "急ぐ身体と失われる証拠"]),
         (("探", "巡", "手がかり", "証"), ["持ち込まれた証", "証拠を見る視線"]),
         (("合い", "明らか", "証明", "価値", "身元", "解放", "帰還"), ["証と身体の一致", "見届ける人物の受容"]),
     ]
@@ -7172,8 +5067,8 @@ def _event_required_roles(event_text: str) -> list[str]:
         (("拒", "妨げ", "支配", "押しつけ", "敵", "鬼"), "opponent"),
         (("助力", "魔法", "偶然", "導く", "記憶"), "helper"),
         (("見", "視線", "証", "明らか", "認識", "受容"), "witness"),
-        (("王", "宮殿", "使者", "公", "裁き", "村", "家々"), "authority_or_community"),
-        (("偽", "失敗", "義姉", "競争", "候補"), "contrast_or_false_claimant"),
+        (("王", "宮殿", "公", "裁き", "村", "家々"), "authority_or_community"),
+        (("偽", "失敗", "競争", "候補"), "contrast_or_false_claimant"),
     ]
     for keywords, role in role_rules:
         if any(keyword in event_text for keyword in keywords) and role not in roles:
@@ -7192,8 +5087,6 @@ def _visible_character_role_ids(
     roles: list[str] = []
     protagonist_names = {
         str(profile.get("protagonist_name") or "").strip(),
-        "変身後のシンデレラ" if _profile_is_cinderella(profile) else "",
-        "魔法が解けた後のシンデレラ" if _profile_is_cinderella(profile) else "",
     }
     if primary_subject in protagonist_names or any(
         name and name in visible_text for name in protagonist_names
@@ -7323,8 +5216,6 @@ STORY_FUNCTION_BY_ELEMENT_TYPE = {
 
 
 def _source_origin_for_profile(profile: dict[str, Any]) -> str:
-    if _profile_is_cinderella(profile):
-        return "canonical_reference"
     return "user_input"
 
 
@@ -7352,7 +5243,7 @@ def _story_specificity_layers(
             "required_elements": ["主人公を妨げる力", "主人公を見届ける視線"],
         },
         "object_specificity": {
-            "description": "物語上の小道具、証拠、呪い、鍵、手紙、靴などの機能",
+            "description": "物語上の小道具、証拠、呪い、鍵、手紙などの機能",
             "required_elements": [artifact] if include_artifact else [f"{artifact}は後続revealとして伏せる"],
         },
         "location_specificity": {
@@ -7553,15 +5444,15 @@ def _cut_required_roles_for_obligation(obligation: dict[str, Any]) -> list[str]:
         for key in ("screen_question", "dramatic_job", "visual_proof", "first_frame_brief", "foreground", "midground", "background")
     )
     roles = ["protagonist"]
-    if any(word in joined for word in ("妨げ", "拒", "閉ざ", "支配", "敵", "義姉", "継母")):
+    if any(word in joined for word in ("妨げ", "拒", "閉ざ", "支配", "敵")):
         roles.append("opponent")
     if any(word in joined for word in ("助力", "導く", "魔法", "光が届", "月光")):
         roles.append("helper")
     if any(word in joined for word in ("視線", "見届け", "受容", "認識", "群衆")):
         roles.append("witness")
-    if any(word in joined for word in ("宮殿", "王子", "使者", "公的", "社会", "部屋の人物")):
+    if any(word in joined for word in ("宮殿", "公的", "社会", "部屋の人物")):
         roles.append("authority_or_community")
-    if any(word in joined for word in ("偽", "候補", "義姉", "失敗")):
+    if any(word in joined for word in ("偽", "候補", "失敗")):
         roles.append("contrast_or_false_claimant")
     return list(dict.fromkeys(roles))
 
@@ -7846,7 +5737,6 @@ def _scene_intent_for_cut_design(
 ) -> dict[str, Any]:
     is_terminal = idx == len(profile["scene_titles"])
     canonical_index = _canonical_scene_index(profile, idx)
-    _segment_position, segment_count, _segment_role = _scene_segment(profile, idx)
     artifact_has_been_revealed = idx >= _artifact_first_scene_index(profile)
     story_event_obligations = _story_event_obligations_for_scene(
         title=title,
@@ -7867,29 +5757,11 @@ def _scene_intent_for_cut_design(
         idx=idx,
     )
     visible_evidence = list(blueprint["visible_evidence"])
-    if _profile_is_cinderella(profile) and segment_count == 1:
-        if canonical_index == 4:
-            visible_evidence.extend(["馬車", "乗車/出発", "門前から宮殿へ向かう導線"])
-        elif canonical_index == 5:
-            visible_evidence.extend(["宮殿階段の境界", "階段上の移動方向", "周囲の視線"])
-        elif canonical_index == 6:
-            visible_evidence.extend(["王子", "群衆の視線", "踊りが成立する瞬間"])
-        elif canonical_index == 7:
-            visible_evidence.extend(["真夜中の合図", "逃走する身体", "脱げて階段に残るガラスの靴"])
     audience_information = [f"{title}の場所と主人公の現在位置", "主人公が何に妨げられているか"]
     if canonical_index in {2, 5, 6}:
         audience_information.append("周囲の視線や場のルール")
     if canonical_index in {4, 7}:
         audience_information.append("移動や時間制限によって状況が変わること")
-    if _profile_is_cinderella(profile) and segment_count == 1:
-        if canonical_index == 4:
-            audience_information.extend(["馬車が待っていること", "主人公が宮殿へ出発すること"])
-        elif canonical_index == 5:
-            audience_information.extend(["宮殿に入る境界", "舞踏会へ接続する階段上の動き"])
-        elif canonical_index == 6:
-            audience_information.extend(["王子の存在", "群衆が主人公を認識していること"])
-        elif canonical_index == 7:
-            audience_information.extend(["真夜中の鐘", "ガラスの靴が残ること"])
     withheld_information = [] if artifact_has_been_revealed else [profile["artifact_name"]]
     if canonical_index == 7:
         withheld_information.append("時間制限の結果")
@@ -7898,15 +5770,6 @@ def _scene_intent_for_cut_design(
         reveal_constraints = ["終端後の新しい解決や別の証拠を足さない"]
     value_to = str(blueprint["value_to"])
     causal_turn = str(blueprint["causal_turn"])
-    if _profile_is_cinderella(profile) and segment_count == 1:
-        if canonical_index == 4:
-            causal_turn = "馬車へ乗り込み、門前から宮殿へ出発することで物語が公的な場へ進む"
-        elif canonical_index == 5:
-            causal_turn = "宮殿階段を進み、公的な舞踏会の空間へ入ることで認識の試練へ進む"
-        elif canonical_index == 6:
-            causal_turn = "王子と群衆の視線の中で、主人公が場の中心として認識される"
-        elif canonical_index == 7:
-            causal_turn = "真夜中の合図で逃走し、脱げて階段に残ったガラスの靴が靴合わせへ因果を渡す"
     if is_terminal:
         causal_turn = str(blueprint["causal_turn"])
     reviewed_turn = str(_reviewed_story_scene(profile, idx).get("turn") or "").strip()
@@ -7922,7 +5785,7 @@ def _scene_intent_for_cut_design(
         if is_terminal
         else f"{location_spec['name']}の前景/中景/背景と出口方向を固定する"
     )
-    return {
+    intent = {
         "story_purpose": blueprint["story_purpose"],
         "scene_value_amplification": _scene_value_amplification_for_profile(
             profile=profile,
@@ -8060,263 +5923,19 @@ def _scene_intent_for_cut_design(
         "handoff_to_next_scene": f"{title}の出口側に残る光と人物の視線が、まだ画面内の導線を指す" if not is_terminal else "",
         "terminal_resolution": f"{profile['artifact_name']}が主人公の価値を証明する" if is_terminal else "",
     }
+    authored_scene = _reviewed_story_scene(profile, idx)
+    for key in ("start_state", "end_state", "handoff_chain", "preservation", "reveal_contract"):
+        if isinstance(authored_scene.get(key), dict):
+            intent[key] = deepcopy(authored_scene[key])
+    intent["authored_scene_id"] = str(authored_scene.get("scene_id") or "").strip()
+    return intent
 
 
-def _cinderella_segment_cast(
-    *,
-    profile: dict[str, Any],
-    canonical_index: int,
-    segment_beat_id: str,
-    protagonist: str,
-    fallback_primary_subject: str,
-) -> tuple[list[str], str, list[str]]:
-    """Resolve deterministic cast metadata that cannot be inferred from prose."""
-
-    beat_number = int(segment_beat_id.rsplit("B", 1)[-1])
-    required_roles = list(
-        _CINDERELLA_SEGMENT_BEAT_ROLES[canonical_index][beat_number - 1]
-    )
-    primary_role = _CINDERELLA_SEGMENT_BEAT_PRIMARY_ROLES[canonical_index][
-        beat_number - 1
-    ]
-    supporting_specs = _supporting_character_asset_specs(profile)
-    if primary_role == "protagonist":
-        primary_subject = protagonist
-    else:
-        supporting_spec = next(
-            (
-                spec
-                for spec in supporting_specs
-                if str(spec.get("source_character_id") or "") == primary_role
-            ),
-            {},
-        )
-        primary_subject = str(
-            supporting_spec.get("name") or fallback_primary_subject
-        )
-    participant_names = [
-        *([protagonist] if "protagonist" in required_roles else []),
-        *[
-            str(spec.get("name") or "")
-            for spec in supporting_specs
-            if str(spec.get("source_character_id") or "") in required_roles
-        ],
-    ]
-    return required_roles, primary_subject, participant_names
 
 
-def _cinderella_segment_event_projection(
-    *,
-    profile: dict[str, Any],
-    canonical_index: int,
-    segment_beat_id: str,
-    segment_beat: str,
-    protagonist: str,
-    fallback_primary_subject: str,
-    beat_override: dict[str, Any],
-    semantic_segment: dict[str, Any],
-    beat_location_name: str,
-    artifact: str,
-    artifact_visible_in_beat: bool,
-    authored_obligation_overrides: dict[str, Any],
-) -> dict[str, Any]:
-    """Project one owned duration beat without importing sibling semantics."""
-
-    authored_override_is_applicable = (
-        segment_beat_id not in _CINDERELLA_MISALIGNED_SEGMENT_OVERRIDE_IDS
-    )
-    required_roles, primary_subject, participant_names = (
-        _cinderella_segment_cast(
-            profile=profile,
-            canonical_index=canonical_index,
-            segment_beat_id=segment_beat_id,
-            protagonist=protagonist,
-            fallback_primary_subject=fallback_primary_subject,
-        )
-    )
-    authored_visible_action = str(
-        beat_override.get("visible_action")
-        or semantic_segment.get("visible_action")
-        or ""
-    ).strip()
-    authored_visible_reaction = str(
-        beat_override.get("visible_reaction")
-        or semantic_segment.get("visible_reaction")
-        or ""
-    ).strip()
-    visible_action = (
-        authored_visible_action
-        if authored_override_is_applicable and authored_visible_action
-        else segment_beat
-    )
-    visible_reaction = (
-        authored_visible_reaction
-        if authored_override_is_applicable and authored_visible_reaction
-        else " / ".join(
-            f"{name}が{primary_subject}と出来事直後の距離を保ち、"
-            "自分の視線と手元を結果へ向けている"
-            for name in participant_names
-            if name and name != primary_subject
-        )
-        or f"{primary_subject}の手元と足元に出来事の結果が残る"
-    )
-    authored_evidence = [
-        str(item).strip()
-        for item in (
-            beat_override.get("required_visual_evidence")
-            or semantic_segment.get("required_visual_evidence")
-            or []
-        )
-        if str(item).strip()
-    ]
-    visual_evidence = list(
-        dict.fromkeys(
-            [
-                beat_location_name,
-                *[name for name in participant_names if name],
-                *(authored_evidence if authored_override_is_applicable else []),
-                *([artifact] if artifact_visible_in_beat else []),
-            ]
-        )
-    )[:6]
-    authored_character_state = (
-        beat_override.get("visible_character_state")
-        or semantic_segment.get("visible_character_state")
-    )
-    visible_character_state = (
-        deepcopy(authored_character_state)
-        if authored_override_is_applicable
-        and isinstance(authored_character_state, dict)
-        and authored_character_state
-        else {
-            "posture": visible_action,
-            "gaze": visible_reaction,
-            "expression": "この出来事の結果を受けた表情",
-            "hands": f"{segment_beat}の結果が{primary_subject}の手元に見える",
-            "feet": f"{segment_beat}の結果が{primary_subject}の足元と重心に見える",
-        }
-    )
-    motion_attention_target = (
-        str(
-            beat_override.get("motion_attention_target")
-            or semantic_segment.get("motion_attention_target")
-            or beat_location_name
-        ).strip()
-        if authored_override_is_applicable
-        else beat_location_name
-    )
-    motion_brief = (
-        str(
-            beat_override.get("motion_brief")
-            or semantic_segment.get("motion_brief")
-            or segment_beat
-        ).strip()
-        if authored_override_is_applicable
-        else segment_beat
-    )
-    motion_end_state = (
-        str(
-            beat_override.get("motion_end_state")
-            or semantic_segment.get("motion_end_state")
-            or f"{segment_beat}の完了結果が画面内に残っている"
-        ).strip()
-        if authored_override_is_applicable
-        else f"{segment_beat}の完了結果が画面内に残っている"
-    )
-    local_obligation_fields = {
-        "primary_subject": primary_subject,
-        "required_visual_evidence": visual_evidence,
-        "required_roles": required_roles,
-        "visible_action": visible_action,
-        "visible_reaction": visible_reaction,
-        "visible_character_state": visible_character_state,
-        "first_frame_brief": (
-            f"{beat_location_name}。{', '.join(participant_names)}が"
-            "この出来事の直後の位置で止まっている。"
-        ),
-        "static_first_frame_rule": (
-            f"動作説明ではなく、{beat_location_name}で"
-            "この event beat の人物・手元・証拠だけが読める静止状態にする"
-        ),
-    }
-    local_fields = {
-        "what_happens",
-        "primary_subject",
-        "required_visual_evidence",
-        "required_roles",
-        "visible_action",
-        "visible_reaction",
-        "visible_character_state",
-        "motion_attention_target",
-        "motion_brief",
-        "motion_end_state",
-        "first_frame_brief",
-        "static_first_frame_rule",
-        "foreground",
-        "midground",
-        "background",
-        "environment_motion",
-        "emotional_change",
-        "first_frame_character_asset_overrides",
-        "first_frame_excluded_object_ids",
-        "allowed_new_reveal_elements",
-        "allowed_reveal_info_ids",
-        "use_next_cut_first_frame_as_last_frame",
-    }
-    obligation_overrides = deepcopy(authored_obligation_overrides)
-    if not authored_override_is_applicable:
-        obligation_overrides = {
-            obligation_id: {
-                **{
-                    key: deepcopy(value)
-                    for key, value in raw_override.items()
-                    if key not in local_fields
-                },
-                **local_obligation_fields,
-            }
-            for obligation_id, raw_override in obligation_overrides.items()
-            if isinstance(raw_override, dict)
-        }
-    if "causal_handoff" not in obligation_overrides:
-        causal_motion_brief = motion_brief
-        causal_motion_end_state = motion_end_state
-        authored_motion_pairs = {
-            (
-                str(raw_override.get("motion_brief") or "").strip(),
-                str(raw_override.get("motion_end_state") or "").strip(),
-            )
-            for raw_override in obligation_overrides.values()
-            if isinstance(raw_override, dict)
-        }
-        if (
-            causal_motion_brief,
-            causal_motion_end_state,
-        ) in authored_motion_pairs:
-            causal_motion_brief = segment_beat
-            causal_motion_end_state = (
-                f"{segment_beat}の完了結果が画面内に残っている"
-            )
-        obligation_overrides["causal_handoff"] = {
-            **local_obligation_fields,
-            "motion_attention_target": motion_attention_target,
-            "motion_brief": causal_motion_brief,
-            "motion_end_state": causal_motion_end_state,
-        }
-    return {
-        "required_roles": required_roles,
-        "primary_subject": primary_subject,
-        "visual_evidence": visual_evidence,
-        "visible_action": visible_action,
-        "visible_reaction": visible_reaction,
-        "visible_character_state": visible_character_state,
-        "motion_attention_target": motion_attention_target,
-        "motion_brief": motion_brief,
-        "motion_end_state": motion_end_state,
-        "obligation_overrides": obligation_overrides,
-    }
 
 
-def _scene_event_for_cut_design(
+def _legacy_scene_event_for_cut_design(
     *,
     title: str,
     idx: int,
@@ -8510,28 +6129,6 @@ def _scene_event_for_cut_design(
         if isinstance(blueprint.get("beat_overrides"), dict)
         else {}
     )
-    owned_cinderella_beat_by_function: dict[str, str] = {}
-    owned_cinderella_beat_id_by_function: dict[str, str] = {}
-    segment_position, segment_count, _segment_role = _scene_segment(profile, idx)
-    if _profile_is_cinderella(profile) and segment_count > 1:
-        canonical_index = _canonical_scene_index(profile, idx)
-        segment_contract = _cinderella_segment_contract(
-            canonical_index,
-            segment_position,
-            segment_count,
-        )
-        for beat_id in segment_contract["beat_ids"]:
-            beat_number_text = str(beat_id).rsplit("B", 1)[-1]
-            if not beat_number_text.isdigit():
-                continue
-            beat_number = int(beat_number_text)
-            if not 1 <= beat_number <= len(beat_specs):
-                continue
-            beat_function = beat_specs[beat_number - 1][0]
-            owned_cinderella_beat_by_function[beat_function] = (
-                _CINDERELLA_SEGMENT_BEATS[canonical_index][beat_number - 1]
-            )
-            owned_cinderella_beat_id_by_function[beat_function] = str(beat_id)
     artifact_was_revealed = any(
         _scene_artifact_state(profile, prior_scene_index)
         in {"focal", "carried"}
@@ -8546,15 +6143,6 @@ def _scene_event_for_cut_design(
         consequence,
         pressure,
     ) in enumerate(beat_specs):
-        if (
-            owned_cinderella_beat_by_function
-            and function not in owned_cinderella_beat_by_function
-        ):
-            continue
-        owned_segment_beat = owned_cinderella_beat_by_function.get(function, "")
-        owned_segment_beat_id = owned_cinderella_beat_id_by_function.get(
-            function, ""
-        )
         raw_function_override = (
             raw_beat_overrides.get(function)
             if isinstance(raw_beat_overrides.get(function), dict)
@@ -8609,14 +6197,10 @@ def _scene_event_for_cut_design(
                 or semantic_segment.get("visible_reaction")
                 or visible_reaction
             )
-        if owned_segment_beat:
-            what_happens = owned_segment_beat
         artifact_visible_in_beat = bool(
             include_artifact
             and (
-                artifact in owned_segment_beat
-                if owned_segment_beat
-                else semantic_segment
+                semantic_segment
                 or beat_override
                 or function in {"turn", "payoff"}
             )
@@ -8799,39 +6383,8 @@ def _scene_event_for_cut_design(
             if isinstance(beat_override.get("obligation_overrides"), dict)
             else {}
         )
-        if owned_segment_beat:
-            segment_projection = _cinderella_segment_event_projection(
-                profile=profile,
-                canonical_index=canonical_index,
-                segment_beat_id=owned_segment_beat_id,
-                segment_beat=owned_segment_beat,
-                protagonist=protagonist,
-                fallback_primary_subject=primary_subject,
-                beat_override=beat_override,
-                semantic_segment=semantic_segment,
-                beat_location_name=beat_location_name,
-                artifact=artifact,
-                artifact_visible_in_beat=artifact_visible_in_beat,
-                authored_obligation_overrides=obligation_overrides,
-            )
-            required_roles = segment_projection["required_roles"]
-            primary_subject = segment_projection["primary_subject"]
-            visual_evidence_for_beat = segment_projection["visual_evidence"]
-            visible_action = segment_projection["visible_action"]
-            visible_reaction = segment_projection["visible_reaction"]
-            visible_character_state = segment_projection[
-                "visible_character_state"
-            ]
-            motion_attention_target = segment_projection[
-                "motion_attention_target"
-            ]
-            motion_brief = segment_projection["motion_brief"]
-            motion_end_state = segment_projection["motion_end_state"]
-            obligation_overrides = segment_projection["obligation_overrides"]
         visible_character_state_source = (
-            "duration_segment_contract"
-            if owned_segment_beat
-            else "beat_override"
+            "beat_override"
             if isinstance(beat_override.get("visible_character_state"), dict)
             and beat_override.get("visible_character_state")
             else (
@@ -8856,10 +6409,10 @@ def _scene_event_for_cut_design(
                 "source_story_beat_ids": [source_story_beat_id],
                 "abstract_function": {
                     "dramatic_job": f"{title}の{function}として見る側の理解を一段進める",
-                    "value_shift_role": (
-                        f"{owned_segment_beat}の直後に生じた局所状態を固定する"
-                        if owned_segment_beat
-                        else str(scene_intent.get("value_shift", {}).get("to") if isinstance(scene_intent.get("value_shift"), dict) else "状態差を物証で進める")
+                    "value_shift_role": str(
+                        scene_intent.get("value_shift", {}).get("to")
+                        if isinstance(scene_intent.get("value_shift"), dict)
+                        else "状態差を物証で進める"
                     ),
                     "emotional_pressure_role": pressure,
                     "causal_role": consequence,
@@ -8869,11 +6422,7 @@ def _scene_event_for_cut_design(
                     "primary_subject": primary_subject,
                     "where": beat_location_name,
                     "what_happens": source_event_text,
-                    "conflict_or_constraint": (
-                        f"{owned_segment_beat}を進める間の、人物間の距離と手元の物理的な制約"
-                        if owned_segment_beat
-                        else blueprint["obstacle"]
-                    ),
+                    "conflict_or_constraint": blueprint["obstacle"],
                     "object_or_trace": (
                         [artifact]
                         if artifact_continuity_state == "focal"
@@ -9005,6 +6554,148 @@ def _scene_event_for_cut_design(
         "forbidden_event_changes": [str(item) for item in scene_intent.get("reveal_constraints", []) if str(item).strip()] or ["scene_eventにない結末や新事実を追加しない"],
         "specificity_budget": _specificity_budget(),
     }
+
+
+def _scene_event_for_cut_design(
+    *,
+    title: str,
+    idx: int,
+    scene_intent: dict[str, Any],
+    location_name: str,
+    location_id: str = "",
+    profile: dict[str, Any],
+    include_artifact: bool,
+) -> dict[str, Any]:
+    """Project authored lifecycle beats without replacing their semantics.
+
+    The legacy compiler still supplies downstream production-only fields such
+    as drawable evidence and motion boundaries. For story_scene_contract_v1,
+    however, beat identity, order, function, event text, state, turn, and
+    handoff remain owned by story.md and are overlaid after enrichment.
+    """
+
+    projected = _legacy_scene_event_for_cut_design(
+        title=title,
+        idx=idx,
+        scene_intent=scene_intent,
+        location_name=location_name,
+        location_id=location_id,
+        profile=profile,
+        include_artifact=include_artifact,
+    )
+    authored_scene = _reviewed_story_scene(profile, idx)
+    authored_beats = authored_scene.get("event_sequence")
+    if not isinstance(authored_beats, list) or not authored_beats:
+        return projected
+
+    templates = [
+        beat
+        for beat in projected.get("event_sequence", [])
+        if isinstance(beat, dict)
+    ]
+    if not templates:
+        raise RuntimeError(f"scene{idx}: legacy enrichment produced no beat template")
+    enriched_beats: list[dict[str, Any]] = []
+    research_refs = list(authored_scene.get("research_refs") or projected.get("research_refs") or [])
+    for beat_index, authored in enumerate(authored_beats):
+        if not isinstance(authored, dict):
+            raise RuntimeError(f"scene{idx}: authored event_sequence contains a non-object beat")
+        template = deepcopy(templates[min(beat_index, len(templates) - 1)])
+        beat_id = str(authored.get("beat_id") or "").strip()
+        beat_function = str(authored.get("beat_function") or "").strip()
+        what_happens = str(authored.get("what_happens") or "").strip()
+        visible_action = str(authored.get("visible_action") or what_happens).strip()
+        visible_reaction = str(
+            authored.get("visible_reaction")
+            or template.get("visible_reaction")
+            or "場所と人物の状態が行為後の配置に変わる"
+        ).strip()
+        consequence = str(authored.get("immediate_consequence") or "").strip()
+        motion_brief = str(
+            authored.get("motion_brief")
+            or f"{visible_action}を発生させる一つの行為を行う（{beat_id}）"
+        ).strip()
+        motion_end_state = str(
+            authored.get("motion_end_state")
+            or f"{consequence}が画面上の結果として残る（{beat_id}）"
+        ).strip()
+        evidence = [
+            str(value).strip()
+            for value in authored.get("required_visual_evidence") or []
+            if str(value).strip()
+        ] or list(template.get("required_visual_evidence") or [])
+        required_roles = [
+            str(value).strip()
+            for value in (
+                authored.get("participants")
+                or authored.get("character_ids")
+                or template.get("required_roles")
+                or []
+            )
+            if str(value).strip()
+        ]
+        template.update(deepcopy(authored))
+        template.update(
+            {
+                "beat_id": beat_id,
+                "beat_function": beat_function,
+                "what_happens": what_happens,
+                "visible_action": visible_action,
+                "visible_reaction": visible_reaction,
+                "immediate_consequence": consequence,
+                "required_visual_evidence": evidence,
+                "required_roles": required_roles,
+                "motion_brief": motion_brief,
+                "motion_end_state": motion_end_state,
+            }
+        )
+        concrete_event = deepcopy(template.get("concrete_event") or {})
+        concrete_event.update(
+            {
+                "what_happens": what_happens,
+                "visible_action": visible_action,
+                "visible_reaction": visible_reaction,
+                "immediate_consequence": consequence,
+                "required_visual_evidence": evidence,
+                "motion_brief": motion_brief,
+                "motion_end_state": motion_end_state,
+            }
+        )
+        if required_roles:
+            concrete_event["who"] = required_roles
+        template["concrete_event"] = concrete_event
+        grounding = deepcopy(template.get("story_grounding") or {})
+        grounding["research_refs"] = research_refs
+        grounding["source_text_or_summary"] = what_happens
+        template["story_grounding"] = grounding
+        enriched_beats.append(template)
+
+    authored_turn = (
+        authored_scene.get("turning_event")
+        if isinstance(authored_scene.get("turning_event"), dict)
+        else {}
+    )
+    projected["event_sequence"] = enriched_beats
+    projected["turning_event"] = {
+        **deepcopy(projected.get("turning_event") or {}),
+        **deepcopy(authored_turn),
+        "source_event_beat_id": str(
+            authored_turn.get("beat_id")
+            or authored_turn.get("source_event_beat_id")
+            or ""
+        ).strip(),
+        "irreversible_change": str(
+            authored_turn.get("irreversible_change")
+            or authored_turn.get("change")
+            or scene_intent.get("causal_turn")
+            or ""
+        ).strip(),
+    }
+    for key in ("start_state", "end_state", "handoff_chain", "preservation", "reveal_contract"):
+        if isinstance(authored_scene.get(key), dict):
+            projected[key] = deepcopy(authored_scene[key])
+    projected["authored_scene_id"] = str(authored_scene.get("scene_id") or "").strip()
+    return projected
 
 
 def _story_event_obligations_from_scene_event(scene_event: dict[str, Any]) -> list[dict[str, Any]]:
@@ -9310,13 +7001,13 @@ def _scene_cut_coverage_plan(
                     {
                         "cut_function": "payoff",
                         "source": "causal_turn/terminal_resolution",
-                        "target_beat": f"{title}: {artifact}、{protagonist}の足元、周囲の視線を同時に見せる",
+                        "target_beat": f"{title}: {artifact}、{protagonist}の現在位置、周囲の視線を同時に見せる",
                         "screen_question": f"{title}の終わりに、何が主人公の価値を証明するのか",
-                        "dramatic_job": "前景の靴、主人公の足、見守る人物の視線、部屋の光を一枚に固定する",
-                        "visual_proof": f"前景の{artifact}、それに足を添えた{protagonist}、見守る人物の視線、{location_name}の光が同時に見える",
-                        "first_frame_brief": f"{protagonist}は肩の緊張をほどき、{artifact}に足を添えている。前景の靴から彼女の顔へ光が集まり、周囲の人物は彼女へ視線を向けている。",
+                        "dramatic_job": "前景の証拠、主人公の現在位置、見守る人物の視線、部屋の光を一枚に固定する",
+                        "visual_proof": f"前景の{artifact}、それと関係する{protagonist}、見守る人物の視線、{location_name}の光が同時に見える",
+                        "first_frame_brief": f"{protagonist}は肩の緊張をほどき、{artifact}との関係が読める位置にいる。前景の証拠から主人公の顔へ光が集まり、周囲の人物は主人公へ視線を向けている。",
                         "must_show_extra": [artifact],
-                        "done_when": "前景の靴、主人公の足、見守る人物の視線、部屋の光が一枚で見える",
+                        "done_when": "前景の証拠、主人公の現在位置、見守る人物の視線、部屋の光が一枚で見える",
                         "foreground": artifact,
                         "background": f"{location_name}の閉じた光",
                         "screen_direction": "resolution_visible",
@@ -9410,7 +7101,7 @@ def _scene_cut_coverage_plan(
             )
         )
 
-    if (withheld_information or reveal_constraints) and not include_artifact and not _profile_is_cinderella(profile):
+    if (withheld_information or reveal_constraints) and not include_artifact:
         withheld = withheld_information[0] if withheld_information else reveal_constraints[0]
         append_unique(
             extra_obligation(
@@ -9917,24 +7608,17 @@ def _scene_cut_coverage_plan(
                 if str(item).strip()
             )
         )
-        if _profile_is_cinderella(profile):
-            event_role_ids = list(
-                dict.fromkeys(
-                    str(item).strip()
-                    for item in beat.get("required_roles", [])
-                    if str(item).strip()
-                )
-            )
-            role_ids = [role_id for role_id in role_ids if role_id in event_role_ids]
-            if not role_ids:
-                role_ids = event_role_ids
         motion_brief = _drawable_phrase_for_scaffold(
-            beat.get("motion_brief")
+            obligation_override.get("motion_brief")
+            or obligation.get("motion_brief")
+            or beat.get("motion_brief")
             or concrete.get("motion_brief")
             or visible_action
         )
         motion_end_state = _drawable_phrase_for_scaffold(
-            beat.get("motion_end_state")
+            obligation_override.get("motion_end_state")
+            or obligation.get("motion_end_state")
+            or beat.get("motion_end_state")
             or concrete.get("motion_end_state")
             or visible_reaction
             or beat.get("immediate_consequence")
@@ -10464,25 +8148,25 @@ def _scene_cut_coverage_plan(
 
 def _build_research(topic: str, source: str, now: str, profile: dict[str, Any]) -> dict[str, Any]:
     duration_plan = dict(profile.get("duration_plan") or build_duration_plan().to_dict())
-    is_cinderella = profile.get("story_key") == "cinderella" or profile.get("slug") == "cinderella"
-    events = [
-        "母の不在後、継母と義姉たちが入り、主人公は家の中で孤立する。",
-        "主人公は台所と灰のそばで眠り、名前の代わりに灰かぶりとして扱われる。",
-        "宮殿の舞踏会の知らせが届き、家中の欲望が露わになる。",
-        "主人公は参加を望むが、仕事と衣装の欠如を理由に拒まれる。",
-        "魔法の助力によって馬車、ドレス、ガラスの靴が現れる。",
-        "主人公は宮殿に入り、誰も知らない姿で王子と踊る。",
-        "真夜中の鐘で魔法が解け始め、主人公は階段を駆け下りる。",
-        "片方のガラスの靴が階段に残る。",
-        "使者が靴の持ち主を探し、家々を巡る。",
-        "主人公の足に靴が合い、隠されていた身元が明らかになる。",
-    ]
-    if profile.get("events"):
-        events = [str(event) for event in profile["events"]]
+    events = [str(event) for event in profile.get("events", []) if str(event).strip()]
+    if not events:
+        topic_label = str(profile.get("topic_label") or topic or "物語")
+        events = [
+            f"{topic_label}の主人公が、いつもの場所で不均衡を抱える。",
+            "外部からの知らせや事件が入り、願いと境界が見える。",
+            "周囲の力が主人公の前進を拒み、選択の代償が見える。",
+            "助力者、道具、記憶、偶然のいずれかが現れ、越境の条件が整う。",
+            "主人公は境界を越え、未知の場所で自分の力を試される。",
+            "主人公の行為が、内面と外部世界を結ぶ証拠になる。",
+            "時間、追跡、喪失、誤解の圧力で、主人公は一度すべてを失いかける。",
+            "残された証が手がかりとなり、真実を探す流れが生まれる。",
+            "主人公は隠された状態から表へ出され、自分の名や価値を問われる。",
+            "証が主人公と結びつき、物語は解放または帰還へ向かう。",
+        ]
     motif_sequence = "、".join(str(motif) for motif in profile["motifs"][:4])
-    deadline_trigger = "真夜中の鐘" if is_cinderella else "時間制限の合図"
-    helper_claim = "妖精の助力者として描く" if is_cinderella else "助力者、記憶、偶然、環境の変化のいずれかとして描く"
-    helper_theory = "通俗版では妖精。" if is_cinderella else "ユーザー指定のsourceから、助力の形を映像化に合わせて選ぶ。"
+    deadline_trigger = "時間制限の合図"
+    helper_claim = "助力者、記憶、偶然、環境の変化のいずれかとして描く"
+    helper_theory = "ユーザー指定のsourceから、助力の形を映像化に合わせて選ぶ。"
     characters = [
         {"character_id": "protagonist", "name": profile["protagonist_name"], "role": "主人公", "motivations": ["尊厳と願いを失わずに進む"], "relationships": [{"target": "opposition", "relation": "前進を妨げられる"}]},
         {"character_id": "opposition", "name": "主人公を妨げる力", "role": "抑圧者または障害", "motivations": ["現状維持"], "relationships": [{"target": "protagonist", "relation": "選択を狭める"}]},
@@ -10501,58 +8185,6 @@ def _build_research(topic: str, source: str, now: str, profile: dict[str, Any]) 
         "selection_questions_for_p200": ["主人公の能動性をどの場面で強めるか"],
     }
     event_character_ids: dict[int, list[str]] = {}
-    if is_cinderella:
-        characters = [
-            {"character_id": "protagonist", "name": "シンデレラ", "role": "主人公", "motivations": ["尊厳を保ち、自分の意思で舞踏会へ行く", "灰かぶりという扱いではなく自分自身として認められる"], "relationships": [{"target": "stepmother", "relation": "家事と閉じ込めによって参加を妨げられる"}, {"target": "helper", "relation": "期限付きの手段を受け取るが出発は自分で選ぶ"}, {"target": "prince", "relation": "舞踏会で踊り、残した靴を通じて探される"}, {"target": "royal_envoy", "relation": "試着によって身元を公に確認される"}]},
-            {"character_id": "stepmother", "name": "継母", "role": "家の支配者・主要な抑圧者", "motivations": ["家の序列を維持し、実の娘たちの機会を優先する"], "relationships": [{"target": "protagonist", "relation": "家事を課し、舞踏会と試着から排除する"}, {"target": "stepsisters", "relation": "舞踏会の機会を得させようとする"}]},
-            {"character_id": "stepsisters", "name": "義姉たち", "role": "共同抑圧者・競争者", "motivations": ["王宮で選ばれる機会を自分たちのものにする"], "relationships": [{"target": "protagonist", "relation": "家事を負わせ、靴の試着では先に名乗り出る"}, {"target": "stepmother", "relation": "排除と自己優先の方針を共有する"}]},
-            {"character_id": "helper", "name": "魔法の助力者", "role": "主人公の意思に応答する期限付きの援助者", "motivations": ["願いを捨てない主人公に自分で境界を越える機会を与える"], "relationships": [{"target": "protagonist", "relation": "真夜中までの手段を与えるが出発の選択は委ねる"}]},
-            {"character_id": "prince", "name": "王子", "role": "舞踏会で主人公を認識し、靴を手がかりに探索を起動する人物", "motivations": ["舞踏会で踊った相手の身元を確かめる"], "relationships": [{"target": "protagonist", "relation": "舞踏会で踊り、残された靴の持ち主を探す"}, {"target": "royal_envoy", "relation": "靴の持ち主を探す役目を託す"}]},
-            {"character_id": "royal_envoy", "name": "王宮の使者", "role": "靴の探索と公的な身元確認を実行する人物", "motivations": ["王子の命を遂行し、靴の真の持ち主を特定する"], "relationships": [{"target": "prince", "relation": "靴の持ち主を探す命を受ける"}, {"target": "protagonist", "relation": "試着の機会を与え、適合を公に確認する"}]},
-        ]
-        event_character_ids = {
-            1: ["protagonist", "stepmother", "stepsisters"],
-            2: ["protagonist", "stepmother", "stepsisters"],
-            3: ["protagonist", "stepmother"],
-            4: ["protagonist", "helper"],
-            5: ["protagonist", "helper"],
-            6: ["protagonist", "prince"],
-            7: ["protagonist", "prince"],
-            8: ["protagonist", "helper"],
-            9: ["protagonist", "stepmother", "stepsisters", "prince", "royal_envoy"],
-            10: ["protagonist", "stepmother", "stepsisters", "royal_envoy"],
-        }
-        symbols_and_themes[1]["evidence_refs"] = ["P4"]
-        conflicts = [{
-            "conflict_id": "C1",
-            "topic": "助力者の表現",
-            "accounts": [{"account_id": "A", "claim": "人物として現れる魔法の助力者が、主人公に真夜中までの期限と馬車・ドレス・ガラスの靴を与える", "sources": ["S1"], "confidence": 0.8}],
-            "impact_on_story": "E03後も願いを保つ主人公にE04の援助が応答し、E05の自発的な出発とE08の期限切れを経て、靴がE09-E10の探索と身元確認へつながる。",
-            "selection_notes": {"recommended_choice": "A", "selected_choice": "A", "resolution_status": "resolved", "rationale": "人物による期限付き魔法に固定し、記憶・偶然・環境変化との混成は行わない。"},
-            "hybrid_proposal": {"proposed": False, "mix_elements": [], "risks": [], "mitigations": []},
-        }]
-        open_questions = []
-        handoff_to_story.update(
-            {
-                "must_preserve": ["抑圧", "越境", "時間制限", "証明", "helper の期限付き援助と protagonist 自身の出発", "prince が探索を起動し royal_envoy が試着を実行する役割分担"],
-                "selection_questions_for_p200": ["E05で確定している主人公の出発の選択を、どのscene/beatで最も強く見せるか"],
-                "character_event_contract": [
-                    {"character_id": "protagonist", "event_ids": [f"E{i:02d}" for i in range(1, 11)], "causal_role": "排除されても願いを保ち、援助を受けた後は自分で出発し、最後に試着へ進む"},
-                    {"character_id": "stepmother", "event_ids": ["E01", "E02", "E03", "E09", "E10"], "causal_role": "家の序列を守るため主人公を舞踏会と試着から排除する"},
-                    {"character_id": "stepsisters", "event_ids": ["E01", "E02", "E09", "E10"], "causal_role": "排除に加わり、舞踏会と靴の候補者として主人公と対照を作る"},
-                    {"character_id": "helper", "event_ids": ["E04", "E05", "E08"], "causal_role": "期限付き魔法を与えるが、E05の出発は主人公に委ねる"},
-                    {"character_id": "prince", "event_ids": ["E06", "E07", "E09"], "causal_role": "主人公を舞踏会で認識し、残された靴から探索を起動する"},
-                    {"character_id": "royal_envoy", "event_ids": ["E09", "E10"], "causal_role": "王子の命で捜索と試着を実行し、身元を公に確認する"},
-                ],
-                "resolved_causal_chain": [
-                    {"from_event": "E03", "to_event": "E04", "cause": "家族が去った後に仕事を終えた主人公が裏口から月明かりの庭へ出て、願いを捨てない姿に helper が期限付き援助を与える"},
-                    {"from_event": "E04", "to_event": "E05", "cause": "helper は手段を用意するが、門を越えるのは protagonist 自身である"},
-                    {"from_event": "E04", "to_event": "E08", "cause": "真夜中の期限によって魔法が解け始め、protagonist は逃走する"},
-                    {"from_event": "E08", "to_event": "E09", "cause": "残された靴から prince が探索を起動し、royal_envoy が家々を巡る"},
-                    {"from_event": "E09", "to_event": "E10", "cause": "royal_envoy が試着させ、靴の適合が公的な身元確認になる"},
-                ],
-            }
-        )
     return {
         "topic": topic,
         "aliases": profile["aliases"],
@@ -10603,7 +8235,6 @@ def _build_research(topic: str, source: str, now: str, profile: dict[str, Any]) 
         "evaluation_contract": {"target_questions": ["主要筋を映像化できるか"], "must_cover": ["canonical_story_dump", "chronological_events", "source_passages", "conflicts"], "must_resolve_conflicts": ["C1"], "done_when": ["p200 が追加調査なしで scene/beat 候補を作れる"]},
     }
 
-
 def _story_scene_character_ids(
     profile: dict[str, Any],
     idx: int,
@@ -10623,8 +8254,6 @@ def _story_scene_character_ids(
             for value in event.get("involved_characters") or []
             if str(value).strip()
         )
-    if _profile_is_cinderella(profile) and _canonical_scene_index(profile, idx) == 7:
-        character_ids.append("prince")
     return list(dict.fromkeys(character_ids)) or ["protagonist"]
 
 
@@ -10961,140 +8590,33 @@ def _validate_adjacent_cut_motion_is_distinct(
             )
 
 
-def _build_story(topic: str, run_dir: Path, now: str, profile: dict[str, Any]) -> dict[str, Any]:
-    scenes = []
-    motif_text = "・".join(profile["motifs"])
-    run_variant = profile.get("run_variant", {})
-    duration_plan = dict(profile.get("duration_plan") or build_duration_plan().to_dict())
-    scene_targets = [int(value) for value in profile.get("scene_target_durations") or []]
-    scene_count = len(profile["scene_titles"])
-    narration_base, narration_remainder = divmod(int(duration_plan["minimum_narration_seconds"]), scene_count)
-    for idx, title in enumerate(profile["scene_titles"], start=1):
-        time_of_day = _scene_time_of_day(profile, idx)
-        time_of_day_visual_basis = _scene_time_of_day_visual_basis(profile, idx)
-        location_spec = _location_spec_for_scene(profile, idx)
-        location_specs = _location_specs_for_scene_sequence(profile, idx)
-        location_sequence = [str(spec["name"]) for spec in location_specs]
-        location_path = " → ".join(location_sequence)
-        blueprint = _scene_blueprint(
-            profile=profile,
-            idx=idx,
-            title=title,
-            location_name=str(location_spec["name"]),
-            include_artifact=_scene_uses_artifact(profile, idx),
-        )
-        location_segments = _authored_location_segments_for_story(
-            profile=profile,
-            scene_index=idx,
-            blueprint=blueprint,
-        )
-        source_events = [str(value) for value in blueprint.get("source_events") or []]
-        canonical_index = _canonical_scene_index(profile, idx)
-        segment_position, segment_count, segment_role = _scene_segment(profile, idx)
-        visible_evidence = [str(value) for value in blueprint.get("visible_evidence") or [] if str(value).strip()]
-        production_location_segments = [
-            segment
-            for segment in location_segments
-            if _location_segment_root_is_active(segment)
-        ]
-        if production_location_segments:
-            segment_overview = "；".join(
-                f"{segment['location']}では{segment['responsibility']}"
-                for segment in production_location_segments
-            )
-            visualizable_action = (
-                f"{location_path}を順に移り、{segment_overview}。"
-                f"{blueprint['causal_turn']}。{blueprint['handoff_anchor']}を次のsceneへ残す"
-            )
-        else:
-            visualizable_action = (
-                f"{location_path}"
-                f"{'を順に移り' if len(location_sequence) > 1 else 'で'}、"
-                f"{'、'.join(visible_evidence)}を具体的に配置する。"
-                f"{blueprint['segment_responsibility']}。{blueprint['causal_turn']}。"
-                f"{blueprint['handoff_anchor']}を次のsceneへ残す"
-            )
-        narration = (
-            f"{blueprint['dramatic_question']} {blueprint['segment_responsibility']}。"
-            f"{blueprint['causal_turn']}。{blueprint['payoff']}"
-        )
-        research_refs = list(blueprint.get("research_refs") or [])
-        event_ids = [
-            _research_ref_entry_id(ref, "story_materials.chronological_events")
-            for ref in research_refs
-            if _research_ref_entry_id(ref, "story_materials.chronological_events")
-        ]
-        scenes.append(
-            {
-                "scene_id": idx,
-                "title": title,
-                "canonical_scene_index": canonical_index,
-                "segment": {"position": segment_position, "count": segment_count, "role": segment_role},
-                "phase": _phase_for_scene(profile, idx),
-                "time_of_day": time_of_day,
-                "time_of_day_visual_basis": time_of_day_visual_basis,
-                "location": {
-                    "location_id": location_spec["asset_id"],
-                    "name": location_spec["name"],
-                    "mode": "sequence" if len(location_sequence) > 1 else "single",
-                    "sequence": location_sequence,
-                    "sequence_location_ids": [str(spec["asset_id"]) for spec in location_specs],
-                    "segments": location_segments,
-                },
-                "target_duration_seconds": scene_targets[idx - 1] if idx - 1 < len(scene_targets) else 40,
-                "narration_target_seconds": narration_base + (1 if idx <= narration_remainder else 0),
-                "purpose": blueprint["story_purpose"],
-                "conflict": blueprint["obstacle"],
-                "turn": blueprint["causal_turn"],
-                "causal_handoff": blueprint["handoff_anchor"],
-                "semantic_scene_responsibility_id": blueprint["semantic_scene_responsibility_id"],
-                "segment_beat_ids": list(blueprint["segment_beat_ids"]),
-                "segment_responsibility": blueprint["segment_responsibility"],
-                "story_event_ids": event_ids,
-                "story_event_obligations": [
-                    *[f"{event_id}: {event}" for event_id, event in zip(event_ids, source_events)],
-                    f"turn: {blueprint['causal_turn']}",
-                    f"handoff: {blueprint['handoff_anchor']}",
-                ],
-                "character_ids": _story_scene_character_ids(profile, idx, source_events),
-                "affect": {"label_hint": "awe" if canonical_index in {3, 5, 6} else "strain", "audience_job": "bond"},
-                "visualizable_action": visualizable_action,
-                "grounding_note": "topic/source の筋を基にし、会話と構図は映像化のための創作補完。",
-                "narration": narration,
-                "visual": (
-                    f"実写映画調の{title}。{visualizable_action}。"
-                    f"時間帯の視覚根拠: {time_of_day_visual_basis}。画面内テキストなし。"
-                ),
-                "research_refs": research_refs,
-                "creative_inventions": ["感情を光と質感で圧縮する"],
-            }
-        )
-    return {
-        "story_metadata": {
-            "topic": topic,
-            "adaptation_value_contract": ADAPTATION_VALUE_MARKER,
-            "time": str(profile.get("story_time") or "").strip(),
-            "scene_time_of_day_contract": SCENE_TIME_OF_DAY_CONTRACT,
-            "scene_time_of_day_visual_basis_contract": SCENE_TIME_OF_DAY_VISUAL_BASIS_CONTRACT,
-            "source_research": str(run_dir / "research.md"),
-            "created_at": now,
-            "pattern_used": "hero",
-            "run_variant": run_variant,
-            "target_duration_seconds": int(duration_plan["target_seconds"]),
-            "duration_plan": duration_plan,
-        },
-        "adaptation_source_contract": _adaptation_source_contract_for_profile(profile),
-        "subagent_trace": [{"subagent_id": "story-candidate-audit-001", "role": "story_candidate", "input_artifact": str(run_dir / "research.md"), "output_artifact": str(run_dir / "logs/eval/story_candidate_a.md"), "accepted_by_main": True, "reason": "主要筋と映像化価値が一致するため採用。"}],
-        "outcome_contract": {"goal": "research.md を映画的な story.md に変換する", "success_criteria": ["各 scene が目的、葛藤、転換、感情、視覚行動、research refs を持つ"], "source_vs_creative_boundary": {"source_backed": ["筋", "人物関係", "象徴"], "creative_allowed": ["構図", "光", "台詞", "カメラ"], "ask_before": ["矛盾版の混成"]}},
-        "selection": {"candidates": [{"candidate_id": "A", "logline": f"{profile['protagonist_name']}が、失われた名や価値を{profile['artifact_name']}で証明する。", "fact_basis_refs": ["research.engagement.hooks[H1]"], "creative_inventions": [{"element": "光が記憶のように主人公を導く", "purpose": "visual_symbol", "does_not_contradict_refs": True}], "why_it_scores": ["映像の連続性が強い"], "requires_hybridization_approval": False, "conflicts_referenced": ["research.conflicts[C1]"]}, {"candidate_id": "B", "logline": "公的な場を社会の仮面として見せる。", "fact_basis_refs": ["research.story_materials.chronological_events[E06]"], "creative_inventions": [], "why_it_scores": ["テーマ性が明快"], "requires_hybridization_approval": False, "conflicts_referenced": []}], "chosen_candidate_id": "A", "rationale": "象徴を視覚的に追いやすく、p500/p600 の参照資産化に向く。"},
-        "hybridization": {"approval_status": "not_needed", "proposal": {"summary": "混成なし", "conflicts_referenced": [], "mix_elements": [], "risks": [], "mitigations": [], "question_for_user": "混成は行わない。"}},
-        "ask_before_edit": {"required_when": ["主要筋の削除"], "question_for_user": "承認済み構成を変えます。進めてよいですか？"},
-        "story_structure": {"protagonist": {"name": profile["protagonist_name"], "role": "抑圧された主人公", "source_node_id": "research.characters[protagonist]"}, "journey": {"ordinary_world": {"description": "始まりの場所で名前や価値を見失っている"}, "ordeal": {"challenge": "障害と時間制限を越える"}, "transformation": {"before": "見えない存在", "after": "自分の名で立つ人"}, "return": {"resolution": f"{profile['artifact_name']}が証拠となり解放へ向かう"}}, "theme": {"governing_thought": "尊厳は奪われても、証明の瞬間を待っている。"}},
-        "story_decomposition": {"source_material_refs": ["research.story_materials.chronological_events[E01]"], "beat_strategy": f"{motif_text}を順に強める。", "emotion_curve_summary": "孤独から驚異、切迫、解放へ。", "notes_on_ignored_or_deferred_material": ["版ごとの細部差は扱わない。"]},
-        "script": {"scenes": scenes},
-        "engagement_design": {"primary_hook": {"type": "emotional", "content": f"{profile['protagonist_name']}が、光の中で自分の名を取り戻す。", "position_percent": 0}},
-        "quality_scores": {"engagement_potential": 0.91, "information_accuracy": 0.82, "success_criteria": {"viewer_takeaway": f"{profile['artifact_name']}は奪われた名前や価値の証拠である。", "must_remember": [profile["motifs"][0], "時間制限", profile["artifact_name"]], "must_not_misunderstand": ["史実ではなく民話の映画化"]}, "scope_boundaries": {"factual_claims_locked": True, "creative_license_declared": True}},
-    }
+def _author_story_with_codex(
+    *,
+    run_dir: Path,
+    topic: str,
+    target_duration_seconds: int,
+) -> None:
+    """Invoke the canonical LLM Story Architect / Scene Author pipeline."""
+
+    _run_materialization_subprocess(
+        run_dir,
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "author-story-with-codex.py"),
+            "--research",
+            str(run_dir / "research.md"),
+            "--output",
+            str(run_dir / "story.md"),
+            "--topic",
+            topic,
+            "--target-duration-seconds",
+            str(target_duration_seconds),
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def _bind_experience_metadata(
@@ -11465,22 +8987,6 @@ def _apply_world_walk_generation_contract(
                                 "物語を進めず、参照世界の場所と生活痕跡だけを観察している瞬間"
                             )
                     visual_plan["world_walk_prompt_contract"] = WORLD_WALK_PROMPT_CONTRACT
-                    review_metadata = {
-                        key: value
-                        for key, value in (image_generation.get("api_prompt_payload") or {}).items()
-                        if key
-                        not in {
-                            "policy_version",
-                            "compiler_version",
-                            "source_digest",
-                            "prompt",
-                            "negative_prompt",
-                            "reference_instructions",
-                            "reference_images",
-                            "sha256",
-                            "drawable_prompt_ir",
-                        }
-                    }
                     image_generation["api_prompt_payload"] = _image_api_prompt_payload_for_scaffold(
                         first_frame_visual_plan=visual_plan,
                         character_ids=image_generation.get("character_ids") or [],
@@ -11489,7 +8995,6 @@ def _apply_world_walk_generation_contract(
                         references=selected_references,
                         story_time=str(manifest.get("video_metadata", {}).get("time") or ""),
                         scene_time_of_day=str(scene.get("time_of_day") or ""),
-                        review_metadata=review_metadata,
                     )
                 image_generation["references"] = selected_references
                 image_generation["reference_count"] = len(selected_references)
@@ -11510,7 +9015,7 @@ def _scene_acceptance_role_character_id(
     """Resolve an authored role once while the whole-set contract is planned."""
 
     normalized = str(role_id).strip()
-    if normalized in {"protagonist", "cinderella"}:
+    if normalized == "protagonist":
         return str(
             _protagonist_asset_for_cut(profile, scene_index, "")
             or profile["protagonist_asset_id"]
@@ -11696,16 +9201,16 @@ def _build_scene_set_authoring_contract(
                 ),
             )
             proposed_scene_id = int(scene_records[estimated_index - 1]["scene_id"])
-        # Legacy profiles can expose a later canonical fact in an earlier
-        # runtime scene (for example, the lost slipper alongside the dance).
-        # The frozen contract owns that fact at the first non-regressive scene
-        # instead of preserving the inconsistent heuristic assignment.
+        # Keep source-event ownership monotonic across runtime scenes so a
+        # later fact is not assigned to an earlier runtime scene.
         owner_scene_id = max(previous_owner_scene_id, proposed_scene_id)
         owner_scene_by_event_id[event_id] = owner_scene_id
         previous_owner_scene_id = owner_scene_id
 
     evidence_catalog: list[dict[str, Any]] = []
     contract_scenes: list[dict[str, Any]] = []
+    authored_end_state_by_scene: dict[int, str] = {}
+    authored_handoff_by_scene: dict[int, dict[str, Any]] = {}
     beat_ids_by_scene: dict[int, list[str]] = {}
     evidence_ids_by_scene: dict[int, list[str]] = {}
     event_beat_owner: dict[str, str] = {}
@@ -11876,12 +9381,37 @@ def _build_scene_set_authoring_contract(
             if scene_id == first_artifact_scene_id and reveal_transition_id
             else []
         )
-        incoming_anchor = (
+        authored_end_state = (
+            record["scene_event"].get("end_state")
+            if isinstance(record["scene_event"].get("end_state"), dict)
+            else {}
+        )
+        authored_handoff = (
+            record["scene_event"].get("handoff_chain")
+            if isinstance(record["scene_event"].get("handoff_chain"), dict)
+            else {}
+        )
+        authored_incoming = (
+            authored_handoff.get("incoming")
+            if isinstance(authored_handoff.get("incoming"), dict)
+            else {}
+        )
+        authored_outgoing = (
+            authored_handoff.get("outgoing")
+            if isinstance(authored_handoff.get("outgoing"), dict)
+            else {}
+        )
+        authored_end_state_id = str(
+            authored_end_state.get("state_id") or f"state-after-scene-{scene_id}"
+        ).strip()
+        authored_end_state_by_scene[scene_id] = authored_end_state_id
+        authored_handoff_by_scene[scene_id] = deepcopy(authored_handoff)
+        incoming_anchor = str(authored_incoming.get("anchor_id") or "").strip() or (
             "story-opening"
             if record_index == 0
             else f"handoff-{scene_records[record_index - 1]['scene_id']}-{scene_id}"
         )
-        outgoing_anchor = (
+        outgoing_anchor = str(authored_outgoing.get("anchor_id") or "").strip() or (
             "story-ending"
             if record_index + 1 == len(scene_records)
             else f"handoff-{scene_id}-{scene_records[record_index + 1]['scene_id']}"
@@ -11928,7 +9458,7 @@ def _build_scene_set_authoring_contract(
                 "causal_proof_contract": {
                     "cause_beat_id": beat_ids[0],
                     "action_beat_id": beat_ids[-1],
-                    "result_state_id": f"state-after-scene-{scene_id}",
+                    "result_state_id": authored_end_state_id,
                     "required_evidence_ids": [scene_evidence_ids[-1]],
                 },
                 "non_replaceable_elements": non_replaceable_elements,
@@ -11948,12 +9478,33 @@ def _build_scene_set_authoring_contract(
     ]
     handoff_chain = [
         {
-            "anchor_id": f"handoff-{current['scene_id']}-{following['scene_id']}",
+            "anchor_id": str(
+                (
+                    authored_handoff_by_scene.get(int(current["scene_id"]), {}).get("outgoing")
+                    or {}
+                ).get("anchor_id")
+                or f"handoff-{current['scene_id']}-{following['scene_id']}"
+            ),
             "owner_scene_id": current["scene_id"],
             "consumer_scene_id": following["scene_id"],
-            "state_id": f"state-after-scene-{current['scene_id']}",
-            "producer_beat_id": beat_ids_by_scene[int(current["scene_id"])][-1],
-            "consumer_beat_id": beat_ids_by_scene[int(following["scene_id"])][0],
+            "state_id": authored_end_state_by_scene.get(
+                int(current["scene_id"]),
+                f"state-after-scene-{current['scene_id']}",
+            ),
+            "producer_beat_id": str(
+                (
+                    authored_handoff_by_scene.get(int(current["scene_id"]), {}).get("outgoing")
+                    or {}
+                ).get("producer_beat_id")
+                or beat_ids_by_scene[int(current["scene_id"])][-1]
+            ),
+            "consumer_beat_id": str(
+                (
+                    authored_handoff_by_scene.get(int(following["scene_id"]), {}).get("incoming")
+                    or {}
+                ).get("consumer_beat_id")
+                or beat_ids_by_scene[int(following["scene_id"])][0]
+            ),
             "evidence_ids": [evidence_ids_by_scene[int(current["scene_id"])][-1]],
         }
         for current, following in zip(
@@ -12977,7 +10528,6 @@ def _build_script_and_manifest(
             if (
                 artifact_named_by_drawable_evidence
                 and not cut_uses_artifact
-                and not _profile_is_cinderella(profile)
             ):
                 cut_uses_artifact = True
                 if profile["artifact_name"] not in must_show:
@@ -13046,8 +10596,6 @@ def _build_script_and_manifest(
             ]
             protagonist_variant_ids = {
                 str(profile.get("protagonist_asset_id") or "").strip(),
-                str(profile.get("protagonist_transformed_asset_id") or "").strip(),
-                str(profile.get("protagonist_post_midnight_asset_id") or "").strip(),
             }
             protagonist_override = (
                 first_frame_character_asset_overrides.get(
@@ -13223,7 +10771,7 @@ def _build_script_and_manifest(
                 "narration_role": "絵を説明せず内面の方向だけを示す",
                 "asset_dependency_hint": {"characters": character_ids, "objects": object_ids, "locations": [location_spec["asset_id"]]},
             }
-            script_cut_base = {"cut_id": f"{cut_number:02d}", "selector": selector, "target_duration_seconds": cut_target_seconds, "estimated_duration_seconds": cut_target_seconds, "cut_blueprint": cut_blueprint, "human_review": {"status": "approved", "change_request_ids": []}}
+            script_cut_base = {"cut_id": f"{cut_number:02d}", "selector": selector, "target_duration_seconds": cut_target_seconds, "estimated_duration_seconds": cut_target_seconds, "cut_blueprint": cut_blueprint}
             narration = str(cut_plan["narration"])
             actual_motion_end_state = str(cut_blueprint["motion_end_state"]).strip()
             continuity_destination_location = location_name
@@ -13803,17 +11351,6 @@ def _build_script_and_manifest(
                 scene_time_of_day=time_of_day,
                 drawable_evidence=drawable_evidence,
             )
-            image_prompt_review_metadata = _image_prompt_review_metadata_for_scaffold(
-                selector=selector,
-                location_spec=location_spec,
-                location_name=first_frame_location_name,
-                cut_number=cut_number,
-                cut_blueprint=cut_blueprint,
-                cut_contract=cut_contract,
-                object_ids=object_ids,
-                cut_uses_artifact=cut_uses_artifact,
-                first_frame_visual_plan=first_frame_visual_plan,
-            )
             api_prompt_payload = _image_api_prompt_payload_for_scaffold(
                 first_frame_visual_plan=first_frame_visual_plan,
                 character_ids=character_ids,
@@ -13822,7 +11359,6 @@ def _build_script_and_manifest(
                 references=references,
                 story_time=str(profile.get("story_time") or "").strip(),
                 scene_time_of_day=time_of_day,
-                review_metadata=image_prompt_review_metadata,
             )
             debug_prompt_source = {
                 "first_frame_contract": cut_contract["first_frame_contract"],
@@ -13877,7 +11413,7 @@ def _build_script_and_manifest(
                         "generation_status": "missing",
                         "prompt_source": "image_generation.api_prompt_payload.prompt",
                     },
-                    "image_generation": {"tool": "codex_builtin_image", "character_ids": character_ids, "object_ids": object_ids, "location_ids": [location_spec["asset_id"]], "asset_id": "", "asset_type": "scene_still", "execution_lane": "standard", "reference_count": len(references), "references": references, "first_frame_visual_plan": first_frame_visual_plan, "api_prompt_payload": api_prompt_payload, "debug_prompt_source": debug_prompt_source, "output": f"assets/scenes/{selector}.png", "aspect_ratio": "16:9", "image_size": "1K", "review": {"status": "approved", "triangulation_review": {"status": "passed", "same_target_beat": True, "image_supports_motion_start": True, "motion_reaches_declared_end_state": True, "narration_not_captioning_image": True, "reveal_constraints_preserved": True, "continuity_preserved": True, "handoff_visible_or_audible": True}}},
+                    "image_generation": {"tool": "codex_builtin_image", "character_ids": character_ids, "object_ids": object_ids, "location_ids": [location_spec["asset_id"]], "asset_id": "", "asset_type": "scene_still", "execution_lane": "standard", "reference_count": len(references), "references": references, "first_frame_visual_plan": first_frame_visual_plan, "api_prompt_payload": api_prompt_payload, "debug_prompt_source": debug_prompt_source, "output": f"assets/scenes/{selector}.png", "aspect_ratio": "16:9", "image_size": "1K"},
                     "video_generation": {
                         "tool": "kling_3_0_omni",
                         "duration_seconds": cut_target_seconds,
@@ -13891,19 +11427,10 @@ def _build_script_and_manifest(
                         "motion_prompt": cut_plan["motion_brief"],
                         "output": f"assets/scenes/{selector}.mp4",
                     },
-                    "audio": {"narration": {"contract_ref": "cut_contract.narration_contract", "text": narration, "tts_text": narration, "tool": "elevenlabs", "status": "approved", "output": f"assets/audio/{selector}.mp3", "applied_request_ids": [], "p700_review": {"role_matches_contract": True, "narration_not_captioning_image": True, "does_not_add_new_story_fact": True, "timing_supports_visual_beat": True}}},
-                    "review": {"triangulation_review": {"status": "passed", "same_target_beat": True, "image_supports_motion_start": True, "motion_reaches_declared_end_state": True, "narration_not_captioning_image": True, "reveal_constraints_preserved": True, "continuity_preserved": True, "handoff_visible_or_audible": True}},
+                    "audio": {"narration": {"contract_ref": "cut_contract.narration_contract", "text": narration, "tts_text": narration, "tool": "elevenlabs", "output": f"assets/audio/{selector}.mp3", "applied_request_ids": []}},
                     "implementation_trace": {"status": "verified", "source_request_ids": []},
                 }
             )
-        coverage_review = {
-            "audience_information_covered": True,
-            "visualizable_action_covered": True,
-            "next_scene_connection_checked": True,
-            "value_shift_visible": True,
-            "causal_turn_visible": True,
-            "scene_specificity_gate_passed": True,
-        }
         scene_shot_mix_plan = {
             "policy_version": "scene_shot_mix_v1",
             "source": "image_generation.api_prompt_payload.shot_design_contract",
@@ -13972,8 +11499,7 @@ def _build_script_and_manifest(
                 previous_cut=manifest_cuts[cut_index - 1] if cut_index > 0 else None,
                 next_cut=manifest_cuts[cut_index + 1] if cut_index + 1 < len(manifest_cuts) else None,
             )
-        script_scenes.append({"scene_id": scene_id, "canonical_scene_index": _canonical_scene_index(profile, idx), "phase": _phase_for_scene(profile, idx), "time_of_day": time_of_day, "time_of_day_visual_basis": time_of_day_visual_basis, "location_mode": "sequence" if len(location_sequence) > 1 else "single", "location_sequence": location_sequence, "location_segments": location_segments, "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "research_refs": _downstream_scene_research_refs(idx, _scene_source_events(profile, idx), profile), "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "scene_generation": scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_acceptance_draft": deepcopy(acceptance_draft_by_scene_id[scene_id]), "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "agent_review": {"status": "preflight_passed", "source": "authoring_preflight", "independent_semantic_review": "pending"}, "coverage_review": coverage_review, "cuts": cuts})
-        scene_composite_review = {"status": "preflight_passed", "source": "authoring_preflight", "independent_semantic_review": "pending", "scene_obligation_covered_by_cut_group": True, "no_duplicate_story_fact_without_new_evidence": True, "scene_meaning_visualized_across_cuts": True, "blocking_reason_keys": []}
+        script_scenes.append({"scene_id": scene_id, "canonical_scene_index": _canonical_scene_index(profile, idx), "phase": _phase_for_scene(profile, idx), "time_of_day": time_of_day, "time_of_day_visual_basis": time_of_day_visual_basis, "location_mode": "sequence" if len(location_sequence) > 1 else "single", "location_sequence": location_sequence, "location_segments": location_segments, "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "research_refs": _downstream_scene_research_refs(idx, _scene_source_events(profile, idx), profile), "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "scene_generation": scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_acceptance_draft": deepcopy(acceptance_draft_by_scene_id[scene_id]), "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "cuts": cuts})
         manifest_scene_generation = deepcopy(scene_generation)
         prompt_packet = manifest_scene_generation.pop(
             "scene_acceptance_prompt_packet",
@@ -13994,7 +11520,7 @@ def _build_script_and_manifest(
                     "scene_slice_digest"
                 ),
             }
-        manifest_scenes.append({"scene_id": scene_id, "canonical_scene_index": _canonical_scene_index(profile, idx), "time_of_day": time_of_day, "time_of_day_visual_basis": time_of_day_visual_basis, "location_mode": "sequence" if len(location_sequence) > 1 else "single", "location_sequence": location_sequence, "location_segments": location_segments, "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "research_refs": _downstream_scene_research_refs(idx, _scene_source_events(profile, idx), profile), "scene_generation": manifest_scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_acceptance_binding": {"generation_id": scene_set_authoring_contract["generation_id"], "contract_digest": scene_set_authoring_contract["contract_digest"], "scene_slice_digest": acceptance_draft_by_scene_id[scene_id]["scene_slice_digest"], "preflight_digest": authoring_preflight["preflight_digest"]}, "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "scene_composite_review": scene_composite_review, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "coverage_review": coverage_review, "cuts": manifest_cuts})
+        manifest_scenes.append({"scene_id": scene_id, "canonical_scene_index": _canonical_scene_index(profile, idx), "time_of_day": time_of_day, "time_of_day_visual_basis": time_of_day_visual_basis, "location_mode": "sequence" if len(location_sequence) > 1 else "single", "location_sequence": location_sequence, "location_segments": location_segments, "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "research_refs": _downstream_scene_research_refs(idx, _scene_source_events(profile, idx), profile), "scene_generation": manifest_scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_acceptance_binding": {"generation_id": scene_set_authoring_contract["generation_id"], "contract_digest": scene_set_authoring_contract["contract_digest"], "scene_slice_digest": acceptance_draft_by_scene_id[scene_id]["scene_slice_digest"], "preflight_digest": authoring_preflight["preflight_digest"]}, "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "cuts": manifest_cuts})
         scene_event_outputs.append(
             {
                 "scene_id": scene_id,
@@ -14056,31 +11582,6 @@ def _build_script_and_manifest(
         "scene_set_authoring_contract": scene_set_authoring_contract,
         "authoring_preflight": authoring_preflight,
         "canonical_event_coverage_matrix": canonical_event_coverage_matrix,
-        "scene_set_review": {
-            "status": "pending_independent_review",
-            "authoring_preflight_status": "passed",
-            "summary": f"{len(script_scenes)} scenes / {len(selectors)} cutsをpreflight済み。独立semantic reviewは未実施。",
-        },
-        "scene_detail_review": {
-            "status": "pending_independent_review",
-            "authoring_preflight_status": "passed",
-            "summary": "deterministic scene contractは合格。意味品質の独立審査は未実施。",
-        },
-        "cut_blueprint_review": {
-            "status": "pending_independent_review",
-            "authoring_preflight_status": "passed",
-            "summary": "preflight合格後にcut coverageをmaterializeした。独立審査は未実施。",
-        },
-        "script_review": {
-            "status": "pending_independent_review",
-            "authoring_preflight_status": "passed",
-            "summary": "台本候補は生成済み。独立審査は未実施。",
-        },
-        "production_readiness_review": {
-            "status": "pending_independent_review",
-            "authoring_preflight_status": "passed",
-            "summary": f"target {int(duration_plan['target_seconds'])} seconds; minimum effective duration {int(duration_plan['minimum_effective_seconds'])} seconds.",
-        },
         "evaluation_contract": {
             "target_arc": "opening,development,ordeal,transformation,ending",
             "must_cover": [
@@ -14109,8 +11610,8 @@ def _build_script_and_manifest(
             "review_aliases": [profile["protagonist_name"], profile["topic_label"]],
             "fixed_prompts": [f"{profile['protagonist_name']}、自然な実写肌、同じ顔と髪型を維持"],
             "cinematic": {
-                "role": f"{profile['protagonist_name']}本人の変身前の一貫性",
-                "visual_subject": profile.get("protagonist_asset_subject") or f"{profile['protagonist_name']}の変身前の全身参照。自然な映画俳優の顔立ち。衣装は下記の役割、身分、状態に従う",
+                "role": f"{profile['protagonist_name']}本人の基準状態の一貫性",
+                "visual_subject": profile.get("protagonist_asset_subject") or f"{profile['protagonist_name']}の基準状態の全身参照。自然な映画俳優の顔立ち。衣装は下記の役割、身分、状態に従う",
             },
             "subject_contract": {"identity_scope": "individual", "subject_count": 1, "member_ids": []},
             "appearance_contract": _protagonist_appearance_contract(profile),
@@ -14317,13 +11818,12 @@ def _write_asset_request_files(run_dir: Path, asset_plan: dict[str, Any], profil
                             "required_views": generation_plan.get("required_views") or [],
                             "reference_inputs": reference_inputs,
                         },
-                        "review": {"status": "approved"},
                         "image_generation": {
                             "tool": "codex_builtin_image",
                             "execution_lane": execution_lane,
                             "bootstrap_allowed": bootstrap_allowed,
                             "bootstrap_reason": (
-                                "frontend_review_asset_stage"
+                                "frontend_create_asset_stage"
                                 if bootstrap_allowed
                                 else ""
                             ),
@@ -14367,7 +11867,6 @@ def _write_asset_request_files(run_dir: Path, asset_plan: dict[str, Any], profil
             "--materialize-request-files-only",
             "--skip-videos",
             "--skip-audio",
-            "--skip-image-prompt-review",
         ],
         cwd=REPO_ROOT,
         check=True,
@@ -14387,536 +11886,46 @@ def _materialize_standard_request_files(run_dir: Path) -> None:
             "--materialize-request-files-only",
             "--enable-last-frame",
             "--skip-audio",
-            "--skip-image-prompt-review",
         ],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,
         text=True,
     )
-    _build_semantic_review_packs(run_dir, ("video_motion",))
 
 
 def _require_fresh_p400_readiness(run_dir: Path) -> None:
     stage_result, updates = check_manifest_single(run_dir, "standard", "immersive")
-    append_state_snapshot(run_dir / "state.txt", updates)
-    if updates.get("eval.p400_readiness.status") != "approved":
-        reasons = updates.get("eval.p400_readiness.reason_keys") or "unknown"
-        details = [
-            str(check.get("message") or check.get("description") or "").strip()
-            for check in stage_result.get("checks", [])
-            if isinstance(check, dict)
-            and check.get("passed") is False
-            and (
-                str(check.get("id") or "") in {value for value in reasons.split(",") if value}
-                or str(check.get("id") or "").startswith("p400.")
-            )
-        ]
-        suffix = f" ({'; '.join(details[:4])})" if details else ""
-        raise RuntimeError(f"p400 readiness gate is not approved: {reasons}{suffix}")
-
-
-def _review_status_line(stage: str) -> str:
-    if stage == "production_readiness":
-        return "status: approved"
-    return "- status: passed"
-
-
-def _review_loop_critic_report(
-    stage: str,
-    critic_number: int,
-    prompt_text: str,
-    *,
-    blocking_findings: tuple[str, ...] = (),
-    deterministic_preapproval: bool = False,
-) -> str:
-    focus_match = re.search(r"critic_focus:\s*([^\n]+)", prompt_text)
-    focus = focus_match.group(1).strip() if focus_match else f"{stage}_critic_{critic_number}"
-    digest_match = re.search(r"Review input digest:\s*`([0-9a-f]{64})`", prompt_text)
-    if digest_match is None:
-        raise RuntimeError(f"{stage} critic_{critic_number} prompt is missing review input digest")
-    digest = digest_match.group(1)
-    status = "changes_requested" if blocking_findings else "passed"
-    finding_lines = (
-        [f"- {finding}" for finding in blocking_findings]
-        if blocking_findings
-        else ["- blocking: none"]
-    )
-    return "\n".join(
-        [
-            f"# Critic {critic_number}",
-            "",
-            f"- critic_id: critic_{critic_number}",
-            f"- review_input_digest: {digest}",
-            f"- critic_focus: {focus}",
-            f"- status: {status}",
-            *(
-                ["- review_provenance: deterministic_preapproval"]
-                if deterministic_preapproval
-                else []
-            ),
-            "",
-            "## Root Cause Review",
-            f"この frontend-create run は {stage} の固定済み source revision を対象に deterministic preflight を実行した。",
-            "",
-            "## Findings",
-            *finding_lines,
-            "- root_cause: current source revision and stage contract were evaluated instead of assuming approval",
-            "- downstream_impact: downstream semantic agents may continue only when this preflight and their own review pass",
-            "- acceptance_condition: source digest remains current and all deterministic plus semantic gates pass",
-            "",
-        ]
-    )
-
-
-def _authoring_review_blocking_findings(run_dir: Path, stage: str) -> tuple[str, ...]:
-    """Evaluate current artifacts before any critic is allowed to claim passed."""
-
-    if stage == "visual_value":
-        result, _updates = check_visual_value(
-            run_dir,
-            "standard",
-            forbid_production_artifacts=False,
-        )
-    elif stage == "script":
-        result, _updates = check_script_single(run_dir, "standard")
-    else:
-        result, _updates = check_manifest_single(
-            run_dir,
-            "standard",
-            "immersive",
-            require_review_artifacts=False,
-        )
-    findings: list[str] = []
-    for check in result.get("checks", []):
-        if not isinstance(check, dict) or check.get("passed") is not False:
-            continue
-        check_id = str(check.get("id") or "")
-        # This function is the preflight that authors the p400 review-loop
-        # outputs. Requiring those outputs (or later semantic reports) here is
-        # circular; their independent gates run after materialization.
-        if check_id in {"p400.review_report_integrity", "p400.review_loop_integrity"}:
-            continue
-        if check_id.endswith(".semantic_review_subagent_passed"):
-            continue
-        findings.append(
-            f"{check_id}: {check.get('message') or check.get('description') or 'failed'}"
-        )
-    if stage == "asset":
-        scope_path = run_dir / "logs/review/semantic/asset_plan.scope.json"
-        try:
-            scope = json.loads(scope_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
-            findings.append(f"asset_plan.semantic_scope: {exc}")
-        else:
-            if not isinstance(scope.get("entry_count"), int) or int(scope["entry_count"]) < 1:
-                findings.append("asset_plan.semantic_scope: no review entries")
-    return tuple(findings)
-
-
-def _final_review_text(stage: str, aggregate_text: str) -> str:
-    if stage == "production_readiness":
-        return "\n".join(
-            [
-                "# Production Readiness Review",
-                "",
-                "status: approved",
-                "",
-                "## Structure",
-                "scene設計から逆算した可変cut数で主要筋を保持。",
-                "",
-                "## Duration",
-                "target 300 seconds and current cut plan satisfies the p400 coverage gate.",
-                "",
-                "## Quality",
-                "画像生成に渡せる具体性がある。",
-                "",
-                "## Design Owner Patch Brief",
-                "追加修正なし。canonical review loop aggregate は下記。",
-                "",
-                aggregate_text,
-            ]
-        )
-    return "\n".join(
-        [
-            f"# {REVIEW_LOOP_SPECS[stage].title}",
-            "",
-            "status: approved",
-            "",
-            "原因: canonical review loop を通し、blocking finding は検出されなかった。",
-            "修正方向: 追加修正なし。現在の source artifacts と handoff contract を維持する。",
-            "下流影響: 次の非人間工程へ進める。",
-            "受入条件: aggregate review と verifier が required markers を満たす。",
-            "",
-            aggregate_text,
-        ]
-    )
-
-
-def _build_semantic_review_packs(
-    run_dir: Path,
-    stages: tuple[str, ...],
-) -> None:
-    command = [
-        sys.executable,
-        str(REPO_ROOT / "scripts" / "build-semantic-review-pack.py"),
-        "--run-dir",
-        str(run_dir),
+    if updates:
+        append_state_snapshot(run_dir / "state.txt", updates)
+    checks = [
+        check
+        for check in stage_result.get("checks", [])
+        if isinstance(check, dict)
     ]
-    for semantic_stage in stages:
-        command.extend(("--stage", semantic_stage))
-    try:
-        _run_materialization_subprocess(
-            run_dir,
-            command,
-            cwd=REPO_ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        raw_stderr = exc.stderr or ""
-        if isinstance(raw_stderr, bytes):
-            raw_stderr = raw_stderr.decode("utf-8", errors="replace")
-        stderr_tail = raw_stderr[-SEMANTIC_PACK_STDERR_TAIL_CHARS :].strip()
-        storage_failure = any(
-            marker in raw_stderr.lower()
-            for marker in ("errno 28", "no space left", "enospc")
-        )
-        failure_kind = (
-            "storage/ENOSPC failure"
-            if storage_failure
-            else "subprocess failure"
-        )
-        recovery = (
-            "; free disk space (for example, remove unused output runs) and retry"
-            if storage_failure
-            else ""
-        )
-        if not stderr_tail:
-            stderr_tail = "(no stderr captured)"
-        raise RuntimeError(
-            "semantic review pack build failed for stages "
-            f"{', '.join(stages)} with exit code {exc.returncode} "
-            f"({failure_kind}){recovery}; stderr tail:\n{stderr_tail}"
-        ) from exc
-
-
-def _refresh_p400_review_artifacts(run_dir: Path) -> None:
-    """Freeze only reviews whose sources and readsets belong to P400."""
-
-    _build_semantic_review_packs(
-        run_dir,
-        ("scene_set", "scene_detail", "cut_blueprint"),
-    )
-    _refresh_review_loop_artifacts(run_dir, P400_REVIEW_STAGES)
-
-
-def _require_downstream_review_inputs(run_dir: Path) -> None:
-    required = (
-        "asset_generation_requests.md",
-        "asset_generation_request_snapshot.json",
-        "image_generation_requests.md",
-        "image_generation_request_snapshot.json",
-        "logs/grounding/asset.readset.json",
-        "logs/grounding/scene_implementation.readset.json",
-    )
-    missing = [relpath for relpath in required if not (run_dir / relpath).is_file()]
-    if missing:
-        raise RuntimeError(
-            "downstream review inputs are not materialized: " + ", ".join(missing)
-        )
-
-
-def _refresh_downstream_review_artifacts(run_dir: Path) -> None:
-    """Freeze asset/scene reviews only after requests and grounding exist."""
-
-    _require_downstream_review_inputs(run_dir)
-    _run_materialization_subprocess(
-        run_dir,
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "review-image-prompt-story-consistency.py"),
-            "--manifest",
-            str(run_dir / "video_manifest.md"),
-            "--story",
-            str(run_dir / "story.md"),
-            "--script",
-            str(run_dir / "script.md"),
-            "--out",
-            str(run_dir / "image_prompt_story_review.md"),
-        ],
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _run_materialization_subprocess(
-        run_dir,
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "build-image-prompt-judgment-review.py"),
-            "--run-dir",
-            str(run_dir),
-        ],
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _build_semantic_review_packs(run_dir, ("asset_plan", "image_prompt"))
-    _refresh_review_loop_artifacts(run_dir, DOWNSTREAM_REVIEW_STAGES)
-
-
-def _refresh_downstream_review_input_snapshots(run_dir: Path) -> None:
-    """Rebind downstream review evidence without resetting projected statuses."""
-
-    _require_downstream_review_inputs(run_dir)
-    resolved_run_dir = run_dir.resolve()
-    state_updates: dict[str, str] = {}
-    # Asset approval remains bound to the revision its critics actually
-    # reviewed. Only p630/p640 are projections of the final image-prompt gate,
-    # so only those snapshots may be rebound without rerunning critics.
-    for stage in DOWNSTREAM_REVIEW_STAGES[1:]:
-        snapshot = build_review_input_snapshot(
-            run_dir=resolved_run_dir,
-            stage=stage,
-            round_number=1,
-        )
-        input_digest = str(snapshot["input_digest"])
-        prompt_relpaths: list[Path] = []
-        for critic_number in range(1, REVIEW_LOOP_CRITIC_COUNT + 1):
-            prompt_relpath = critic_prompt_relpath(
-                stage,
-                1,
-                critic_number,
-            )
-            prompt_path = resolved_run_dir / prompt_relpath
-            _write_run_text_nofollow(
-                resolved_run_dir,
-                prompt_path,
-                render_critic_prompt(
-                    run_dir=resolved_run_dir,
-                    stage=stage,
-                    round_number=1,
-                    critic_number=critic_number,
-                    input_digest=input_digest,
-                )
-                + "\n",
-            )
-            prompt_relpaths.append(prompt_relpath)
-        aggregate_prompt_relpath = aggregator_prompt_relpath(stage, 1)
-        aggregate_prompt_path = resolved_run_dir / aggregate_prompt_relpath
-        _write_run_text_nofollow(
-            resolved_run_dir,
-            aggregate_prompt_path,
-            render_aggregator_prompt(
-                run_dir=resolved_run_dir,
-                stage=stage,
-                round_number=1,
-                input_digest=input_digest,
-            )
-            + "\n",
-        )
-        prompt_relpaths.append(aggregate_prompt_relpath)
-        snapshot_path = write_review_input_snapshot(
-            run_dir=resolved_run_dir,
-            stage=stage,
-            round_number=1,
-            snapshot=snapshot,
-            prompt_relpaths=tuple(prompt_relpaths),
-        )
-        state_updates.update(
-            {
-                f"eval.{stage}.loop.round_01.input_snapshot": str(
-                    snapshot_path.relative_to(resolved_run_dir)
-                ),
-                f"eval.{stage}.loop.round_01.input_digest": input_digest,
-            }
-        )
-    append_state_snapshot(resolved_run_dir / "state.txt", state_updates)
-
-
-def _refresh_review_loop_artifacts(
-    run_dir: Path,
-    stages: tuple[str, ...],
-) -> None:
-    deterministic_preapproval = review_mode_is_bound_preapproved(run_dir)
-    state_updates: dict[str, str] = {}
-    blocking_findings_cache: dict[str, tuple[str, ...]] = {}
-    source_fingerprint_cache: dict[tuple[object, ...], object] = {}
-    for stage in stages:
-        materialize_review_loop_round(
-            run_dir=run_dir,
-            stage=stage,
-            round_number=1,
-            source_fingerprint_cache=source_fingerprint_cache,
-        )
-        if stage in {"scene_implementation_hard", "scene_implementation_judgment"}:
-            aggregate_text = "\n".join(
-                [
-                    f"# {REVIEW_LOOP_SPECS[stage].title} / Aggregated Review",
-                    "",
-                    "status: pending",
-                    "",
-                    "候補画像プロンプトは materialize 済みだが、semantic reviewer による判定前の draft。",
-                    "critic reports と合格判定は実レビュー後にのみ作成する。",
-                    "",
-                ]
-            )
-            _write_run_text_nofollow(
-                run_dir,
-                run_dir / aggregated_review_relpath(stage, 1),
-                aggregate_text,
-            )
-            final_report = REVIEW_LOOP_SPECS[stage].final_report
-            _write_run_text_nofollow(
-                run_dir,
-                run_dir / final_report,
-                "\n".join(
-                    [
-                        f"# {REVIEW_LOOP_SPECS[stage].title}",
-                        "",
-                        "status: pending",
-                        "",
-                        "画像プロンプトの semantic review / repair / recompile が完了するまで未承認。",
-                        "",
-                    ]
-                ),
-            )
-            state_updates.update(
-                {
-                    f"eval.{stage}.loop.status": "pending",
-                    f"eval.{stage}.loop.current_round": "1",
-                    f"eval.{stage}.loop.round_01.status": "pending",
-                    f"eval.{stage}.loop.round_01.aggregated_review": str(aggregated_review_relpath(stage, 1)),
-                }
-            )
-            continue
-        snapshot_issues = review_input_snapshot_issues(
-            run_dir=run_dir,
-            stage=stage,
-            round_number=1,
-            source_fingerprint_cache=source_fingerprint_cache,
-        )
-        preflight_cache_key = (
-            "p400_manifest"
-            if stage
-            in {
-                "scene_set",
-                "scene_detail",
-                "cut_blueprint",
-                "production_readiness",
-            }
-            else stage
-        )
-        if (
-            not deterministic_preapproval
-            and preflight_cache_key not in blocking_findings_cache
-        ):
-            blocking_findings_cache[preflight_cache_key] = (
-                _authoring_review_blocking_findings(run_dir, stage)
-            )
-        blocking_findings = (
-            tuple(snapshot_issues)
-            + (
-                ()
-                if deterministic_preapproval
-                else blocking_findings_cache[preflight_cache_key]
-            )
-        )
-        expected_digest = review_input_digest(run_dir=run_dir, stage=stage, round_number=1)
-        critic_reports: list[str] = []
-        for critic_number in range(1, REVIEW_LOOP_CRITIC_COUNT + 1):
-            prompt_path = run_dir / critic_prompt_relpath(stage, 1, critic_number)
-            prompt_text = prompt_path.read_text(encoding="utf-8")
-            critic_text = _review_loop_critic_report(
-                stage,
-                critic_number,
-                prompt_text,
-                blocking_findings=blocking_findings,
-                deterministic_preapproval=deterministic_preapproval,
-            )
-            _write_run_text_nofollow(
-                run_dir,
-                run_dir / critic_relpath(stage, 1, critic_number),
-                critic_text,
-            )
-            critic_reports.append(critic_text)
-
-        aggregate_text = render_aggregated_review(
-            stage=stage,
-            round_number=1,
-            critic_reports=critic_reports,
-            expected_input_digest=expected_digest,
-        )
-        if stage in {"scene_set", "scene_detail"}:
-            aggregate_text = aggregate_text.replace("maximal_meaningful_stop_condition: TODO", "maximal_meaningful_stop_condition: satisfied")
-            aggregate_text = aggregate_text.replace("next_scene_candidate: TODO", "next_scene_candidate: none")
-            aggregate_text = aggregate_text.replace("cut_thickening_reason: TODO", "cut_thickening_reason: target duration covered")
-            aggregate_text = aggregate_text.replace("critic_1_scene_count_coverage_resolution: TODO", "critic_1_scene_count_coverage_resolution: passed")
-        if stage == "cut_blueprint":
-            for marker in (
-                "cut_intent_isolation",
-                "scene_event_coverage",
-                "first_frame_motion_readiness",
-                "multimodal_event_boundary_coverage",
-                "duration_density_and_handoff",
-                "coverage_plan_complete",
-                "event_beat_reference_integrity",
-                "source_event_preservation",
-                "event_context_for_cut_ready",
-                "continuity_contract_complete",
-                "narration_contract_complete",
-                "downstream_handoff_complete",
-                "triangulation_review_ready",
-            ):
-                aggregate_text = aggregate_text.replace(f"{marker}: TODO", f"{marker}: passed")
-
-        aggregate_path = run_dir / aggregated_review_relpath(stage, 1)
-        _write_run_text_nofollow(
-            run_dir,
-            aggregate_path,
-            aggregate_text,
-        )
-        final_report = REVIEW_LOOP_SPECS[stage].final_report
-        aggregate_passed = bool(re.search(r"(?m)^- status:\s*passed\s*$", aggregate_text))
-        _write_run_text_nofollow(
-            run_dir,
-            run_dir / final_report,
-            _final_review_text(stage, aggregate_text) if aggregate_passed else aggregate_text,
-        )
-        state_updates.update(
-            {
-                f"eval.{stage}.loop.status": "passed" if aggregate_passed else "changes_requested",
-                f"eval.{stage}.loop.current_round": "1",
-                f"eval.{stage}.loop.round_01.status": "passed" if aggregate_passed else "changes_requested",
-                f"eval.{stage}.loop.round_01.aggregated_review": str(aggregated_review_relpath(stage, 1)),
-                f"eval.{stage}.loop.review_mode": (
-                    "deterministic_preapproval"
-                    if deterministic_preapproval
-                    else "standard"
-                ),
-            }
-        )
-    append_state_snapshot(run_dir / "state.txt", state_updates)
+    failed = [
+        str(check.get("id") or check.get("message") or "failed check")
+        for check in checks
+        if check.get("passed") is False
+    ]
+    if not bool(stage_result.get("passed")) or failed:
+        detail = ", ".join(failed[:8]) or "manifest structural validation failed"
+        raise RuntimeError(f"p400 manifest structure is invalid: {detail}")
 
 
 def _write_orchestration(
     run_dir: Path,
     stop_target: str,
     now: str,
-    *,
-    foundation_reviews_passed: bool = False,
 ) -> dict[str, str]:
     buckets = ("p100", "p200", "p300", "p400", "p500", "p600")
     bucket_slots = {
-        "p100": ("p110", "p120", "p130"),
-        "p200": ("p210", "p220", "p230"),
-        "p300": ("p310", "p320", "p330"),
-        "p400": ("p410", "p420", "p430", "p440", "p450"),
-        "p500": ("p510", "p520", "p530", "p540", "p550", "p560", "p570"),
-        "p600": ("p610", "p620", "p630", "p640", "p650", "p660", "p670", "p680") if stop_target == "p680" else ("p610", "p620", "p630", "p640", "p650"),
+        "p100": ("p110", "p120"),
+        "p200": ("p210", "p220"),
+        "p300": ("p310", "p330"),
+        "p400": ("p410", "p420", "p440", "p450"),
+        "p500": ("p510", "p520", "p530", "p550", "p560", "p570"),
+        "p600": ("p610", "p620", "p650", "p660", "p670", "p680") if stop_target == "p680" else ("p610", "p620", "p650"),
     }
     bucket_artifacts = {
         "p100": ["research.md"],
@@ -14942,9 +11951,7 @@ def _write_orchestration(
         state_updates[f"{key}.status"] = "pending" if bucket_pending else "done"
         state_updates[f"{key}.finished_at"] = now
         status_key = f"slot.{bucket_slots[bucket][-1]}.status"
-        if foundation_reviews_passed and bucket in {"p100", "p200"}:
-            expected_status = "done"
-        elif bucket_pending:
+        if bucket_pending:
             expected_status = "pending"
         else:
             expected_status = "awaiting_approval" if bucket_slots[bucket][-1] in AWAITING_ALLOWED else "done"
@@ -14961,7 +11968,6 @@ def _write_orchestration(
             "completed_slots": completed_slots,
             "required_artifacts": [{"path": path, "exists": True} for path in bucket_artifacts[bucket]],
             "state_keys": {status_key: expected_status},
-            "review_outputs": [],
             "next_bucket": None if bucket == "p600" else "next",
         }
         _write_run_text_nofollow(
@@ -15029,7 +12035,7 @@ def _build_asset_artifacts_from_manifest(
         execution_lane = "standard" if reference_inputs else "bootstrap_builtin"
         coverage["characters"].append(asset_id)
         inventory_items.append({"item_id": asset_id, "category": "characters", "source_script_selectors": selectors, "story_purpose": role, "reusable_reason": "登場cutで人物同一性を保つ", "recommended_asset_type": "character_reference"})
-        plan_entries.append({"asset_id": asset_id, "asset_type": "character_reference", "source_script_selectors": selectors, "story_purpose": role, "fixed_prompts": fixed_prompts, "generation_prompt": str(entry.get("generation_prompt") or "").strip(), "subject_contract": deepcopy(entry.get("subject_contract") or {"identity_scope": "individual", "subject_count": 1, "member_ids": []}), "appearance_contract": deepcopy(entry.get("appearance_contract") or {}), "reuse_contract": deepcopy(entry.get("reuse_contract") or {"mode": "neutral_anchor"}), "visual_spec": {"subject": subject, "style": "photorealistic live-action cinematic", "forbidden": ["文字", "ロゴ", "アニメ"]}, "generation_plan": {"execution_lane": execution_lane, "bootstrap_allowed": not reference_inputs, "required_views": ["front", "side", "back"], "reference_inputs": reference_inputs, "output": output}, "review": {"status": "approved", "reason": "登場cutで人物同一性を保つため必須"}})
+        plan_entries.append({"asset_id": asset_id, "asset_type": "character_reference", "source_script_selectors": selectors, "story_purpose": role, "fixed_prompts": fixed_prompts, "generation_prompt": str(entry.get("generation_prompt") or "").strip(), "subject_contract": deepcopy(entry.get("subject_contract") or {"identity_scope": "individual", "subject_count": 1, "member_ids": []}), "appearance_contract": deepcopy(entry.get("appearance_contract") or {}), "reuse_contract": deepcopy(entry.get("reuse_contract") or {"mode": "neutral_anchor"}), "visual_spec": {"subject": subject, "style": "photorealistic live-action cinematic", "forbidden": ["文字", "ロゴ", "アニメ"]}, "generation_plan": {"execution_lane": execution_lane, "bootstrap_allowed": not reference_inputs, "required_views": ["front", "side", "back"], "reference_inputs": reference_inputs, "output": output}})
 
     for entry in assets.get("object_bible", []) or []:
         if not isinstance(entry, dict):
@@ -15044,7 +12050,7 @@ def _build_asset_artifacts_from_manifest(
         subject = str((entry.get("cinematic") or {}).get("visual_subject") or profile["artifact_visual"])
         fixed_prompts = [str(item) for item in entry.get("fixed_prompts") or [] if str(item).strip()]
         inventory_items.append({"item_id": asset_id, "category": "story_specific_items", "source_script_selectors": selectors, "story_purpose": role, "reusable_reason": "証が必要なcutで小道具の形状を保つ", "recommended_asset_type": "object_reference"})
-        plan_entries.append({"asset_id": asset_id, "asset_type": "object_reference", "source_script_selectors": selectors, "story_purpose": role, "fixed_prompts": fixed_prompts, "generation_prompt": str(entry.get("generation_prompt") or "").strip(), "reuse_contract": deepcopy(entry.get("reuse_contract") or {"mode": "neutral_anchor"}), "visual_spec": {"subject": subject, "style": "photorealistic live-action product still", "forbidden": ["文字", "ロゴ", "玩具風"]}, "generation_plan": {"execution_lane": "bootstrap_builtin", "bootstrap_allowed": True, "required_views": ["front"], "reference_inputs": [], "output": output}, "review": {"status": "approved", "reason": "証または舞台装置として必要なcutに使う"}})
+        plan_entries.append({"asset_id": asset_id, "asset_type": "object_reference", "source_script_selectors": selectors, "story_purpose": role, "fixed_prompts": fixed_prompts, "generation_prompt": str(entry.get("generation_prompt") or "").strip(), "reuse_contract": deepcopy(entry.get("reuse_contract") or {"mode": "neutral_anchor"}), "visual_spec": {"subject": subject, "style": "photorealistic live-action product still", "forbidden": ["文字", "ロゴ", "玩具風"]}, "generation_plan": {"execution_lane": "bootstrap_builtin", "bootstrap_allowed": True, "required_views": ["front"], "reference_inputs": [], "output": output}})
 
     for entry in assets.get("location_bible", []) or []:
         if not isinstance(entry, dict):
@@ -15067,7 +12073,7 @@ def _build_asset_artifacts_from_manifest(
         fixed_prompts = [str(item) for item in entry.get("fixed_prompts") or [] if str(item).strip()]
         coverage["locations"].append(asset_id)
         inventory_items.append({"item_id": asset_id, "category": "locations", "source_script_selectors": selectors, "story_purpose": f"{location_name}の空間・光・質感を固定する", "reusable_reason": "同じ場所のcutで背景と空気感を保つ", "recommended_asset_type": "location_reference"})
-        plan_entries.append({"asset_id": asset_id, "asset_type": "location_reference", "source_script_selectors": selectors, "story_purpose": f"{location_name}の空間構造と固定素材を保つ", "fixed_prompts": fixed_prompts, "generation_prompt": str(entry.get("generation_prompt") or "").strip(), "reuse_contract": deepcopy(entry.get("reuse_contract") or {"mode": "neutral_anchor"}), "visual_spec": {"subject": location_subject, "style": "photorealistic live-action cinematic location still", "forbidden": ["文字", "ロゴ", "人物主役", "アニメ"]}, "generation_plan": {"execution_lane": "bootstrap_builtin", "bootstrap_allowed": True, "required_views": ["wide"], "reference_inputs": [], "output": output}, "review": {"status": "approved", "reason": "scene背景の空間構造と固定素材の一貫性に必要"}})
+        plan_entries.append({"asset_id": asset_id, "asset_type": "location_reference", "source_script_selectors": selectors, "story_purpose": f"{location_name}の空間構造と固定素材を保つ", "fixed_prompts": fixed_prompts, "generation_prompt": str(entry.get("generation_prompt") or "").strip(), "reuse_contract": deepcopy(entry.get("reuse_contract") or {"mode": "neutral_anchor"}), "visual_spec": {"subject": location_subject, "style": "photorealistic live-action cinematic location still", "forbidden": ["文字", "ロゴ", "人物主役", "アニメ"]}, "generation_plan": {"execution_lane": "bootstrap_builtin", "bootstrap_allowed": True, "required_views": ["wide"], "reference_inputs": [], "output": output}})
 
     if not plan_entries:
         raise RuntimeError("manifest did not yield any reusable asset plan entries")
@@ -15076,64 +12082,14 @@ def _build_asset_artifacts_from_manifest(
     return inventory, plan
 
 
-def _review_foundation_stage(
-    *,
-    run_dir: Path,
-    stage: str,
-    review_runner: Callable[[Path, str], None] | None,
-) -> None:
-    if review_runner is None:
-        return
-    slot = "p130" if stage == "research" else "p230"
-    append_state_snapshot(
-        run_dir / "state.txt",
-        {
-            "timestamp": _now_iso(),
-            "runtime.stage": f"{stage}_semantic_review",
-            f"review.{stage}.status": "reviewing",
-            f"slot.{slot}.status": "in_progress",
-            f"slot.{slot}.note": f"{stage} semantic review/repair in progress",
-        },
-    )
-    try:
-        review_runner(run_dir, stage)
-        result = check_semantic_review(run_dir, stage)
-        if not result.passed:
-            raise RuntimeError(f"{stage} semantic review did not pass: {'; '.join(result.errors)}")
-    except Exception as exc:
-        append_state_snapshot(
-            run_dir / "state.txt",
-            {
-                "timestamp": _now_iso(),
-                "runtime.stage": "foundation_semantic_review_failed",
-                "runtime.foundation_semantic_review.failed_stage": stage,
-                f"review.{stage}.status": "changes_requested",
-                f"slot.{slot}.status": "failed",
-                f"slot.{slot}.note": f"{stage} semantic review/repair failed; downstream generation blocked",
-                "last_error": str(exc)[:2000],
-            },
-        )
-        raise
-    append_state_snapshot(
-        run_dir / "state.txt",
-        {
-            "timestamp": _now_iso(),
-            "runtime.stage": f"{stage}_semantic_review_passed",
-            f"review.{stage}.status": "approved",
-            f"slot.{slot}.status": "done",
-            f"slot.{slot}.note": f"{stage} semantic review/repair passed",
-        },
-    )
-
-
 def materialize_run(
     topic: str,
     source: str,
     run_dir: Path,
     stop_target: str,
     target_duration_seconds: int = 300,
-    review_mode: str = "standard",
-    foundation_review_runner: Callable[[Path, str], None] | None = None,
+    review_mode: str | None = None,
+    story_author_runner: Callable[..., None] | None = None,
     experience: str = "cinematic_story",
     source_run: Path | None = None,
     world_walk_source_identity: PathIdentity | None = None,
@@ -15143,8 +12099,10 @@ def materialize_run(
     ) = None,
     world_walk_source_story_sha256: str | None = None,
 ) -> None:
-    if review_mode not in REVIEW_MODES:
-        raise ValueError("review_mode must be standard or preapproved")
+    # Keep accepting the legacy switch while the server/client migration
+    # completes.  Creation is deliberately single-path and never records or
+    # branches on this value.
+    del review_mode
     target_duration_seconds = normalize_target_duration(
         target_duration_seconds
     )
@@ -15275,10 +12233,6 @@ def materialize_run(
             expected_root_identity=materialization_root_identity,
         )
     now = _now_iso()
-    preapproved_reviews = review_mode == "preapproved"
-    review_policy = "preapproved" if preapproved_reviews else "frontend"
-    required_review_gate = "skipped" if preapproved_reviews else "required"
-    optional_review_gate = "skipped" if preapproved_reviews else "optional"
     append_state_snapshot(
         run_dir / "state.txt",
         {
@@ -15290,39 +12244,12 @@ def materialize_run(
             "runtime.duration_gate.minimum_seconds": str(int(duration_plan["minimum_effective_seconds"])),
             "runtime.duration_plan.minimum_scene_count": str(duration_plan["minimum_scene_count"]),
             "runtime.duration_plan.minimum_narration_seconds": str(duration_plan["minimum_narration_seconds"]),
-            "runtime.foundation_semantic_review": (
-                "preapproved"
-                if preapproved_reviews
-                else (
-                    "required"
-                    if foundation_review_runner
-                    else "not_run_direct_materialization"
-                )
-            ),
             "immersive.experience": experience,
             **(
                 {"immersive.source_run": source_run.relative_to(REPO_ROOT).as_posix()}
                 if source_run is not None
                 else {}
             ),
-            "runtime.review_policy": review_policy,
-            "runtime.review_mode": review_mode,
-            "review.policy.story": required_review_gate,
-            "review.policy.image": required_review_gate,
-            "review.policy.narration": optional_review_gate,
-            "gate.research_review": required_review_gate,
-            "gate.story_review": required_review_gate,
-            "gate.image_review": required_review_gate,
-            "gate.narration_review": optional_review_gate,
-            "review.research.status": (
-                "approved" if preapproved_reviews else "pending"
-            ),
-            "review.story.status": (
-                "approved" if preapproved_reviews else "pending"
-            ),
-            "review.image.status": "pending",
-            "slot.p130.status": "pending",
-            "slot.p230.status": "pending",
             "slot.p420.status": "pending",
             "slot.p650.status": "pending",
             **(
@@ -15334,8 +12261,6 @@ def materialize_run(
                 if stop_target == "p680"
                 else {}
             ),
-            "review.image_prompt.request_freeze.status": "draft",
-            "review.image_prompt.request_freeze.invalidated_by": "new_materialization",
         },
     )
     _write_run_text_nofollow(
@@ -15346,14 +12271,9 @@ def materialize_run(
             _build_research(topic, source, now, profile),
         ),
     )
-    _review_foundation_stage(
-        run_dir=run_dir,
-        stage="research",
-        review_runner=foundation_review_runner,
-    )
     _research_text, reviewed_research = load_structured_document(run_dir / "research.md")
     if not reviewed_research:
-        raise RuntimeError("reviewed research.md is not a structured document")
+        raise RuntimeError("research.md is not a structured document")
     try:
         _validate_reviewed_research_duration_contract(
             reviewed_research,
@@ -15364,11 +12284,8 @@ def materialize_run(
             run_dir / "state.txt",
             {
                 "timestamp": _now_iso(),
-                "runtime.stage": "reviewed_research_duration_contract_failed",
-                "review.research.status": "changes_requested",
-                "review.research.duration_contract.status": "failed",
-                "slot.p130.status": "failed",
-                "slot.p130.note": "reviewed research changed the requested duration plan; story/cut materialization blocked",
+                "runtime.stage": "research_duration_contract_failed",
+                "research.duration_contract.status": "failed",
                 "last_error": str(exc)[:2000],
             },
         )
@@ -15377,26 +12294,54 @@ def materialize_run(
         run_dir / "state.txt",
         {
             "timestamp": _now_iso(),
-            "review.research.duration_contract.status": "passed",
+            "research.duration_contract.status": "passed",
         },
     )
     profile = _profile_from_reviewed_research(profile, reviewed_research)
-    _write_run_text_nofollow(
-        run_dir,
-        run_dir / "story.md",
-        _md_yaml(
-            f"物語設計（{profile['topic_label']}）",
-            _build_story(topic, run_dir, now, profile),
-        ),
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "timestamp": _now_iso(),
+            "runtime.stage": "story_authoring",
+            "slot.p200.status": "in_progress",
+            "slot.p200.note": "Story Architect / Scene Author is grounding story.md in researched source material",
+        },
     )
-    _review_foundation_stage(
+    (story_author_runner or _author_story_with_codex)(
         run_dir=run_dir,
-        stage="story",
-        review_runner=foundation_review_runner,
+        topic=topic,
+        target_duration_seconds=target_duration_seconds,
+    )
+    append_state_snapshot(
+        run_dir / "state.txt",
+        {
+            "timestamp": _now_iso(),
+            "runtime.stage": "story_authored",
+            "slot.p200.status": "authored",
+            "slot.p200.note": "LLM-authored story.md passed deterministic research and handoff validation",
+        },
     )
     _story_text, reviewed_story = load_structured_document(run_dir / "story.md")
     if not reviewed_story:
-        raise RuntimeError("reviewed story.md is not a structured document")
+        raise RuntimeError("story.md is not a structured document")
+    reviewed_story_contract_errors = validate_story_document(
+        reviewed_story,
+        build_research_registry(reviewed_research),
+    )
+    if reviewed_story_contract_errors:
+        append_state_snapshot(
+            run_dir / "state.txt",
+            {
+                "timestamp": _now_iso(),
+                "runtime.stage": "story_contract_failed",
+                "story.contract.status": "failed",
+                "last_error": ", ".join(reviewed_story_contract_errors)[:2000],
+            },
+        )
+        raise RuntimeError(
+            "story contract failed before cut materialization: "
+            + ", ".join(reviewed_story_contract_errors)
+        )
     try:
         _validate_reviewed_story_duration_contract(
             reviewed_story,
@@ -15407,11 +12352,8 @@ def materialize_run(
             run_dir / "state.txt",
             {
                 "timestamp": _now_iso(),
-                "runtime.stage": "reviewed_story_duration_contract_failed",
-                "review.story.status": "changes_requested",
-                "review.story.duration_contract.status": "failed",
-                "slot.p230.status": "failed",
-                "slot.p230.note": "reviewed story violates duration floors; cut materialization blocked",
+                "runtime.stage": "story_duration_contract_failed",
+                "story.duration_contract.status": "failed",
                 "last_error": str(exc)[:2000],
             },
         )
@@ -15420,7 +12362,7 @@ def materialize_run(
         run_dir / "state.txt",
         {
             "timestamp": _now_iso(),
-            "review.story.duration_contract.status": "passed",
+            "story.duration_contract.status": "passed",
         },
     )
     try:
@@ -15430,11 +12372,8 @@ def materialize_run(
             run_dir / "state.txt",
             {
                 "timestamp": _now_iso(),
-                "runtime.stage": "reviewed_story_time_of_day_contract_failed",
-                "review.story.status": "changes_requested",
-                "review.story.time_of_day_contract.status": "failed",
-                "slot.p230.status": "failed",
-                "slot.p230.note": "reviewed story lost required scene time-of-day values; cut materialization blocked",
+                "runtime.stage": "story_time_of_day_contract_failed",
+                "story.time_of_day_contract.status": "failed",
                 "last_error": str(exc)[:2000],
             },
         )
@@ -15443,14 +12382,13 @@ def materialize_run(
         run_dir / "state.txt",
         {
             "timestamp": _now_iso(),
-            "review.story.time_of_day_contract.status": "passed",
+            "story.time_of_day_contract.status": "passed",
         },
     )
     reviewed_adaptation_contract = reviewed_story.get("adaptation_source_contract")
     if isinstance(reviewed_adaptation_contract, dict) and reviewed_adaptation_contract:
         profile["adaptation_source_contract"] = deepcopy(reviewed_adaptation_contract)
-    if foundation_review_runner is not None:
-        profile = _profile_from_reviewed_story(profile, reviewed_story)
+    profile = _profile_from_reviewed_story(profile, reviewed_story)
     protagonist_asset = profile["protagonist_asset_id"]
     artifact_asset = profile["artifact_asset_id"]
     visual = {

@@ -1,8 +1,8 @@
 """Compile first-frame design data into a conditional drawable image prompt.
 
 The compiler deliberately accepts a derived ``first_frame_visual_plan`` rather
-than a full cut contract.  This keeps motion, event ids, review metadata, and
-other authoring fields outside the provider-facing prompt by construction.
+than a full cut contract.  This keeps motion, event ids, and other authoring
+fields outside the provider-facing prompt by construction.
 """
 
 from __future__ import annotations
@@ -87,7 +87,6 @@ def compile_image_api_prompt_v2(
     reference_images: Iterable[str] = (),
     story_time: str = "",
     scene_time_of_day: str = "",
-    review_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return an ``image_api_prompt_v2`` payload from drawable plan fields only."""
 
@@ -129,9 +128,6 @@ def compile_image_api_prompt_v2(
         "sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "drawable_prompt_ir": ir.as_dict(),
     }
-    for key, value in dict(review_metadata or {}).items():
-        if key not in payload:
-            payload[key] = value
     return payload
 
 

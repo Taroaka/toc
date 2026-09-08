@@ -1,164 +1,147 @@
-# Cut Loop (p420)
+# Cut Authoring (p420)
 
-This document is the canonical operating guide for turning an approved scene contract into viewer-facing cut contracts.
-
-p420 does not split a scene into short summaries. It designs the beats the audience will actually see, hear, and follow, then makes those beats usable by p500 assets, p600 image prompts, p700 narration, and p800 video motion.
+p420 は scene event を viewer-facing cut contracts へ変換する authoring stage である。入力は
+source-grounded script.md、scene event、scene intent、visual-value handoff。出力は
+cut_blueprint、coverage plan、p450 skeleton manifest への materialization input。
 
 ## Outcome
 
-p420 is complete only when every production scene has:
+各 production scene が次を満たす。
 
-- a `scene_cut_coverage_plan` that assigns `scene_event.event_sequence[]` beats and scene-intent obligations to concrete cuts;
-- every cut referencing its event beat through `cut_contract.source_event_contract`;
-- `event_context_for_cut` generated as a downstream projection from `scene_event` and `source_event_contract`, not hand-authored;
-- enough cuts to cover every distinct authored semantic obligation and required event beat;
-- one viewer-facing intent per cut;
-- a concrete `audience_knowledge_delta`, `causal_proof`, role coverage, and anti-redundancy key per cut;
-- a startable first-frame still for p600 that proves the cut in a static image;
-- a motion contract for p800 that starts from that still without adding new story;
-- a narration contract or explicit silent reason for p700;
-- a downstream handoff for p500/p600/p700/p800.
+- scene_cut_coverage_plan が authored event beats と distinct visual obligations を cut に割り当てる
+- 各 cut が cut_contract.source_event_contract で source beat を参照する
+- one viewer-facing intent、screen question、causal proof、visible evidence、role coverage がある
+- first-frame still の開始状態と p800 motion の終端が concrete である
+- narration role または explicit silence contract と downstream handoff がある
+- scene/cut/event IDs と ordered selectors が一意で解決する
 
-## Cut Count
-
-Derive the floor only from authored semantic/event responsibilities after grouping obligations that prove the same story fact.
+## Cut count
 
 ```text
-by_distinct_semantic_obligations = count(unique non-duration cut_assignments[].obligation_id(s))
-by_event_beats = count(unique event_beat_inventory[].beat_id where must_be_seen is not false)
-selected = max(by_distinct_semantic_obligations, by_event_beats)
+by_distinct_obligations = count(unique obligation_id)
+by_event_beats = count(unique event_beat_id where must_be_seen is not false)
+selected = max(by_distinct_obligations, by_event_beats)
 ```
 
-`importance`, `target_duration_seconds`, legacy `by_importance`, and legacy `by_duration` are review context only and must not raise `selected`. Do not create `duration_*` obligations or duplicate generic action to fill time. Meet total duration through semantically justified cut durations, narration/silence, or a revised scene structure. A cut longer than 12 seconds still needs a `duration_exception.reason`.
+importance、target duration、固定 seconds-per-cut は count の根拠にしない。同じ事実を証明
+する obligation は一つにまとめ、別の visible responsibility がある場合だけ cut を増やす。
+尺は cut duration、narration、intentional silence、scene 配分、provider capability で調整する。
 
-Do not choose a cut count by a fixed template. First list the scene's visual obligations, then group similar obligations into one cut when they prove the same story fact. Add a cut only when an obligation would otherwise be unassigned or overloaded. Transformation, spectacle, proof reveal, confrontation, and emotional reversal often need more cuts, but labels such as `setup`, `pressure`, `threshold`, `turn`, `payoff`, `reaction`, and `handoff` are optional names, not a required sequence.
-
-## p420 Steps
-
-### p420a Coverage Planning
-
-Create `scene_cut_coverage_plan` before writing cuts.
+## p420a Coverage planning
 
 ```yaml
 scene_cut_coverage_plan:
-  coverage_strategy: "reverse_from_scene_event"
-  source_schema_version: "scene_event_v1"
-  min_cut_count:
-    by_distinct_semantic_obligations: 1
-    by_event_beats: 1
-    selected: 1
+  coverage_strategy: reverse_from_scene_event
+  source_schema_version: scene_event_v1
   event_beat_inventory:
-    - beat_id: "scene1_event_turn"
-      beat_function: "turn"
+    - beat_id: scene_01_beat_01
+      beat_function: custom
       must_be_seen: true
-      assigned_cut_ids: ["scene1_cut1"]
+      assigned_cut_ids: [scene_01_cut_01]
   scene_obligations:
-    - obligation_id: "scene1_turn_proof_01"
-      source: "causal_turn"
-      evidence: "the visible proof that makes the turn irreversible"
-      assigned_cut_ids: ["scene1_cut1"]
+    - obligation_id: scene_01_obligation_01
+      source: causal_turn
+      evidence: "visible proof"
+      assigned_cut_ids: [scene_01_cut_01]
   cut_assignments:
-    - cut_index: 1
-      cut_selector: "scene1_cut1"
-      obligation_ids: ["scene1_turn_proof_01"]
-      cut_function: "turn"
+    - cut_selector: scene_01_cut_01
+      obligation_ids: [scene_01_obligation_01]
       event_assignment:
         source_event_contract:
-          primary_event_beat_id: "scene1_event_turn"
-          source_event_beat_ids: ["scene1_event_turn"]
-      target_beat: "the irreversible visible turn"
+          primary_event_beat_id: scene_01_beat_01
+          source_event_beat_ids: [scene_01_beat_01]
+      target_beat: "visible turn"
 ```
 
-Repeat the inventory, obligation, and assignment rows for every authored ID; the three counters must equal the unique IDs materialized in those rows.
+Inventory rows must preserve every authored beat ID exactly once and in order. Assignment rows may omit
+must_be_seen: false beats. All referenced selectors and IDs are checked before manifest materialization.
 
-The important question is not "which of the standard slots is this cut?" but "what must be visible for this scene to exist as a scene?" If the answer is already proven by an existing cut, thicken that cut's prompt and contract instead of adding a duplicate cut.
-
-### p420b Cut Contract Drafting
-
-Each cut should materialize `cut_contract.schema_version: "3.0"`. `source_event_contract` is the event-beat source of truth. `scene_contract` may remain as a compatibility alias for older readers, but it is not a V3 pass condition.
-
-Required areas:
-
-- `source_event_contract`: primary/source event beat ids, beat function, event time position, source action/reaction, facts to preserve, facts not to invent, reveal boundary.
-- `viewer_contract`: target beat, screen question, dramatic job, audience knowledge delta, causal proof, visual evidence, required roles, anti-redundancy key, visual proof, must-show, must-avoid, done-when.
-- `viewer_contract.mixed_affect_design`: optional layer for mixed emotion, tension/release, bittersweet payoff, or aftertaste. `mode: none` is valid; non-`none` modes need concrete visual, narration, sound/rhythm, or handoff support and must not add a second plot intent.
-- `cinematic_contract`: camera purpose, shot size, subject priority, foreground/midground/background, screen direction.
-- `continuity_contract`: start state, end state, carry-forward items, continuity risks.
-- `first_frame_contract`: p600-only still requirement, action completion state, and static first-frame rule. It must be an imageable state, not a motion description.
-- `motion_contract`: p800-only movement, end state, and things motion must not add.
-- `narration_contract`: p700 role or silent reason.
-- `event_context_for_cut`: non-editable derived projection for p600/p700/p800.
-- `downstream_handoff`: what each downstream stage receives.
-
-### p420c Review
-
-The review is a gate, not advice. The aggregate report must include:
-
-```text
-## Cut Blueprint Gate
-cut_intent_isolation
-scene_event_coverage
-event_beat_reference_integrity
-first_frame_motion_readiness
-event_first_frame_alignment
-multimodal_event_boundary_coverage
-source_event_preservation
-no_unapproved_event_invention
-event_motion_boundary
-event_narration_boundary
-event_context_for_cut_ready
-causal_proof_coverage
-role_coverage
-audience_knowledge_delta_coverage
-anti_redundancy_gate
-duration_density_and_handoff
-coverage_plan_complete
-continuity_contract_complete
-narration_contract_complete
-downstream_handoff_complete
-triangulation_review_ready
-mixed_affect_optional_or_supported
-```
-
-Do not pass p420 while any of these are unresolved.
-
-### p420d Handoff Matrix
-
-Build a handoff matrix that checks what each cut receives from the previous cut, what it delivers to the next cut, and what p500/p600/p700/p800 need.
-
-### p420e Manifest Materialization
-
-Materialize the approved cut contracts into `video_manifest.md.scenes[].cuts[]`.
-
-New manifests should write V3 `cut_contract`. Legacy readers may read `scene_contract`, but V3 gates must not pass from `scene_contract`, top-level event refs, or `assigned_story_event_ids`.
-
-## Blocking Reason Keys
+## p420b Cut contract drafting
 
 ```yaml
-- cut_overloaded_multiple_beats
-- cut_missing_screen_question
-- cut_missing_visual_proof
-- story_event_obligation_unassigned
-- audience_knowledge_delta_missing
-- causal_proof_weak
-- role_coverage_missing
-- static_first_frame_not_imageable
-- scene_cut_redundancy_excessive
-- cut_not_imageable
-- cut_not_movable
-- cut_missing_narration_contract
-- cut_narration_is_caption
-- cut_silent_without_reason
-- cut_missing_threshold_before_turn
-- cut_missing_reaction_after_turn
-- cut_missing_handoff
-- cut_breaks_reveal_constraint
-- cut_continuity_unclear
-- cut_asset_dependency_missing
-- cut_duration_unjustified
-- cut_role_duplicate
-- cut_downstream_handoff_missing
-- cut_triangulation_unready
-- mixed_affect_support_missing
-- mixed_affect_overloads_primary_intent
+cut_contract:
+  schema_version: "3.0"
+  source_event_contract:
+    primary_event_beat_id: scene_01_beat_01
+    source_event_beat_ids: [scene_01_beat_01]
+    event_beat_function: custom
+    event_time_position: before_trigger
+    event_facts_to_preserve: []
+    event_facts_not_to_invent: []
+    allowed_reveal_info_ids: []
+    forbidden_reveal_info_ids: []
+  intent_budget:
+    primary_intent: ""
+    assigned_obligation_ids: []
+  viewer_contract:
+    screen_question: ""
+    audience_knowledge_delta: ""
+    causal_proof: ""
+    visual_evidence: []
+    required_roles: []
+    must_show: []
+    must_avoid: []
+  first_frame_contract:
+    imageable: true
+    source_event_beat_id: scene_01_beat_01
+    event_fact_visible_in_still: ""
+    not_yet_happened_in_still: []
+  motion_contract:
+    starts_from_first_frame: true
+    source_event_beat_id: scene_01_beat_01
+    motion_brief: ""
+    end_state: ""
+    must_not_add: []
+  narration_contract:
+    schema_version: narration_contract_v2
+    source_event_beat_ids: [scene_01_beat_01]
+    allowed_info_ids: []
+    forbidden_info_ids: []
+    must_not_caption_visible_action: true
+  asset_dependency:
+    character_ids_required: []
+    object_ids_required: []
+    location_ids_required: []
+  downstream_handoff:
+    p500_asset: {required_asset_ids: []}
+    p600_image: {reference_requirements: []}
+    p700_narration: {narration_requirements: []}
+    p800_video: {motion_requirements: []}
 ```
+
+The cut_contract is a design object, not provider prompt text. scene_contract may remain as a legacy
+read alias but is never a completion signal.
+
+## p420c Structural checks
+
+- source beat IDs, obligation IDs, cut selectors, asset IDs, and handoff selectors are unique and valid
+- event inventory equals the authored ordered event sequence
+- each must-see beat has a cut assignment and each cut has one primary intent
+- first-frame visible state is imageable and does not show a future event
+- motion starts from the first frame and does not add an unlisted character, object, location, or reveal
+- narration stays inside its event boundary or carries an explicit silence reason and duration
+- duration and provider capability are valid
+- script and skeleton manifest selectors are exactly equal
+
+A failed check identifies the artifact and selector to edit. After the owner updates the contract,
+rerun checks and materialize p450. Do not write a synthetic pass field.
+
+## p420d Handoff matrix
+
+For every cut, record what arrives from the preceding cut, what is delivered to the next cut, and which
+asset/image/narration/video fields consume it. Use exact IDs and source hashes.
+
+## p420e Manifest materialization
+
+p450 writes video_manifest.md.scenes[].cuts[] from the checked cut contracts. It copies canonical
+contracts and request placeholders, then stores a manifest/source digest. p500 and later stages compile
+provider payloads from this manifest.
+
+## References
+
+- docs/script-creation.md
+- docs/implementation/scene-loop.md
+- docs/data-contracts.md
+- workflow/scene-outline-template.yaml
+- workflow/cut-blueprint-template.yaml
+

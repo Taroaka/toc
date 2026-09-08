@@ -1,0 +1,4309 @@
+[
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "P560AssetGateError",
+    "line": 652,
+    "end_line": 668,
+    "local_callers": [
+      {
+        "caller": "_validate_p560_asset_quality",
+        "line": 16490
+      },
+      {
+        "caller": "_validate_p560_asset_quality",
+        "line": 16463
+      },
+      {
+        "caller": "_validate_p560_asset_quality",
+        "line": 16469
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "FrontendReviewItem",
+    "line": 799,
+    "end_line": 822,
+    "local_callers": [
+      {
+        "caller": "_materialized_video_generate_item",
+        "line": 6858
+      },
+      {
+        "caller": "_video_prompt_item_materialization_is_current",
+        "line": 11531
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "FrontendReviewDraftRequest",
+    "line": 825,
+    "end_line": 829,
+    "local_callers": []
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "NarrationReviewRunRequest",
+    "line": 977,
+    "end_line": 978,
+    "local_callers": []
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_image_prompt_story_review_scalar",
+    "line": 3420,
+    "end_line": 3425,
+    "local_callers": [
+      {
+        "caller": "_deterministic_image_prompt_review_structure_errors",
+        "line": 3473
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_structure_errors",
+        "line": 3490
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_structure_errors",
+        "line": 3573
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_structure_errors",
+        "line": 3611
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_structure_errors",
+        "line": 3507
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_structure_errors",
+        "line": 3524
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_structure_errors",
+        "line": 3568
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_structure_errors",
+        "line": 3651
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_structure_errors",
+        "line": 3607
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_structure_errors",
+        "line": 3585
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_structure_errors",
+        "line": 3593
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_structure_errors",
+        "line": 3601
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_binding_errors",
+        "line": 3722
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_binding_errors",
+        "line": 3726
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_binding_errors",
+        "line": 3753
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_binding_errors",
+        "line": 3773
+      },
+      {
+        "caller": "_deterministic_image_prompt_hard_gate_errors",
+        "line": 3812
+      },
+      {
+        "caller": "_deterministic_image_prompt_hard_gate_errors",
+        "line": 3816
+      },
+      {
+        "caller": "_deterministic_image_prompt_hard_gate_errors",
+        "line": 3811
+      },
+      {
+        "caller": "_deterministic_image_prompt_hard_gate_errors",
+        "line": 3817
+      },
+      {
+        "caller": "_deterministic_image_prompt_hard_findings_from_report_text",
+        "line": 3898
+      },
+      {
+        "caller": "_deterministic_image_prompt_hard_findings_from_report_text",
+        "line": 3904
+      },
+      {
+        "caller": "_deterministic_image_prompt_hard_findings_from_report_text",
+        "line": 3894
+      },
+      {
+        "caller": "_deterministic_image_prompt_hard_findings_from_report_text",
+        "line": 3915
+      },
+      {
+        "caller": "_deterministic_image_prompt_hard_finding_details_are_complete",
+        "line": 3965
+      },
+      {
+        "caller": "_deterministic_image_prompt_hard_finding_details_are_complete",
+        "line": 3968
+      },
+      {
+        "caller": "_refresh_deterministic_image_prompt_review_if_stale",
+        "line": 4030
+      },
+      {
+        "caller": "_refresh_deterministic_image_prompt_review_if_stale",
+        "line": 3996
+      },
+      {
+        "caller": "_project_image_prompt_reviews_to_p630_p640",
+        "line": 14536
+      },
+      {
+        "caller": "_project_image_prompt_reviews_to_p630_p640",
+        "line": 14539
+      },
+      {
+        "caller": "_project_image_prompt_reviews_to_p630_p640",
+        "line": 14533
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_deterministic_image_prompt_review_sources_are_current",
+    "line": 3428,
+    "end_line": 3443,
+    "local_callers": [
+      {
+        "caller": "_deterministic_image_prompt_review_integrity_errors",
+        "line": 3854
+      },
+      {
+        "caller": "_deterministic_image_prompt_hard_finding_details_are_complete",
+        "line": 3956
+      },
+      {
+        "caller": "_refresh_deterministic_image_prompt_review_if_stale",
+        "line": 3993
+      },
+      {
+        "caller": "_refresh_deterministic_image_prompt_review_if_stale",
+        "line": 4029
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_deterministic_image_prompt_review_sections",
+    "line": 3446,
+    "end_line": 3456,
+    "local_callers": [
+      {
+        "caller": "_deterministic_image_prompt_review_structure_errors",
+        "line": 3537
+      },
+      {
+        "caller": "_deterministic_image_prompt_hard_findings_from_report_text",
+        "line": 3893
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_deterministic_image_prompt_review_structure_errors",
+    "line": 3471,
+    "end_line": 3714,
+    "local_callers": [
+      {
+        "caller": "_deterministic_image_prompt_review_integrity_errors",
+        "line": 3857
+      },
+      {
+        "caller": "_deterministic_image_prompt_hard_finding_details_are_complete",
+        "line": 3959
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_deterministic_image_prompt_review_binding_errors",
+    "line": 3717,
+    "end_line": 3795,
+    "local_callers": [
+      {
+        "caller": "_deterministic_image_prompt_review_sources_are_current",
+        "line": 3440
+      },
+      {
+        "caller": "_deterministic_image_prompt_review_integrity_errors",
+        "line": 3858
+      },
+      {
+        "caller": "_deterministic_image_prompt_hard_finding_details_are_complete",
+        "line": 3961
+      },
+      {
+        "caller": "_refresh_deterministic_image_prompt_review_if_stale",
+        "line": 4032
+      },
+      {
+        "caller": "_refresh_deterministic_image_prompt_review_if_stale",
+        "line": 3998
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_deterministic_image_prompt_hard_gate_errors",
+    "line": 3798,
+    "end_line": 3840,
+    "local_callers": [
+      {
+        "caller": "_mark_image_prompt_draft_reviewed",
+        "line": 14695
+      },
+      {
+        "caller": "_mark_image_prompt_request_freeze_done",
+        "line": 14746
+      },
+      {
+        "caller": "_mark_localized_image_prompt_request_freeze",
+        "line": 18269
+      },
+      {
+        "caller": "_run_image_prompt_sharded_semantic_review_once",
+        "line": 23249
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_deterministic_image_prompt_review_integrity_errors",
+    "line": 3843,
+    "end_line": 3859,
+    "local_callers": [
+      {
+        "caller": "_deterministic_image_prompt_hard_gate_errors",
+        "line": 3803
+      },
+      {
+        "caller": "_mark_image_prompt_draft_reviewed",
+        "line": 14693
+      },
+      {
+        "caller": "_mark_image_prompt_request_freeze_done",
+        "line": 14744
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_refresh_deterministic_image_prompt_review_if_stale",
+    "line": 3991,
+    "end_line": 4035,
+    "local_callers": [
+      {
+        "caller": "_prepare_image_prompt_request_revision_for_review",
+        "line": 4094
+      },
+      {
+        "caller": "_prepare_image_prompt_request_revision_for_review",
+        "line": 4053
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_prepare_image_prompt_request_revision_for_review",
+    "line": 4038,
+    "end_line": 4095,
+    "local_callers": [
+      {
+        "caller": "_reconcile_after_semantic_repair",
+        "line": 17547
+      },
+      {
+        "caller": "_reconcile_after_semantic_repair",
+        "line": 17355
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19087
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19525
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19451
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_validate_image_prompt_semantic_review",
+    "line": 4386,
+    "end_line": 4389,
+    "local_callers": []
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_validate_semantic_reviews",
+    "line": 4392,
+    "end_line": 4402,
+    "local_callers": [
+      {
+        "caller": "_validate_p650_run_core",
+        "line": 4164
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_validate_semantic_reviews_for_media_generation",
+    "line": 4405,
+    "end_line": 4421,
+    "local_callers": [
+      {
+        "caller": "_validate_p650_run_core",
+        "line": 4167
+      },
+      {
+        "caller": "_validate_frontend_create_run",
+        "line": 4334
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_validate_review_item_paths",
+    "line": 7030,
+    "end_line": 7040,
+    "local_callers": [
+      {
+        "caller": "_write_frontend_review_draft",
+        "line": 7092
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_frontend_review_dir",
+    "line": 7077,
+    "end_line": 7078,
+    "local_callers": [
+      {
+        "caller": "_write_frontend_review_draft",
+        "line": 7093
+      },
+      {
+        "caller": "_backup_run_file",
+        "line": 7126
+      },
+      {
+        "caller": "_freeze_render_inputs",
+        "line": 10527
+      },
+      {
+        "caller": "_freeze_render_inputs",
+        "line": 10519
+      },
+      {
+        "caller": "_write_video_prompt_design",
+        "line": 11216
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_write_frontend_review_draft",
+    "line": 7081,
+    "end_line": 7119,
+    "local_callers": [
+      {
+        "caller": "api_save_frontend_review",
+        "line": 29589
+      },
+      {
+        "caller": "_create_video_prompts_locked",
+        "line": 29690
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_invalidate_narration_run_approval",
+    "line": 7303,
+    "end_line": 7315,
+    "local_callers": [
+      {
+        "caller": "_save_frontend_narration_text",
+        "line": 7605
+      },
+      {
+        "caller": "_narration_silent_ok",
+        "line": 8514
+      },
+      {
+        "caller": "_approve_manifest_narration_audio",
+        "line": 9461
+      },
+      {
+        "caller": "api_narration_review_run",
+        "line": 30298
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_narration_grounding_values",
+    "line": 7358,
+    "end_line": 7364,
+    "local_callers": [
+      {
+        "caller": "_narration_grounding_is_current",
+        "line": 7369
+      },
+      {
+        "caller": "_save_frontend_narration_text",
+        "line": 7544
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_narration_grounding_is_current",
+    "line": 7367,
+    "end_line": 7370,
+    "local_callers": [
+      {
+        "caller": "_save_frontend_narration_text",
+        "line": 7533
+      },
+      {
+        "caller": "_narration_audio_readiness",
+        "line": 8533
+      },
+      {
+        "caller": "_manifest_narration_items",
+        "line": 8925
+      },
+      {
+        "caller": "_prepare_manifest_narration_generation",
+        "line": 9255
+      },
+      {
+        "caller": "_approve_manifest_narration_audio",
+        "line": 9438
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_invalidate_narration_for_grounding_rebind",
+    "line": 7412,
+    "end_line": 7457,
+    "local_callers": [
+      {
+        "caller": "_save_frontend_narration_text",
+        "line": 7537
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_append_narration_preview_state",
+    "line": 7480,
+    "end_line": 7505,
+    "local_callers": [
+      {
+        "caller": "_prepare_manifest_narration_generation",
+        "line": 9306
+      },
+      {
+        "caller": "api_narration_generate",
+        "line": 30061
+      },
+      {
+        "caller": "api_narration_generate_bulk",
+        "line": 30123
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_video_review_dependencies_for_server_target",
+    "line": 7927,
+    "end_line": 7953,
+    "local_callers": [
+      {
+        "caller": "_compile_frontend_video_prompt_payload",
+        "line": 10853
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_has_existing_narration_review",
+    "line": 8259,
+    "end_line": 8288,
+    "local_callers": [
+      {
+        "caller": "_create_narration_drafts_in_manifest",
+        "line": 8358
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_narration_audio_readiness",
+    "line": 8519,
+    "end_line": 8591,
+    "local_callers": [
+      {
+        "caller": "_narration_duration_readiness_for_data",
+        "line": 8618
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_narration_duration_readiness_for_data",
+    "line": 8612,
+    "end_line": 8655,
+    "local_callers": [
+      {
+        "caller": "_narration_duration_readiness",
+        "line": 8660
+      },
+      {
+        "caller": "_approve_narration_full_run",
+        "line": 10008
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_narration_duration_readiness",
+    "line": 8658,
+    "end_line": 8664,
+    "local_callers": [
+      {
+        "caller": "_append_narration_review_approved_if_ready",
+        "line": 8712
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_append_narration_review_approved_if_ready",
+    "line": 8711,
+    "end_line": 8786,
+    "local_callers": [
+      {
+        "caller": "_require_narration_ready_for_video",
+        "line": 8790
+      },
+      {
+        "caller": "_approve_manifest_narration_audio",
+        "line": 9472
+      },
+      {
+        "caller": "api_narration_silent_ok",
+        "line": 29994
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_run_narration_semantic_review",
+    "line": 9522,
+    "end_line": 9538,
+    "local_callers": [
+      {
+        "caller": "api_narration_review_run",
+        "line": 30224
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_prepare_narration_semantic_review_artifacts",
+    "line": 9541,
+    "end_line": 9563,
+    "local_callers": [
+      {
+        "caller": "api_narration_review_run",
+        "line": 30282
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_manifest_record",
+    "line": 9566,
+    "end_line": 9581,
+    "local_callers": [
+      {
+        "caller": "api_narration_review_run",
+        "line": 30286
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_narration_review_blockers",
+    "line": 9584,
+    "end_line": 9602,
+    "local_callers": [
+      {
+        "caller": "_append_narration_review_approved_if_ready",
+        "line": 8746
+      },
+      {
+        "caller": "_narration_final_review_is_current",
+        "line": 9936
+      },
+      {
+        "caller": "_approve_narration_full_run",
+        "line": 9980
+      },
+      {
+        "caller": "_approve_narration_full_run",
+        "line": 10001
+      },
+      {
+        "caller": "api_narration_review_run",
+        "line": 30292
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_apply_narration_approval_timeline",
+    "line": 9870,
+    "end_line": 9923,
+    "local_callers": [
+      {
+        "caller": "_approve_narration_full_run",
+        "line": 10000
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_narration_final_review_is_current",
+    "line": 9926,
+    "end_line": 9968,
+    "local_callers": [
+      {
+        "caller": "_append_narration_review_approved_if_ready",
+        "line": 8763
+      },
+      {
+        "caller": "_require_narration_ready_for_video",
+        "line": 8793
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_apply_final_video_duration_gate",
+    "line": 10616,
+    "end_line": 10673,
+    "local_callers": [
+      {
+        "caller": "_run_final_render",
+        "line": 10718
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_scene_visualizable_action_for_video_review",
+    "line": 10763,
+    "end_line": 10773,
+    "local_callers": [
+      {
+        "caller": "_compile_frontend_video_prompt_payload",
+        "line": 10867
+      },
+      {
+        "caller": "_materialize_scene_storyboard_video_requests_unchecked",
+        "line": 12403
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_reviewed_video_request_binding",
+    "line": 11312,
+    "end_line": 11405,
+    "local_callers": [
+      {
+        "caller": "_current_approved_video_candidate_provenance",
+        "line": 5894
+      },
+      {
+        "caller": "_materialized_video_generate_item",
+        "line": 6919
+      },
+      {
+        "caller": "_video_prompt_approval_updates_for_item_ids",
+        "line": 11434
+      },
+      {
+        "caller": "_video_prompt_stage_approval_complete",
+        "line": 11478
+      },
+      {
+        "caller": "_video_prompt_item_materialization_is_current",
+        "line": 11565
+      },
+      {
+        "caller": "_assert_video_materialization_current_for_approval",
+        "line": 11729
+      },
+      {
+        "caller": "_validate_scene_storyboard_create_run",
+        "line": 13057
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_video_prompt_approval_state_prefix",
+    "line": 11408,
+    "end_line": 11410,
+    "local_callers": [
+      {
+        "caller": "_current_approved_video_candidate_provenance",
+        "line": 5912
+      },
+      {
+        "caller": "_materialized_video_generate_item",
+        "line": 6953
+      },
+      {
+        "caller": "_video_prompt_approval_updates_for_item_ids",
+        "line": 11435
+      },
+      {
+        "caller": "_video_prompt_stage_approval_complete",
+        "line": 11481
+      },
+      {
+        "caller": "_stale_video_prompt_approval_updates",
+        "line": 11644
+      },
+      {
+        "caller": "_write_video_generation_requests",
+        "line": 11900
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_video_prompt_approval_updates",
+    "line": 11413,
+    "end_line": 11423,
+    "local_callers": [
+      {
+        "caller": "_create_video_prompts_locked",
+        "line": 29710
+      },
+      {
+        "caller": "_create_video_prompts_locked",
+        "line": 29752
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_video_prompt_approval_updates_for_item_ids",
+    "line": 11426,
+    "end_line": 11452,
+    "local_callers": [
+      {
+        "caller": "_video_prompt_approval_updates",
+        "line": 11419
+      },
+      {
+        "caller": "_materialize_scene_storyboard_video_requests_unchecked",
+        "line": 12462
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_video_prompt_stage_approval_complete",
+    "line": 11455,
+    "end_line": 11493,
+    "local_callers": [
+      {
+        "caller": "_create_video_prompts_locked",
+        "line": 29768
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_stale_video_prompt_approval_updates",
+    "line": 11623,
+    "end_line": 11671,
+    "local_callers": [
+      {
+        "caller": "_create_video_prompts_locked",
+        "line": 29761
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_assert_video_materialization_current_for_approval",
+    "line": 11674,
+    "end_line": 11778,
+    "local_callers": [
+      {
+        "caller": "_create_video_prompts_locked",
+        "line": 29748
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_assert_video_prompt_semantic_review_is_current",
+    "line": 11818,
+    "end_line": 11828,
+    "local_callers": [
+      {
+        "caller": "_run_video_prompt_semantic_review_before_approval",
+        "line": 11841
+      },
+      {
+        "caller": "_create_video_prompts_locked",
+        "line": 29747
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_run_video_prompt_semantic_review_before_approval",
+    "line": 11831,
+    "end_line": 11842,
+    "local_callers": [
+      {
+        "caller": "_create_video_prompts_locked",
+        "line": 29743
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_review_metadata_for_recompiled_visual_plan",
+    "line": 13738,
+    "end_line": 13847,
+    "local_callers": [
+      {
+        "caller": "_recompile_v2_scene_manifest",
+        "line": 13702
+      },
+      {
+        "caller": "_recompile_image_prompt_payloads_from_plans",
+        "line": 13905
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_reconcile_semantic_repair_authoring_projections",
+    "line": 14078,
+    "end_line": 14145,
+    "local_callers": [
+      {
+        "caller": "_reconcile_after_semantic_repair",
+        "line": 17430
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_refresh_scene_acceptance_after_semantic_repair",
+    "line": 14148,
+    "end_line": 14517,
+    "local_callers": [
+      {
+        "caller": "_reconcile_after_semantic_repair",
+        "line": 17432
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_project_image_prompt_reviews_to_p630_p640",
+    "line": 14520,
+    "end_line": 14653,
+    "local_callers": [
+      {
+        "caller": "_mark_image_prompt_draft_reviewed",
+        "line": 14712
+      },
+      {
+        "caller": "_mark_image_prompt_request_freeze_done",
+        "line": 14763
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_mark_image_prompt_draft_reviewed",
+    "line": 14684,
+    "end_line": 14730,
+    "local_callers": [
+      {
+        "caller": "_materialize_preapproved_semantic_review",
+        "line": 19052
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19115
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19295
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_p560_failed_check_ids_from_eval_report",
+    "line": 16272,
+    "end_line": 16372,
+    "local_callers": [
+      {
+        "caller": "_validate_p560_asset_quality",
+        "line": 16476
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_mark_image_generation_review_ready",
+    "line": 16668,
+    "end_line": 16767,
+    "local_callers": [
+      {
+        "caller": "_generate_scene_outputs_after_p650_preflight",
+        "line": 17891
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_validate_image_review_ready",
+    "line": 16770,
+    "end_line": 16789,
+    "local_callers": []
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_localized_semantic_partial_media_disposition",
+    "line": 16810,
+    "end_line": 16844,
+    "local_callers": [
+      {
+        "caller": "_localized_semantic_blocked_image_item_ids",
+        "line": 16855
+      },
+      {
+        "caller": "_run_semantic_review_for_media_generation",
+        "line": 18338
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_localized_semantic_blocked_image_item_ids",
+    "line": 16847,
+    "end_line": 16893,
+    "local_callers": [
+      {
+        "caller": "_semantic_blocked_image_item_ids",
+        "line": 16903
+      },
+      {
+        "caller": "_semantic_review_stage_is_media_ready",
+        "line": 17174
+      },
+      {
+        "caller": "_localized_partial_semantic_slots",
+        "line": 17186
+      },
+      {
+        "caller": "_run_semantic_review_for_media_generation",
+        "line": 18629
+      },
+      {
+        "caller": "_run_semantic_review_for_media_generation",
+        "line": 18481
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_blocked_image_item_ids",
+    "line": 16896,
+    "end_line": 16935,
+    "local_callers": [
+      {
+        "caller": "_generate_request_outputs_unlocked",
+        "line": 15701
+      },
+      {
+        "caller": "_validate_generated_outputs",
+        "line": 15998
+      },
+      {
+        "caller": "_mark_image_generation_review_ready",
+        "line": 16671
+      },
+      {
+        "caller": "_request_gallery_payload",
+        "line": 29364
+      },
+      {
+        "caller": "_assert_scene_candidate_items_not_semantically_blocked",
+        "line": 31212
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_stage_is_media_ready",
+    "line": 17165,
+    "end_line": 17178,
+    "local_callers": [
+      {
+        "caller": "_validate_semantic_reviews_for_media_generation",
+        "line": 4411
+      },
+      {
+        "caller": "_run_pre_asset_semantic_fixed_point",
+        "line": 17595
+      },
+      {
+        "caller": "_run_pre_asset_semantic_fixed_point",
+        "line": 17616
+      },
+      {
+        "caller": "_validate_pre_asset_provider_gate",
+        "line": 17681
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_localized_partial_semantic_slots",
+    "line": 17181,
+    "end_line": 17194,
+    "local_callers": [
+      {
+        "caller": "_validate_p650_run_core",
+        "line": 4191
+      },
+      {
+        "caller": "_validate_frontend_create_run",
+        "line": 4344
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_blocked_candidate",
+    "line": 17197,
+    "end_line": 17217,
+    "local_callers": [
+      {
+        "caller": "_request_gallery_payload",
+        "line": 29388
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_load_frontend_review_runner",
+    "line": 17254,
+    "end_line": 17293,
+    "local_callers": [
+      {
+        "caller": "_refresh_scene_acceptance_after_semantic_repair",
+        "line": 14152
+      },
+      {
+        "caller": "_reconcile_after_semantic_repair",
+        "line": 17428
+      },
+      {
+        "caller": "_validate_pre_asset_provider_gate",
+        "line": 17677
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_stage_is_current_passed",
+    "line": 17296,
+    "end_line": 17297,
+    "local_callers": [
+      {
+        "caller": "_semantic_review_stage_is_media_ready",
+        "line": 17169
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_reconcile_after_semantic_repair",
+    "line": 17300,
+    "end_line": 17577,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19517
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19443
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_run_pre_asset_semantic_fixed_point",
+    "line": 17580,
+    "end_line": 17669,
+    "local_callers": [
+      {
+        "caller": "_reconcile_after_semantic_repair",
+        "line": 17474
+      },
+      {
+        "caller": "_reconcile_after_semantic_repair",
+        "line": 17517
+      },
+      {
+        "caller": "_generate_create_images",
+        "line": 17900
+      },
+      {
+        "caller": "_generate_create_images",
+        "line": 18018
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_validate_pre_asset_provider_gate",
+    "line": 17672,
+    "end_line": 17757,
+    "local_callers": [
+      {
+        "caller": "_reconcile_after_semantic_repair",
+        "line": 17482
+      },
+      {
+        "caller": "_reconcile_after_semantic_repair",
+        "line": 17521
+      },
+      {
+        "caller": "_generate_create_images",
+        "line": 17904
+      },
+      {
+        "caller": "_generate_create_images",
+        "line": 18022
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_run_image_prompt_semantic_review",
+    "line": 18132,
+    "end_line": 18133,
+    "local_callers": []
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_transport_failure_phase",
+    "line": 18136,
+    "end_line": 18157,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_for_media_generation",
+        "line": 18304
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_invalidate_image_generation_review_handoff",
+    "line": 18188,
+    "end_line": 18223,
+    "local_callers": [
+      {
+        "caller": "_validate_p680_visual_quality",
+        "line": 16264
+      },
+      {
+        "caller": "_validate_p680_visual_quality",
+        "line": 16230
+      },
+      {
+        "caller": "_mark_image_generation_review_ready",
+        "line": 16695
+      },
+      {
+        "caller": "_invalidate_published_image_generation_review_handoff",
+        "line": 18239
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_invalidate_published_image_generation_review_handoff",
+    "line": 18226,
+    "end_line": 18244,
+    "local_callers": [
+      {
+        "caller": "_run_create_job_bound",
+        "line": 27616
+      },
+      {
+        "caller": "_run_image_only_resume_job_bound",
+        "line": 28877
+      },
+      {
+        "caller": "_run_p500_resume_job_bound",
+        "line": 29087
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_run_semantic_review_for_media_generation",
+    "line": 18296,
+    "end_line": 18700,
+    "local_callers": [
+      {
+        "caller": "_run_pre_asset_semantic_fixed_point",
+        "line": 17631
+      },
+      {
+        "caller": "_generate_create_images",
+        "line": 18079
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_review_mode_is_preapproved",
+    "line": 18727,
+    "end_line": 18728,
+    "local_callers": [
+      {
+        "caller": "_validate_frontend_create_run",
+        "line": 4343
+      },
+      {
+        "caller": "_mark_image_prompt_draft_reviewed",
+        "line": 14694
+      },
+      {
+        "caller": "_mark_image_prompt_request_freeze_done",
+        "line": 14745
+      },
+      {
+        "caller": "_mark_image_generation_review_ready",
+        "line": 16683
+      },
+      {
+        "caller": "_validate_image_review_ready",
+        "line": 16776
+      },
+      {
+        "caller": "_validate_preapproved_review_provenance",
+        "line": 18735
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19095
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_validate_preapproved_review_provenance",
+    "line": 18731,
+    "end_line": 18778,
+    "local_callers": [
+      {
+        "caller": "_validate_p650_run_core",
+        "line": 4180
+      },
+      {
+        "caller": "_validate_pre_asset_provider_gate",
+        "line": 17692
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_preapproved_semantic_report_text",
+    "line": 18781,
+    "end_line": 18818,
+    "local_callers": [
+      {
+        "caller": "_materialize_preapproved_semantic_shard_reports",
+        "line": 18868
+      },
+      {
+        "caller": "_materialize_preapproved_semantic_review",
+        "line": 18970
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_materialize_preapproved_semantic_shard_reports",
+    "line": 18821,
+    "end_line": 18874,
+    "local_callers": [
+      {
+        "caller": "_materialize_preapproved_semantic_review",
+        "line": 18976
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_materialize_preapproved_semantic_review",
+    "line": 18877,
+    "end_line": 19067,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19097
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_run_semantic_review",
+    "line": 19070,
+    "end_line": 19530,
+    "local_callers": [
+      {
+        "caller": "_run_video_prompt_semantic_review_before_approval",
+        "line": 11836
+      },
+      {
+        "caller": "_run_image_prompt_semantic_review",
+        "line": 18133
+      },
+      {
+        "caller": "_run_semantic_review_for_media_generation",
+        "line": 18299
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_reusable_passed_semantic_review",
+    "line": 19533,
+    "end_line": 19541,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19105
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_report_sources_are_current",
+    "line": 19544,
+    "end_line": 19545,
+    "local_callers": [
+      {
+        "caller": "_assert_video_prompt_semantic_review_is_current",
+        "line": 11825
+      },
+      {
+        "caller": "_mark_image_prompt_draft_reviewed",
+        "line": 14708
+      },
+      {
+        "caller": "_mark_image_prompt_request_freeze_done",
+        "line": 14759
+      },
+      {
+        "caller": "_reusable_passed_semantic_review",
+        "line": 19539
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_source_artifact_relpaths",
+    "line": 19551,
+    "end_line": 19599,
+    "local_callers": [
+      {
+        "caller": "_semantic_repair_source_artifact_fingerprint",
+        "line": 19623
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_artifact_signature",
+    "line": 19602,
+    "end_line": 19617,
+    "local_callers": [
+      {
+        "caller": "_semantic_repair_source_artifact_fingerprint",
+        "line": 19622
+      },
+      {
+        "caller": "_semantic_review_progress_fingerprint",
+        "line": 19984
+      },
+      {
+        "caller": "_semantic_review_progress_fingerprint",
+        "line": 19985
+      },
+      {
+        "caller": "_semantic_repair_progress_fingerprint",
+        "line": 19993
+      },
+      {
+        "caller": "_semantic_repair_progress_fingerprint",
+        "line": 19994
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_source_artifact_fingerprint",
+    "line": 19620,
+    "end_line": 19624,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19377
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19511
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19406
+      },
+      {
+        "caller": "_semantic_repair_progress_fingerprint",
+        "line": 19990
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 26813
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 27243
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 26914
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 27131
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_changed_semantic_repair_artifacts",
+    "line": 19627,
+    "end_line": 19628,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19513
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19407
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 27244
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 27132
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_fingerprint_summary",
+    "line": 19631,
+    "end_line": 19636,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19478
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19483
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19431
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19437
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 27274
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 26879
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 26961
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 27141
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_report_status",
+    "line": 19639,
+    "end_line": 19643,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19484
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19438
+      },
+      {
+        "caller": "_semantic_repair_pending_state",
+        "line": 19737
+      },
+      {
+        "caller": "_record_semantic_repair_hard_timeout",
+        "line": 20223
+      },
+      {
+        "caller": "_record_semantic_repair_hard_timeout",
+        "line": 20227
+      },
+      {
+        "caller": "_record_semantic_repair_salvaged_after_source_change",
+        "line": 20274
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 27248
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 26916
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 26853
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 26883
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 27142
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 27154
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_field_selector_is_valid",
+    "line": 19656,
+    "end_line": 19657,
+    "local_callers": [
+      {
+        "caller": "_canonical_semantic_repair_target_selector",
+        "line": 19669
+      },
+      {
+        "caller": "_canonical_semantic_repair_target_selector",
+        "line": 19686
+      },
+      {
+        "caller": "_semantic_failure_selector_scope_key",
+        "line": 26358
+      },
+      {
+        "caller": "_semantic_failure_selector_scope_key",
+        "line": 26333
+      },
+      {
+        "caller": "_semantic_failure_selector_scope_key",
+        "line": 26300
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_canonical_semantic_repair_target_selector",
+    "line": 19660,
+    "end_line": 19692,
+    "local_callers": [
+      {
+        "caller": "_semantic_repair_target_selectors",
+        "line": 19715
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_target_selectors",
+    "line": 19695,
+    "end_line": 19719,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 26814
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_pending_state",
+    "line": 19722,
+    "end_line": 19741,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19397
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_report_inline_values",
+    "line": 19744,
+    "end_line": 19752,
+    "local_callers": [
+      {
+        "caller": "_semantic_repair_target_selectors",
+        "line": 19706
+      },
+      {
+        "caller": "_semantic_repair_target_selectors",
+        "line": 19709
+      },
+      {
+        "caller": "_semantic_report_list_values_with_duplicates",
+        "line": 22982
+      },
+      {
+        "caller": "_semantic_report_list_values",
+        "line": 25784
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_failure_context",
+    "line": 19755,
+    "end_line": 19788,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_for_media_generation",
+        "line": 18322
+      },
+      {
+        "caller": "_run_semantic_review_for_media_generation",
+        "line": 18626
+      },
+      {
+        "caller": "_run_semantic_review_for_media_generation",
+        "line": 18696
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19373
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19334
+      },
+      {
+        "caller": "_semantic_review_failure_state",
+        "line": 19893
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_failure_state",
+    "line": 19892,
+    "end_line": 19909,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_for_media_generation",
+        "line": 18627
+      },
+      {
+        "caller": "_run_semantic_review_for_media_generation",
+        "line": 18360
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19311
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19349
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_record_reused_semantic_review",
+    "line": 19912,
+    "end_line": 19941,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19107
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_no_progress_timeout_seconds",
+    "line": 19944,
+    "end_line": 19945,
+    "local_callers": []
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_output_contract_retry_attempts",
+    "line": 19948,
+    "end_line": 19958,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19146
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_no_progress_timeout_seconds",
+    "line": 19961,
+    "end_line": 19962,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19394
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19462
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19415
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19485
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19487
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19401
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19441
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 26885
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 26857
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_once_hard_timeout_seconds",
+    "line": 19965,
+    "end_line": 19969,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19183
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_operation_no_progress_timeout_seconds",
+    "line": 19972,
+    "end_line": 19973,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19182
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19192
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_once_hard_timeout_seconds",
+    "line": 19976,
+    "end_line": 19977,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19395
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_progress_fingerprint",
+    "line": 19980,
+    "end_line": 19986,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19184
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_progress_fingerprint",
+    "line": 19989,
+    "end_line": 19995,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19396
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_turn_activity_relpath",
+    "line": 19998,
+    "end_line": 19999,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19380
+      },
+      {
+        "caller": "_semantic_repair_pending_state",
+        "line": 19732
+      },
+      {
+        "caller": "_semantic_review_progress_fingerprint",
+        "line": 19982
+      },
+      {
+        "caller": "_semantic_repair_progress_fingerprint",
+        "line": 19992
+      },
+      {
+        "caller": "_record_semantic_repair_hard_timeout",
+        "line": 20194
+      },
+      {
+        "caller": "_record_semantic_repair_salvaged_after_source_change",
+        "line": 20260
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 26831
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_write_semantic_turn_activity_marker",
+    "line": 20002,
+    "end_line": 20021,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 21958
+      },
+      {
+        "caller": "_write_image_prompt_shard_activity",
+        "line": 23589
+      },
+      {
+        "caller": "_write_image_prompt_shard_activity",
+        "line": 23591
+      },
+      {
+        "caller": "_write_scene_detail_shard_activity",
+        "line": 25941
+      },
+      {
+        "caller": "_write_scene_detail_shard_activity",
+        "line": 25943
+      },
+      {
+        "caller": "_run_turn_until_semantic_artifact_completed",
+        "line": 26476
+      },
+      {
+        "caller": "_run_semantic_patch_producer_repair",
+        "line": 26722
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 27052
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_await_semantic_operation_with_progress_watchdog",
+    "line": 20024,
+    "end_line": 20145,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19382
+      },
+      {
+        "caller": "_run_semantic_review",
+        "line": 19170
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_record_semantic_review_hard_timeout",
+    "line": 20148,
+    "end_line": 20177,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19187
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_record_semantic_repair_hard_timeout",
+    "line": 20180,
+    "end_line": 20243,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19456
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_record_semantic_repair_salvaged_after_source_change",
+    "line": 20246,
+    "end_line": 20290,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19409
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_BoundSemanticReviewWorkspace",
+    "line": 20294,
+    "end_line": 20307,
+    "local_callers": [
+      {
+        "caller": "_prepare_bound_semantic_review_workspace",
+        "line": 20616
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_bound_semantic_relative_path",
+    "line": 20310,
+    "end_line": 20326,
+    "local_callers": [
+      {
+        "caller": "_prepare_bound_semantic_review_workspace",
+        "line": 20551
+      },
+      {
+        "caller": "_prepare_bound_semantic_review_workspace",
+        "line": 20578
+      },
+      {
+        "caller": "_prepare_bound_semantic_review_workspace",
+        "line": 20546
+      },
+      {
+        "caller": "_prepare_bound_semantic_review_workspace",
+        "line": 20547
+      },
+      {
+        "caller": "_prepare_bound_semantic_review_workspace",
+        "line": 20548
+      },
+      {
+        "caller": "_prepare_bound_semantic_review_workspace",
+        "line": 20549
+      },
+      {
+        "caller": "_prepare_bound_semantic_review_workspace",
+        "line": 20622
+      },
+      {
+        "caller": "_import_bound_semantic_review_report",
+        "line": 20729
+      },
+      {
+        "caller": "_read_bound_semantic_run_file",
+        "line": 22321
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_read_bound_semantic_artifact",
+    "line": 20329,
+    "end_line": 20337,
+    "local_callers": [
+      {
+        "caller": "_verify_bound_semantic_review_workspace",
+        "line": 20654
+      },
+      {
+        "caller": "_import_bound_semantic_review_report",
+        "line": 20733
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_workspace_relpath",
+    "line": 20340,
+    "end_line": 20360,
+    "local_callers": [
+      {
+        "caller": "_semantic_workspace_dependencies",
+        "line": 20376
+      },
+      {
+        "caller": "_semantic_workspace_dependencies",
+        "line": 20383
+      },
+      {
+        "caller": "_semantic_workspace_dependencies",
+        "line": 20391
+      },
+      {
+        "caller": "_semantic_repair_allowed_paths",
+        "line": 21303
+      },
+      {
+        "caller": "_semantic_repair_scope_sources",
+        "line": 21327
+      },
+      {
+        "caller": "_import_bound_semantic_repair_outputs",
+        "line": 21700
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_workspace_dependencies",
+    "line": 20363,
+    "end_line": 20399,
+    "local_callers": [
+      {
+        "caller": "_prepare_bound_semantic_review_workspace",
+        "line": 20574
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_rewrite_semantic_workspace_text",
+    "line": 20402,
+    "end_line": 20419,
+    "local_callers": [
+      {
+        "caller": "_prepare_bound_semantic_review_workspace",
+        "line": 20605
+      },
+      {
+        "caller": "_prepare_bound_semantic_repair_workspace",
+        "line": 21438
+      },
+      {
+        "caller": "_prepare_bound_semantic_repair_workspace",
+        "line": 21484
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_restore_semantic_workspace_text",
+    "line": 20422,
+    "end_line": 20435,
+    "local_callers": [
+      {
+        "caller": "_import_bound_semantic_review_report",
+        "line": 20693
+      },
+      {
+        "caller": "_import_bound_semantic_repair_outputs",
+        "line": 21737
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_read_private_semantic_workspace_file",
+    "line": 20438,
+    "end_line": 20491,
+    "local_callers": [
+      {
+        "caller": "_read_private_semantic_workspace_text",
+        "line": 20505
+      },
+      {
+        "caller": "_verify_bound_semantic_review_workspace",
+        "line": 20643
+      },
+      {
+        "caller": "_scan_bound_semantic_repair_workspace",
+        "line": 21630
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_read_private_semantic_workspace_text",
+    "line": 20494,
+    "end_line": 20508,
+    "local_callers": [
+      {
+        "caller": "_private_semantic_review_report_completed",
+        "line": 20512
+      },
+      {
+        "caller": "_private_semantic_repair_report_completed",
+        "line": 20523
+      },
+      {
+        "caller": "_bound_semantic_review_report_candidate",
+        "line": 20668
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_private_semantic_review_report_completed",
+    "line": 20511,
+    "end_line": 20519,
+    "local_callers": []
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_private_semantic_repair_report_completed",
+    "line": 20522,
+    "end_line": 20530,
+    "local_callers": [
+      {
+        "caller": "_import_bound_semantic_repair_outputs",
+        "line": 21643
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_prepare_bound_semantic_review_workspace",
+    "line": 20533,
+    "end_line": 20633,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 21906
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23653
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25092
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_verify_bound_semantic_review_workspace",
+    "line": 20636,
+    "end_line": 20659,
+    "local_callers": [
+      {
+        "caller": "_prepare_bound_semantic_review_workspace",
+        "line": 20629
+      },
+      {
+        "caller": "_import_bound_semantic_review_report",
+        "line": 20723
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_bound_semantic_review_report_candidate",
+    "line": 20662,
+    "end_line": 20676,
+    "local_callers": [
+      {
+        "caller": "_import_bound_semantic_review_report",
+        "line": 20686
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_import_bound_semantic_review_report",
+    "line": 20679,
+    "end_line": 20746,
+    "local_callers": [
+      {
+        "caller": "_materialize_semantic_report_from_transcript",
+        "line": 26180
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_BoundSemanticRepairWorkspace",
+    "line": 20750,
+    "end_line": 20778,
+    "local_callers": [
+      {
+        "caller": "_prepare_bound_semantic_repair_workspace",
+        "line": 21530
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_BoundSemanticPatchWorkspace",
+    "line": 20782,
+    "end_line": 20795,
+    "local_callers": [
+      {
+        "caller": "_prepare_bound_semantic_patch_workspace",
+        "line": 21020
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_patch_seed_bytes",
+    "line": 20798,
+    "end_line": 20816,
+    "local_callers": [
+      {
+        "caller": "_reset_bound_semantic_patch_file",
+        "line": 20944
+      },
+      {
+        "caller": "_prepare_bound_semantic_patch_workspace",
+        "line": 21012
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_write_private_semantic_patch_file_atomic",
+    "line": 20819,
+    "end_line": 20934,
+    "local_callers": [
+      {
+        "caller": "_reset_bound_semantic_patch_file",
+        "line": 20941
+      },
+      {
+        "caller": "_prepare_bound_semantic_patch_workspace",
+        "line": 21009
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_reset_bound_semantic_patch_file",
+    "line": 20937,
+    "end_line": 20952,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_patch_producer_repair",
+        "line": 26702
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_prepare_bound_semantic_patch_workspace",
+    "line": 20955,
+    "end_line": 21034,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_patch_producer_repair",
+        "line": 26679
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_patch_file_completed",
+    "line": 21037,
+    "end_line": 21055,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_patch_producer_repair",
+        "line": 26731
+      },
+      {
+        "caller": "_run_semantic_patch_producer_repair",
+        "line": 26718
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_verify_bound_semantic_patch_workspace",
+    "line": 21058,
+    "end_line": 21129,
+    "local_callers": [
+      {
+        "caller": "_reset_bound_semantic_patch_file",
+        "line": 20940
+      },
+      {
+        "caller": "_load_semantic_patch_payload",
+        "line": 21240
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_patch_submission_prompt",
+    "line": 21132,
+    "end_line": 21174,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_patch_producer_repair",
+        "line": 26703
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_patch_scope_is_canonical",
+    "line": 21177,
+    "end_line": 21204,
+    "local_callers": [
+      {
+        "caller": "_prepare_bound_semantic_patch_workspace",
+        "line": 20973
+      },
+      {
+        "caller": "_semantic_patch_route_enabled",
+        "line": 21215
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_patch_route_enabled",
+    "line": 21207,
+    "end_line": 21221,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 26889
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_patch_selectors_supported",
+    "line": 21224,
+    "end_line": 21234,
+    "local_callers": [
+      {
+        "caller": "_semantic_patch_route_enabled",
+        "line": 21221
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_load_semantic_patch_payload",
+    "line": 21237,
+    "end_line": 21256,
+    "local_callers": [
+      {
+        "caller": "_apply_bound_semantic_patch_workspace",
+        "line": 26524
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_validate_semantic_repair_structured_output",
+    "line": 21259,
+    "end_line": 21281,
+    "local_callers": [
+      {
+        "caller": "_import_bound_semantic_repair_outputs",
+        "line": 21748
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_allowed_paths",
+    "line": 21284,
+    "end_line": 21312,
+    "local_callers": [
+      {
+        "caller": "_prepare_bound_semantic_repair_workspace",
+        "line": 21376
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_scope_sources",
+    "line": 21315,
+    "end_line": 21334,
+    "local_callers": [
+      {
+        "caller": "_prepare_bound_semantic_patch_workspace",
+        "line": 20984
+      },
+      {
+        "caller": "_prepare_bound_semantic_repair_workspace",
+        "line": 21388
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_workspace_digest",
+    "line": 21337,
+    "end_line": 21364,
+    "local_callers": [
+      {
+        "caller": "_prepare_bound_semantic_repair_workspace",
+        "line": 21425
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_prepare_bound_semantic_repair_workspace",
+    "line": 21367,
+    "end_line": 21553,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 26990
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_report_text_from_transcript",
+    "line": 21556,
+    "end_line": 21576,
+    "local_callers": [
+      {
+        "caller": "_import_bound_semantic_repair_outputs",
+        "line": 21644
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_verify_bound_semantic_repair_canonical_baseline",
+    "line": 21579,
+    "end_line": 21610,
+    "local_callers": [
+      {
+        "caller": "_import_bound_semantic_repair_outputs",
+        "line": 21728
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_scan_bound_semantic_repair_workspace",
+    "line": 21613,
+    "end_line": 21634,
+    "local_callers": [
+      {
+        "caller": "_import_bound_semantic_repair_outputs",
+        "line": 21647
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_import_bound_semantic_repair_outputs",
+    "line": 21637,
+    "end_line": 21812,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 27065
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 27091
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_run_semantic_review_once",
+    "line": 21815,
+    "end_line": 22239,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19171
+      },
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 21838
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_prompt_for_attempt",
+    "line": 22242,
+    "end_line": 22267,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 21893
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23640
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25073
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_image_prompt_review_concurrency",
+    "line": 22270,
+    "end_line": 22277,
+    "local_callers": [
+      {
+        "caller": "_run_image_prompt_sharded_semantic_review_once",
+        "line": 23045
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_load_semantic_scope",
+    "line": 22290,
+    "end_line": 22295,
+    "local_callers": [
+      {
+        "caller": "_materialize_preapproved_semantic_shard_reports",
+        "line": 18848
+      },
+      {
+        "caller": "_materialize_preapproved_semantic_review",
+        "line": 18918
+      },
+      {
+        "caller": "_semantic_scope_input_digest",
+        "line": 22299
+      },
+      {
+        "caller": "_refresh_semantic_review_input_digest",
+        "line": 22525
+      },
+      {
+        "caller": "_run_image_prompt_sharded_semantic_review_once",
+        "line": 23047
+      },
+      {
+        "caller": "_write_image_prompt_scene_shard_artifacts",
+        "line": 23444
+      },
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24213
+      },
+      {
+        "caller": "_write_scene_detail_shard_artifacts",
+        "line": 25612
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_scope_input_digest",
+    "line": 22298,
+    "end_line": 22300,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 22094
+      },
+      {
+        "caller": "_write_terminal_transport_shard_report",
+        "line": 22843
+      },
+      {
+        "caller": "_run_image_prompt_sharded_semantic_review_once",
+        "line": 23339
+      },
+      {
+        "caller": "_run_image_prompt_sharded_semantic_review_once",
+        "line": 23058
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23852
+      },
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24073
+      },
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24151
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25353
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_SceneSemanticReviewGeneration",
+    "line": 22304,
+    "end_line": 22309,
+    "local_callers": [
+      {
+        "caller": "_capture_scene_semantic_review_generation",
+        "line": 22402
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_read_bound_semantic_run_file",
+    "line": 22312,
+    "end_line": 22329,
+    "local_callers": [
+      {
+        "caller": "_capture_scene_semantic_review_generation",
+        "line": 22341
+      },
+      {
+        "caller": "_capture_scene_semantic_review_generation",
+        "line": 22345
+      },
+      {
+        "caller": "_capture_scene_semantic_review_generation",
+        "line": 22346
+      },
+      {
+        "caller": "_capture_scene_semantic_review_generation",
+        "line": 22350
+      },
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24128
+      },
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24254
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_capture_scene_semantic_review_generation",
+    "line": 22332,
+    "end_line": 22408,
+    "local_callers": [
+      {
+        "caller": "_assert_scene_semantic_review_generation",
+        "line": 22418
+      },
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24272
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_assert_scene_semantic_review_generation",
+    "line": 22411,
+    "end_line": 22428,
+    "local_callers": [
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24521
+      },
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24539
+      },
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24546
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25019
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25086
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25304
+      },
+      {
+        "caller": "_write_scene_detail_shard_artifacts",
+        "line": 25558
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_write_semantic_artifact_text",
+    "line": 22431,
+    "end_line": 22451,
+    "local_callers": [
+      {
+        "caller": "_refresh_scene_acceptance_after_semantic_repair",
+        "line": 14485
+      },
+      {
+        "caller": "_project_image_prompt_reviews_to_p630_p640",
+        "line": 14614
+      },
+      {
+        "caller": "_materialize_preapproved_semantic_shard_reports",
+        "line": 18865
+      },
+      {
+        "caller": "_materialize_preapproved_semantic_review",
+        "line": 18975
+      },
+      {
+        "caller": "_materialize_preapproved_semantic_review",
+        "line": 18906
+      },
+      {
+        "caller": "_materialize_preapproved_semantic_review",
+        "line": 18982
+      },
+      {
+        "caller": "_write_semantic_turn_activity_marker",
+        "line": 20017
+      },
+      {
+        "caller": "_import_bound_semantic_review_report",
+        "line": 20724
+      },
+      {
+        "caller": "_import_bound_semantic_repair_outputs",
+        "line": 21798
+      },
+      {
+        "caller": "_import_bound_semantic_repair_outputs",
+        "line": 21772
+      },
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 21898
+      },
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 22111
+      },
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 22096
+      },
+      {
+        "caller": "_refresh_semantic_review_input_digest",
+        "line": 22652
+      },
+      {
+        "caller": "_refresh_semantic_review_input_digest",
+        "line": 22658
+      },
+      {
+        "caller": "_write_terminal_transport_shard_report",
+        "line": 22846
+      },
+      {
+        "caller": "_write_image_prompt_shard_aggregate_report",
+        "line": 22907
+      },
+      {
+        "caller": "_write_image_prompt_shard_aggregate_report",
+        "line": 22909
+      },
+      {
+        "caller": "_write_image_prompt_scene_shard_artifacts",
+        "line": 23427
+      },
+      {
+        "caller": "_write_image_prompt_scene_shard_artifacts",
+        "line": 23473
+      },
+      {
+        "caller": "_write_image_prompt_scene_shard_artifacts",
+        "line": 23479
+      },
+      {
+        "caller": "_write_image_prompt_scene_shard_artifacts",
+        "line": 23528
+      },
+      {
+        "caller": "_touch_image_prompt_canonical_progress",
+        "line": 23562
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23645
+      },
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24260
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25078
+      },
+      {
+        "caller": "_write_scene_detail_shard_artifacts",
+        "line": 25607
+      },
+      {
+        "caller": "_write_scene_detail_shard_artifacts",
+        "line": 25659
+      },
+      {
+        "caller": "_write_scene_detail_shard_artifacts",
+        "line": 25665
+      },
+      {
+        "caller": "_write_scene_detail_shard_artifacts",
+        "line": 25703
+      },
+      {
+        "caller": "_touch_scene_detail_canonical_progress",
+        "line": 25914
+      },
+      {
+        "caller": "_write_scene_detail_shard_aggregate_report",
+        "line": 25959
+      },
+      {
+        "caller": "_materialize_semantic_report_from_transcript",
+        "line": 26194
+      },
+      {
+        "caller": "_apply_bound_semantic_patch_workspace",
+        "line": 26641
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_scope_artifact_path",
+    "line": 22454,
+    "end_line": 22491,
+    "local_callers": [
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23618
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23619
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23620
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23621
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_report_with_semantic_input_digest",
+    "line": 22494,
+    "end_line": 22512,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 22099
+      },
+      {
+        "caller": "_refresh_semantic_review_input_digest",
+        "line": 22661
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_refresh_semantic_review_input_digest",
+    "line": 22515,
+    "end_line": 22666,
+    "local_callers": [
+      {
+        "caller": "_materialize_preapproved_semantic_review",
+        "line": 18911
+      },
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 21899
+      },
+      {
+        "caller": "_write_image_prompt_scene_shard_artifacts",
+        "line": 23546
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23646
+      },
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24265
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25079
+      },
+      {
+        "caller": "_write_scene_detail_shard_artifacts",
+        "line": 25724
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_write_image_prompt_shard_aggregate_report",
+    "line": 22874,
+    "end_line": 22909,
+    "local_callers": [
+      {
+        "caller": "_run_image_prompt_sharded_semantic_review_once",
+        "line": 23336
+      },
+      {
+        "caller": "_run_image_prompt_sharded_semantic_review_once",
+        "line": 23055
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_report_list_values_with_duplicates",
+    "line": 22965,
+    "end_line": 22993,
+    "local_callers": [
+      {
+        "caller": "_import_bound_semantic_repair_outputs",
+        "line": 21685
+      },
+      {
+        "caller": "_import_bound_semantic_repair_outputs",
+        "line": 21693
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23857
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25358
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_image_prompt_reviewed_entry_coverage_errors",
+    "line": 22996,
+    "end_line": 23012,
+    "local_callers": [
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23858
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_run_image_prompt_sharded_semantic_review_once",
+    "line": 23015,
+    "end_line": 23405,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 21865
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_run_image_prompt_scene_shard_review",
+    "line": 23594,
+    "end_line": 23990,
+    "local_callers": [
+      {
+        "caller": "_run_image_prompt_sharded_semantic_review_once",
+        "line": 23124
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_run_scene_detail_sharded_semantic_review_once",
+    "line": 23993,
+    "end_line": 24014,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 21856
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+    "line": 24017,
+    "end_line": 24673,
+    "local_callers": [
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once",
+        "line": 24007
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_scope_entry_ids",
+    "line": 24676,
+    "end_line": 24682,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 22127
+      },
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24067
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_collection_sections_by_entry",
+    "line": 24685,
+    "end_line": 24694,
+    "local_callers": [
+      {
+        "caller": "_run_image_prompt_sharded_semantic_review_once",
+        "line": 23049
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_collection_sections_for_scope",
+    "line": 24697,
+    "end_line": 24772,
+    "local_callers": [
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24142
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_collection_entry_payload_with_issues",
+    "line": 24790,
+    "end_line": 24822,
+    "local_callers": [
+      {
+        "caller": "_semantic_collection_sections_for_scope",
+        "line": 24734
+      },
+      {
+        "caller": "_semantic_collection_entry_payload",
+        "line": 24826
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_collection_entry_payload",
+    "line": 24825,
+    "end_line": 24827,
+    "local_callers": [
+      {
+        "caller": "_compact_ordered_scene_context",
+        "line": 24836
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_run_scene_detail_shard_review",
+    "line": 24995,
+    "end_line": 25481,
+    "local_callers": [
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24299
+      },
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24384
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_scene_shard_review_guidance",
+    "line": 25484,
+    "end_line": 25532,
+    "local_callers": [
+      {
+        "caller": "_write_scene_detail_shard_artifacts",
+        "line": 25570
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_scope_source_artifacts",
+    "line": 25733,
+    "end_line": 25739,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 22130
+      },
+      {
+        "caller": "_write_image_prompt_scene_shard_artifacts",
+        "line": 23445
+      },
+      {
+        "caller": "_write_scene_detail_shard_artifacts",
+        "line": 25613
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_report_list_values",
+    "line": 25767,
+    "end_line": 25800,
+    "local_callers": [
+      {
+        "caller": "_semantic_review_failure_context",
+        "line": 19784
+      },
+      {
+        "caller": "_semantic_review_failure_context",
+        "line": 19785
+      },
+      {
+        "caller": "_semantic_review_failure_context",
+        "line": 19786
+      },
+      {
+        "caller": "_scene_set_shift_left_escape_reason_keys",
+        "line": 19836
+      },
+      {
+        "caller": "_import_bound_semantic_review_report",
+        "line": 20698
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23853
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23859
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23860
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23861
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23862
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25354
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25362
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25363
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25364
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25365
+      },
+      {
+        "caller": "_semantic_negative_verdict_contract_errors",
+        "line": 26375
+      },
+      {
+        "caller": "_semantic_negative_verdict_contract_errors",
+        "line": 26376
+      },
+      {
+        "caller": "_semantic_negative_verdict_contract_errors",
+        "line": 26377
+      },
+      {
+        "caller": "_semantic_negative_verdict_contract_errors",
+        "line": 26381
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_report_inline_values",
+    "line": 25803,
+    "end_line": 25855,
+    "local_callers": [
+      {
+        "caller": "_semantic_repair_target_selectors",
+        "line": 19706
+      },
+      {
+        "caller": "_semantic_repair_target_selectors",
+        "line": 19709
+      },
+      {
+        "caller": "_semantic_report_list_values_with_duplicates",
+        "line": 22982
+      },
+      {
+        "caller": "_semantic_report_list_values",
+        "line": 25784
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_report_scalar",
+    "line": 25858,
+    "end_line": 25861,
+    "local_callers": [
+      {
+        "caller": "_semantic_report_list_values_with_duplicates",
+        "line": 22990
+      },
+      {
+        "caller": "_semantic_report_list_values",
+        "line": 25793
+      },
+      {
+        "caller": "_semantic_report_list_values",
+        "line": 25797
+      },
+      {
+        "caller": "_semantic_report_inline_values",
+        "line": 25854
+      },
+      {
+        "caller": "_semantic_report_inline_values",
+        "line": 25852
+      },
+      {
+        "caller": "_semantic_report_inline_values",
+        "line": 25818
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_write_scene_detail_shard_aggregate_report",
+    "line": 25946,
+    "end_line": 25983,
+    "local_callers": [
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24527
+      },
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24069
+      },
+      {
+        "caller": "_run_scene_detail_sharded_semantic_review_once_unlocked",
+        "line": 24147
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_report_text_completed",
+    "line": 25986,
+    "end_line": 25991,
+    "local_callers": [
+      {
+        "caller": "_private_semantic_repair_report_completed",
+        "line": 20529
+      },
+      {
+        "caller": "_semantic_repair_report_completed",
+        "line": 25997
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_repair_report_completed",
+    "line": 25994,
+    "end_line": 25999,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 27099
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_report_text_completed",
+    "line": 26002,
+    "end_line": 26006,
+    "local_callers": [
+      {
+        "caller": "_private_semantic_review_report_completed",
+        "line": 20518
+      },
+      {
+        "caller": "_bound_semantic_review_report_candidate",
+        "line": 20672
+      },
+      {
+        "caller": "_semantic_review_report_completed",
+        "line": 26012
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_report_completed",
+    "line": 26009,
+    "end_line": 26014,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 22088
+      },
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 21989
+      },
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 21969
+      },
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 22034
+      },
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 22016
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23819
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23811
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23711
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23773
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23753
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25318
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25310
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25152
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25222
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25198
+      },
+      {
+        "caller": "_materialize_semantic_report_from_transcript",
+        "line": 26186
+      },
+      {
+        "caller": "_materialize_semantic_report_from_transcript",
+        "line": 26206
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_report_text_from_transcript",
+    "line": 26022,
+    "end_line": 26073,
+    "local_callers": [
+      {
+        "caller": "_bound_semantic_review_report_candidate",
+        "line": 20676
+      },
+      {
+        "caller": "_materialize_semantic_report_from_transcript",
+        "line": 26188
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_json_verdict_to_report",
+    "line": 26076,
+    "end_line": 26167,
+    "local_callers": [
+      {
+        "caller": "_semantic_report_text_from_transcript",
+        "line": 26032
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_materialize_semantic_report_from_transcript",
+    "line": 26170,
+    "end_line": 26206,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 21972
+      },
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 22021
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23812
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23714
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23758
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25311
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25155
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25203
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_result_output_contract_errors",
+    "line": 26209,
+    "end_line": 26224,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 22124
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_failure_selector_scope_key",
+    "line": 26230,
+    "end_line": 26360,
+    "local_callers": [
+      {
+        "caller": "_semantic_negative_verdict_contract_errors",
+        "line": 26420
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_negative_verdict_contract_errors",
+    "line": 26363,
+    "end_line": 26433,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 22125
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23887
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25393
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_semantic_review_output_contract_error",
+    "line": 26436,
+    "end_line": 26461,
+    "local_callers": [
+      {
+        "caller": "_import_bound_semantic_review_report",
+        "line": 20718
+      },
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 22137
+      },
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 21990
+      },
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 21985
+      },
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 22030
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23820
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23894
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23727
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23769
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25319
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25399
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25168
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25218
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_run_turn_until_semantic_artifact_completed",
+    "line": 26464,
+    "end_line": 26516,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_once",
+        "line": 21948
+      },
+      {
+        "caller": "_run_image_prompt_scene_shard_review",
+        "line": 23695
+      },
+      {
+        "caller": "_run_scene_detail_shard_review",
+        "line": 25134
+      },
+      {
+        "caller": "_run_semantic_patch_producer_repair",
+        "line": 26711
+      },
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 27042
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_apply_bound_semantic_patch_workspace",
+    "line": 26519,
+    "end_line": 26665,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_patch_producer_repair",
+        "line": 26735
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_run_semantic_patch_producer_repair",
+    "line": 26668,
+    "end_line": 26787,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review_producer_repair",
+        "line": 26898
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_run_semantic_review_producer_repair",
+    "line": 26790,
+    "end_line": 27291,
+    "local_callers": [
+      {
+        "caller": "_run_semantic_review",
+        "line": 19383
+      }
+    ]
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "api_save_frontend_review",
+    "line": 29585,
+    "end_line": 29604,
+    "local_callers": []
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "api_narration_review_run",
+    "line": 30173,
+    "end_line": 30410,
+    "local_callers": []
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "api_narration_review_approve",
+    "line": 30414,
+    "end_line": 30427,
+    "local_callers": []
+  },
+  {
+    "file": "server/image_gen_app.py",
+    "symbol": "_assert_scene_candidate_items_not_semantically_blocked",
+    "line": 31198,
+    "end_line": 31230,
+    "local_callers": [
+      {
+        "caller": "_create_bulk_generation_job",
+        "line": 31096
+      },
+      {
+        "caller": "_generate_one",
+        "line": 31234
+      },
+      {
+        "caller": "api_generate",
+        "line": 31514
+      },
+      {
+        "caller": "api_generate_bulk",
+        "line": 31613
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "write_review_input_snapshot",
+    "line": 1154,
+    "end_line": 1191,
+    "local_callers": [
+      {
+        "caller": "materialize_review_loop_round",
+        "line": 1372
+      },
+      {
+        "caller": "_refresh_downstream_review_input_snapshots",
+        "line": 12650
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "materialize_review_loop_round",
+    "line": 1242,
+    "end_line": 1384,
+    "local_callers": [
+      {
+        "caller": "_refresh_review_loop_artifacts",
+        "line": 12677
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_profile_from_reviewed_research",
+    "line": 1593,
+    "end_line": 1641,
+    "local_callers": [
+      {
+        "caller": "materialize_run",
+        "line": 13312
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_profile_from_reviewed_story",
+    "line": 1644,
+    "end_line": 1766,
+    "local_callers": [
+      {
+        "caller": "materialize_run",
+        "line": 13416
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_reviewed_research_duration_contract_errors",
+    "line": 1781,
+    "end_line": 1818,
+    "local_callers": [
+      {
+        "caller": "_validate_reviewed_research_duration_contract",
+        "line": 1826
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_validate_reviewed_research_duration_contract",
+    "line": 1821,
+    "end_line": 1833,
+    "local_callers": [
+      {
+        "caller": "materialize_run",
+        "line": 13287
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_reviewed_story_duration_contract_errors",
+    "line": 1836,
+    "end_line": 1905,
+    "local_callers": [
+      {
+        "caller": "_validate_reviewed_story_duration_contract",
+        "line": 1913
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_validate_reviewed_story_duration_contract",
+    "line": 1908,
+    "end_line": 1920,
+    "local_callers": [
+      {
+        "caller": "materialize_run",
+        "line": 13365
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_reviewed_story_time_of_day_contract_errors",
+    "line": 1923,
+    "end_line": 2020,
+    "local_callers": [
+      {
+        "caller": "_validate_reviewed_story_time_of_day_contract",
+        "line": 2024
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_validate_reviewed_story_time_of_day_contract",
+    "line": 2023,
+    "end_line": 2029,
+    "local_callers": [
+      {
+        "caller": "materialize_run",
+        "line": 13391
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_run_foundation_semantic_review",
+    "line": 2032,
+    "end_line": 2040,
+    "local_callers": []
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_image_prompt_review_metadata_for_scaffold",
+    "line": 4710,
+    "end_line": 4773,
+    "local_callers": [
+      {
+        "caller": "_build_script_and_manifest",
+        "line": 11734
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_reviewed_story_research_refs",
+    "line": 4825,
+    "end_line": 4838,
+    "local_callers": [
+      {
+        "caller": "_reviewed_story_source_events",
+        "line": 4849
+      },
+      {
+        "caller": "_downstream_scene_research_refs",
+        "line": 4936
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_reviewed_story_source_events",
+    "line": 4846,
+    "end_line": 4928,
+    "local_callers": [
+      {
+        "caller": "_scene_source_events",
+        "line": 4777
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_reviewed_story_scene",
+    "line": 4954,
+    "end_line": 4958,
+    "local_callers": [
+      {
+        "caller": "_apply_reviewed_story_scene_to_blueprint",
+        "line": 4969
+      },
+      {
+        "caller": "_scene_intent_for_cut_design",
+        "line": 6289
+      },
+      {
+        "caller": "_scene_intent_for_cut_design",
+        "line": 6138
+      },
+      {
+        "caller": "_scene_event_for_cut_design",
+        "line": 6949
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_apply_reviewed_story_scene_to_blueprint",
+    "line": 4961,
+    "end_line": 4994,
+    "local_callers": [
+      {
+        "caller": "_scene_generation_for_scene",
+        "line": 5237
+      },
+      {
+        "caller": "_story_event_obligations_for_scene",
+        "line": 5865
+      },
+      {
+        "caller": "_scene_intent_for_cut_design",
+        "line": 6111
+      },
+      {
+        "caller": "_legacy_scene_event_for_cut_design",
+        "line": 6316
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_materialize_exact_reviewed_story_location_segments",
+    "line": 8792,
+    "end_line": 8861,
+    "local_callers": []
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_require_fresh_p400_readiness",
+    "line": 12328,
+    "end_line": 12344,
+    "local_callers": [
+      {
+        "caller": "materialize_run",
+        "line": 13780
+      },
+      {
+        "caller": "materialize_run",
+        "line": 13788
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_review_status_line",
+    "line": 12347,
+    "end_line": 12350,
+    "local_callers": []
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_review_loop_critic_report",
+    "line": 12353,
+    "end_line": 12397,
+    "local_callers": [
+      {
+        "caller": "_refresh_review_loop_artifacts",
+        "line": 12761
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_authoring_review_blocking_findings",
+    "line": 12400,
+    "end_line": 12442,
+    "local_callers": [
+      {
+        "caller": "_refresh_review_loop_artifacts",
+        "line": 12746
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_final_review_text",
+    "line": 12445,
+    "end_line": 12481,
+    "local_callers": [
+      {
+        "caller": "_refresh_review_loop_artifacts",
+        "line": 12815
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_build_semantic_review_packs",
+    "line": 12484,
+    "end_line": 12530,
+    "local_callers": [
+      {
+        "caller": "_materialize_standard_request_files",
+        "line": 12325
+      },
+      {
+        "caller": "_refresh_p400_review_artifacts",
+        "line": 12536
+      },
+      {
+        "caller": "_refresh_downstream_review_artifacts",
+        "line": 12595
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_refresh_p400_review_artifacts",
+    "line": 12533,
+    "end_line": 12540,
+    "local_callers": [
+      {
+        "caller": "materialize_run",
+        "line": 13779
+      },
+      {
+        "caller": "materialize_run",
+        "line": 13787
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_require_downstream_review_inputs",
+    "line": 12543,
+    "end_line": 12556,
+    "local_callers": [
+      {
+        "caller": "_refresh_downstream_review_artifacts",
+        "line": 12562
+      },
+      {
+        "caller": "_refresh_downstream_review_input_snapshots",
+        "line": 12602
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_refresh_downstream_review_artifacts",
+    "line": 12559,
+    "end_line": 12596,
+    "local_callers": [
+      {
+        "caller": "main",
+        "line": 14215
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_refresh_downstream_review_input_snapshots",
+    "line": 12599,
+    "end_line": 12665,
+    "local_callers": [
+      {
+        "caller": "generate_images",
+        "line": 13982
+      },
+      {
+        "caller": "generate_images",
+        "line": 13993
+      },
+      {
+        "caller": "run_pre_media_semantic_pipeline",
+        "line": 14018
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_refresh_review_loop_artifacts",
+    "line": 12668,
+    "end_line": 12830,
+    "local_callers": [
+      {
+        "caller": "_refresh_p400_review_artifacts",
+        "line": 12540
+      },
+      {
+        "caller": "_refresh_downstream_review_artifacts",
+        "line": 12596
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_review_foundation_stage",
+    "line": 13007,
+    "end_line": 13054,
+    "local_callers": [
+      {
+        "caller": "materialize_run",
+        "line": 13278
+      },
+      {
+        "caller": "materialize_run",
+        "line": 13336
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "_prepare_authoring_grounding",
+    "line": 13859,
+    "end_line": 13868,
+    "local_callers": [
+      {
+        "caller": "materialize_run",
+        "line": 13778
+      },
+      {
+        "caller": "materialize_run",
+        "line": 13786
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "prepare_grounding",
+    "line": 13871,
+    "end_line": 13920,
+    "local_callers": [
+      {
+        "caller": "main",
+        "line": 14214
+      }
+    ]
+  },
+  {
+    "file": "scripts/toc-immersive-frontend-run.py",
+    "symbol": "run_pre_media_semantic_pipeline",
+    "line": 13996,
+    "end_line": 14018,
+    "local_callers": [
+      {
+        "caller": "main",
+        "line": 14218
+      }
+    ]
+  }
+]

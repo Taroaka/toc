@@ -12,17 +12,11 @@ from toc.harness import append_state_snapshot, extract_yaml_block, now_iso, pars
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GROUNDING_CONTRACT_PATH = REPO_ROOT / "workflow" / "stage-grounding.yaml"
 APPROVAL_POLICY_DEFAULTS: dict[str, str] = {
-    "story": "required",
-    "image": "required",
-    "narration": "required",
+    # Kept as an empty compatibility export.  Production grounding no longer
+    # carries approval policy state.
 }
 APPROVAL_POLICY_PRESETS: dict[str, dict[str, str]] = {
-    "strict": dict(APPROVAL_POLICY_DEFAULTS),
-    "drafts": {
-        "story": "optional",
-        "image": "optional",
-        "narration": "optional",
-    },
+    "disabled": {},
 }
 
 
@@ -61,10 +55,10 @@ class StagePlaybookSelectionError(RuntimeError):
 
 
 def normalize_review_policy_value(value: str | None, *, default: str = "required") -> str:
-    raw = str(value or "").strip().lower()
-    if raw in {"required", "optional", "skipped"}:
-        return raw
-    return default
+    """Compatibility shim for callers that still import the old helper."""
+
+    del value, default
+    return "disabled"
 
 
 def resolve_review_policy(
@@ -74,36 +68,18 @@ def resolve_review_policy(
     image_review: str | None = None,
     narration_review: str | None = None,
 ) -> dict[str, str]:
-    base = dict(APPROVAL_POLICY_PRESETS.get(preset, APPROVAL_POLICY_PRESETS["strict"]))
-    overrides = {
-        "story": story_review,
-        "image": image_review,
-        "narration": narration_review,
-    }
-    for key, raw in overrides.items():
-        if raw is None:
-            continue
-        base[key] = normalize_review_policy_value(raw, default=base.get(key, "required"))
-    return base
+    del preset, story_review, image_review, narration_review
+    return {}
 
 
 def review_policy_state_entries(policy: dict[str, str]) -> dict[str, str]:
-    normalized = {key: normalize_review_policy_value(policy.get(key), default=value) for key, value in APPROVAL_POLICY_DEFAULTS.items()}
-    return {
-        "review.policy.story": normalized["story"],
-        "review.policy.image": normalized["image"],
-        "review.policy.narration": normalized["narration"],
-        "gate.story_review": normalized["story"],
-        "gate.image_review": normalized["image"],
-        "gate.narration_review": normalized["narration"],
-    }
+    del policy
+    return {}
 
 
 def current_review_policy(state: dict[str, str]) -> dict[str, str]:
-    policy: dict[str, str] = {}
-    for key, default in APPROVAL_POLICY_DEFAULTS.items():
-        policy[key] = normalize_review_policy_value(state.get(f"review.policy.{key}"), default=default)
-    return policy
+    del state
+    return {}
 
 
 def detect_flow(run_dir: Path) -> str:
@@ -369,41 +345,6 @@ def resolve_stage_grounding(*, stage: str, run_dir: Path, flow: str | None = Non
     optional_playbooks = [_repo_entry(path, kind="playbook") for path in stage_spec.get("optional_playbooks", []) if isinstance(path, str)]
 
     state = _load_state_for_grounding(run_dir, flow=resolved_flow)
-    approved_input_checks: list[dict[str, Any]] = []
-    approved_ok = True
-    for raw in stage_spec.get("requires_approved_input", []):
-        if not isinstance(raw, dict):
-            continue
-        path_text = str(raw.get("path") or "").strip()
-        review_key = str(raw.get("review_key") or "").strip()
-        allowed_values = [str(value).strip().lower() for value in raw.get("allowed_values", []) if str(value).strip()]
-        policy_key = str(raw.get("policy_key") or "").strip()
-        required_when = [str(value).strip().lower() for value in raw.get("required_when", []) if str(value).strip()]
-        path_entry = _run_entry(run_dir, path_text, flow=resolved_flow) if path_text else {"exists": False, "resolved_path": "", "source": "run_dir"}
-        exists = bool(path_text) and bool(path_entry["exists"])
-        review_value = str(state.get(review_key, "")).strip().lower()
-        policy_default = "required" if policy_key else ""
-        policy_value = normalize_review_policy_value(state.get(policy_key), default=policy_default) if policy_key else ""
-        approval_required = (not policy_key) or (policy_value in set(required_when or ["required"]))
-        passed = exists and (not approval_required or (bool(review_key) and review_value in set(allowed_values)))
-        if not passed:
-            approved_ok = False
-        approved_input_checks.append(
-            {
-                "path": path_text,
-                "resolved_path": str(path_entry.get("resolved_path") or ""),
-                "source": str(path_entry.get("source") or "run_dir"),
-                "exists": exists,
-                "review_key": review_key,
-                "review_value": review_value,
-                "allowed_values": allowed_values,
-                "policy_key": policy_key,
-                "policy_value": policy_value,
-                "required_when": required_when,
-                "approval_required": approval_required,
-                "passed": passed,
-            }
-        )
 
     required_state_checks: list[dict[str, Any]] = []
     required_state_ok = True
@@ -411,6 +352,11 @@ def resolve_stage_grounding(*, stage: str, run_dir: Path, flow: str | None = Non
         if not isinstance(raw, dict):
             continue
         key = str(raw.get("key") or "").strip()
+        # Historical contracts sometimes listed review/eval certificates as
+        # required state.  They are ignored while preserving ordinary state
+        # checks for deterministic runtime conditions.
+        if key.lower().startswith(("review.", "eval.", "gate.")):
+            continue
         allowed_values = [str(value).strip().lower() for value in raw.get("allowed_values", []) if str(value).strip()]
         current_value = str(state.get(key, "")).strip().lower()
         passed = bool(key) and current_value in set(allowed_values)
@@ -450,7 +396,7 @@ def resolve_stage_grounding(*, stage: str, run_dir: Path, flow: str | None = Non
 
     missing_paths = [entry for entry in [*required_global_docs, *required_docs, *required_templates, *required_inputs] if not entry["exists"]]
     missing_docs = any(entry["kind"] in {"global_doc", "doc", "template"} for entry in missing_paths)
-    missing_inputs = any(entry["kind"] == "input" for entry in missing_paths) or not approved_ok or not required_state_ok or not manifest_phase_ok
+    missing_inputs = any(entry["kind"] == "input" for entry in missing_paths) or not required_state_ok or not manifest_phase_ok
     if missing_docs:
         status = "missing_docs"
     elif missing_inputs:
@@ -480,11 +426,9 @@ def resolve_stage_grounding(*, stage: str, run_dir: Path, flow: str | None = Non
             "optional_playbooks": optional_playbooks,
         },
         "missing_paths": missing_paths,
-        "approved_input_checks": approved_input_checks,
         "required_state_checks": required_state_checks,
         "manifest_phase_checks": manifest_phase_checks,
         "status": status,
-        "review_policy": current_review_policy(state),
     }
 
 
@@ -573,7 +517,6 @@ def build_stage_grounding_readset(report: dict[str, Any], *, stage: str) -> dict
         "templates": list(report.get("resolved_paths", {}).get("templates", [])),
         "inputs": list(report.get("resolved_paths", {}).get("inputs", [])),
         "optional_playbooks": list(report.get("resolved_paths", {}).get("optional_playbooks", [])),
-        "review_policy": dict(report.get("review_policy", {})),
         "read_order": ["global_docs", "stage_docs", "templates", "inputs"],
     }
 
@@ -681,10 +624,10 @@ def grounding_validation(run_dir: Path, stage: str, contract: dict[str, Any] | N
             )
         except (AttributeError, KeyError, TypeError, ValueError):
             current_contract_audit = None
-    audit_current_contract_passed = bool(
-        current_contract_audit
-        and current_contract_audit.get("status") == "passed"
-    )
+    # Audit artifacts are legacy diagnostics.  Grounding readiness is based on
+    # the resolved inputs and readset; an old/missing audit must not block a
+    # production stage.
+    audit_current_contract_passed = bool(report and report.get("status") == "ready" and readset is not None)
     report_flow = str((report or {}).get("flow") or "")
     state = _load_state_for_grounding(run_dir, flow=report_flow or None)
 
@@ -735,11 +678,7 @@ def grounding_validation(run_dir: Path, stage: str, contract: dict[str, Any] | N
         "audit": audit,
         "audit_path": audit_path,
         "audit_exists": audit is not None and audit_path is not None,
-        "audit_passed": bool(
-            audit
-            and audit.get("status") == "passed"
-            and audit_current_contract_passed
-        ),
+        "audit_passed": bool(report and report.get("status") == "ready" and readset is not None),
         "current_contract_audit": current_contract_audit,
         "audit_current_contract_passed": audit_current_contract_passed,
         "state_status_key": status_key,
@@ -781,20 +720,16 @@ def run_stage_grounding(
         report_path = write_stage_grounding_report(run_dir=run_dir, stage=canonical_stage, report=report)
         readset = build_stage_grounding_readset(report, stage=canonical_stage)
         readset_path = write_stage_grounding_readset(run_dir=run_dir, stage=canonical_stage, readset=readset)
-        audit = build_stage_grounding_audit(run_dir=run_dir, stage=canonical_stage, report=report, readset=readset, contract=contract)
-        audit_path = write_stage_grounding_audit(run_dir=run_dir, stage=canonical_stage, audit=audit)
         append_state_snapshot(
             run_dir / "state.txt",
             {
                 f"stage.{canonical_stage}.grounding.status": str(report["status"]),
                 f"stage.{canonical_stage}.grounding.report": str(report_path.relative_to(run_dir)),
                 f"stage.{canonical_stage}.readset.report": str(readset_path.relative_to(run_dir)),
-                f"stage.{canonical_stage}.audit.status": str(audit["status"]),
-                f"stage.{canonical_stage}.audit.report": str(audit_path.relative_to(run_dir)),
             },
         )
         last_report = report
-        if report["status"] == "ready" and audit["status"] == "passed":
+        if report["status"] == "ready":
             return report
 
     assert last_report is not None
@@ -829,7 +764,7 @@ def prepare_stage_context(
     canonical_stage = canonical_stage_name(stage, contract)
     resolved_flow = str(report.get("flow") or flow or detect_flow(run_dir))
 
-    if not validation.get("report_ready") or not validation.get("readset_exists") or not validation.get("audit_passed"):
+    if not validation.get("report_ready") or not validation.get("readset_exists"):
         raise StageGroundingError(stage=canonical_stage, status=str(report["status"]), run_dir=run_dir, report=report)
 
     readset = validation.get("readset") or {}
@@ -840,7 +775,6 @@ def prepare_stage_context(
         "run_dir": str(run_dir.resolve()),
         "report_path": str((validation.get("report_path") or grounding_report_path(run_dir, canonical_stage)).resolve()),
         "readset_path": str((validation.get("readset_path") or grounding_readset_path(run_dir, canonical_stage)).resolve()),
-        "audit_path": str((validation.get("audit_path") or grounding_audit_path(run_dir, canonical_stage)).resolve()),
         "playbooks_report_path": str((validation.get("playbooks_path") or playbooks_report_path(run_dir, canonical_stage)).resolve()) if validation.get("playbooks_path") else "",
         "read_order": list(readset.get("read_order") or []),
         "global_docs": list(readset.get("global_docs") or []),

@@ -763,7 +763,7 @@ def _stage_specific_review_instructions(stage: str) -> list[str]:
             "Treat scene `time_of_day` as an open string daypart, separate from historical `story_metadata.time`. The required contract is declared only by `story_metadata.scene_time_of_day_contract: required_v1`. Read the aggregate story entry's `time_of_day_contract_declared` and each `scene_time_of_day_statuses[].status`; do not look for a top-level per-scene `time_of_day_status` in this entry.",
             "When the contract is declared, fail a scene_time_of_day_statuses item whose status is missing, blank, or invalid_type. Do not fail an undeclared legacy story solely for this newer key.",
             "When valid, require causal daypart progression and a visualizable basis for sky brightness, natural/artificial light, shadow, and color temperature without changing historical clothing, architecture, materials, or technology.",
-            "Review every `scene_location_route_statuses[]` item. `undeclared` is legacy/no-route evidence, but an authored `location.mode: sequence` must be `valid`: its ordered `location.sequence[]` must be covered exactly once and in the same order by `location.segments[]`, and every segment must contain drawable responsibility, primary subject, visible action, evidence/roles, motion brief, and motion end state.",
+            "Review every `scene_location_route_statuses[]` item. `undeclared` is legacy/no-route evidence. For `authored_semantic_route`, judge the ordered location sequence against the authored event beats, start/end states, and handoff; this semantic authoring contract defers production segments to downstream cut design, so do not fail solely because its status is not `valid` or production segments are absent. For the production-segment contract, require `valid`: its ordered `location.sequence[]` must be covered exactly once and in the same order by `location.segments[]`, and every segment must contain drawable responsibility, primary subject, visible action, evidence/roles, motion brief, and motion end state.",
             "Fail an `invalid` route instead of inferring a missing transition from scene-wide prose. A semantic story review must not pass when the later cut compiler would have to invent which action occurs at which location.",
             "Check timeline, characters and motivations, conflict escalation/resolution, important-event coverage, distinct scene responsibility, internal research_refs, historical time context, and duration-aware scene allocation.",
             "For `historical_time_context`, require `story_metadata.time` to be a string. Existing classics, folklore, legends, and adaptations must use a concrete `〇〇時代` value supported by the run-local research/story context; user-created original stories may use an empty string.",
@@ -822,7 +822,7 @@ def _stage_specific_review_instructions(stage: str) -> list[str]:
         "For `cut_blueprint` failures, each blocked finding must include a concrete producer-facing repair example.",
         "The example should say what to add, remove, or strengthen in the affected cut contract / viewer contract / first-frame visual plan / downstream prompt requirements.",
         "Use cut_context_packet and cut_context_packet_diagnostics as repair input when present: if a packet diagnostic reports missing roles, visual proof, event beat, reveal boundary, or previous/next delta, state which packet field and source contract field should be reinforced.",
-        "Prefer compact examples such as: `Add messenger and two witnesses as visible public-proof roles in scene80_cut01; require slipper in messenger hand, Cinderella watching, and no fitted-foot payoff yet.`",
+        "Prefer compact examples such as: `Add courier and two witnesses as visible public-proof roles in scene80_cut01; require a sealed artifact in the courier's hand, the protagonist watching, and no contents reveal yet.`",
         "Do not rewrite the artifact yourself and do not invent a different story. The example is guidance for the producer repair agent, not a patch applied by the reviewer.",
     ]
 
@@ -884,6 +884,7 @@ def render_prompt(*, stage: str, run_dir: Path, collection_path: Path, scope_pat
             *foundation_criteria_lines,
             "",
             "Report format:",
+            "Use exact scope entry IDs from scope.entry_ids in reviewed_entries, blocked_entries, and failed_selectors. For a negative verdict affecting the entire scope, all_entries is also allowed in blocked_entries and failed_selectors. Put artifact field paths and scene-specific details in findings/evidence, not in the selector lists.",
             "status: passed|failed",
             "semantic_review_input_digest: copy the exact semantic_review_input_digest from the scope",
             "reviewed_entries: [...]",

@@ -14,6 +14,7 @@ from toc.review_projection import (
 )
 from toc.semantic_pack import collect_entries
 from toc.semantic_review import FOUNDATION_SEMANTIC_CRITERIA
+from toc.semantic_pack_foundation import _story_reference_diagnostics
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -110,6 +111,39 @@ script:
 
 
 class TestSemanticPackFoundation(unittest.TestCase):
+    def test_story_refs_resolve_legacy_registry_ids_and_reject_missing_targets(self) -> None:
+        for places, rules, event, place_id, rule_id in (
+            (["Harbor", "Island"], ["Return before sunset"], {}, "place_01", "world_rule_01"),
+            ([{"name": "Workshop"}], [{"rule": "Only one attempt"}],
+             {"place_ids": ["workshop"], "world_rule_ids": ["one_attempt"]},
+             "workshop", "one_attempt"),
+            ([{"location_id": "tower"}], [{"rule_id": "silence"}], {}, "tower", "silence"),
+        ):
+            with self.subTest(place_id=place_id):
+                research = {"story_materials": {
+                    "chronological_events": [{"event_id": "E01", **event}],
+                    "setting": {"places": places, "world_rules": rules},
+                }}
+                refs = [
+                    "research.story_materials.chronological_events[E01]",
+                    f"research.story_materials.setting.places[{place_id}]",
+                    f"research.story_materials.setting.world_rules[{rule_id}]",
+                ]
+                scenes = [{"scene_id": "SC01", "research_refs": refs}]
+                result = _story_reference_diagnostics(research, scenes)
+                self.assertEqual(result["unresolved_refs"], [])
+                self.assertEqual(result["unassigned_event_ids"], [])
+                for bad_ref in (
+                    "research.story_materials.setting.places[missing]",
+                    f"research.story_materials.setting.world_rules[{place_id}]",
+                    "research.unknown[place_01]",
+                    "malformed",
+                ):
+                    scenes[0]["research_refs"] = [*refs, bad_ref]
+                    bad = _story_reference_diagnostics(research, scenes)
+                    self.assertEqual(len(bad["unresolved_refs"]), 1)
+                    self.assertEqual(bad["unresolved_refs"][0]["ref"], bad_ref)
+
     def test_foundation_pack_rejects_invalid_structured_artifact(self) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_foundation_pack_") as td:
             run_dir = Path(td)
@@ -375,6 +409,8 @@ class TestSemanticPackFoundation(unittest.TestCase):
                     self.assertIn("scene_time_of_day_missing", prompt)
                     self.assertIn("sky brightness", prompt)
                     self.assertIn("scene_location_route_statuses", prompt)
+                    self.assertIn("authored_semantic_route", prompt)
+                    self.assertIn("exact scope entry IDs", prompt)
                     self.assertIn("scene_location_route_incomplete", prompt)
                 self.assertIn("workspace is read-only", prompt)
                 self.assertIn(

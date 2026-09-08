@@ -189,11 +189,8 @@ if [[ "$revision_aware_narration" != "true" ]]; then
     python scripts/toc-state.py append --run-dir "$run_dir" \
       --set "runtime.stage=audio_duration_gate" \
       --set "runtime.render.status=blocked" \
-      --set "last_error=audio duration gate requested scene/narration expansion before human review"
+      --set "last_error=audio duration gate failed deterministic runtime validation"
     echo "Audio duration gate blocked downstream generation." >&2
-    echo "Review prompts:" >&2
-    echo "  - ${run_dir%/}/logs/review/duration_scene.subagent_prompt.md" >&2
-    echo "  - ${run_dir%/}/logs/review/duration_narration.subagent_prompt.md" >&2
     exit 1
   fi
 fi
@@ -258,13 +255,7 @@ stage="done"
 python scripts/toc-state.py append --run-dir "$run_dir" \
   --set "runtime.stage=${stage}" \
   --set "runtime.render.status=success" \
-  --set "artifact.video=${run_dir%/}/video.mp4" \
-  --set "review.video.status=pending"
-
-python scripts/verify-pipeline.py \
-  --run-dir "$run_dir" \
-  --flow immersive \
-  --profile standard
+  --set "artifact.video=${run_dir%/}/video.mp4"
 
 echo "Done:"
 echo "  - ${run_dir%/}/video.mp4"

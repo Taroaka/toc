@@ -1,14 +1,16 @@
-"""Compatibility facade for modular stage evaluation policies.
+"""Compatibility facade for deterministic stage structure checks.
 
-Production code should continue importing from :mod:`toc.stage_evaluator`.
-Implementation ownership lives under :mod:`toc.stage_evaluation`.
+The module name remains available to downstream production code while the
+former evaluator/report API has been removed. Returned stage objects contain
+only ordinary checks and a structural ``passed`` value.
 """
 
 from toc.harness import load_structured_document
 
 from toc.stage_evaluation.common import (
     SCENE_COVERAGE_REVIEW_REQUIRED_KEYS,
-    _append_grounding_checks,
+    _cut_contract_structure_issues,
+    _node_cut_contract,
     add_check,
     as_dict,
     as_dotted_str,
@@ -26,64 +28,94 @@ from toc.stage_evaluation.common import (
     scene_time_of_day_contract_missing,
     scene_time_of_day_visual_basis_contract_marker,
     scene_time_of_day_visual_basis_issues,
-    score_from_checks,
-    score_from_ratio,
 )
 from toc.stage_evaluation.manifest import (
-    _manifest_checks,
+    _append_immersive_manifest_checks,
+    _append_manifest_contract_checks,
+    _iter_manifest_nodes,
+    _iter_manifest_nodes_with_selectors,
     _minimum_cut_issues,
+    _script_readiness_issues_from_run,
     check_manifest_scene_series,
     check_manifest_single,
 )
-from toc.stage_evaluation.research_story import (
-    _image_api_prompt_v2_issues,
-    _manifest_rubric,
+from toc.stage_evaluation.pipeline import (
+    STORY_REQUIRED_SCENE_FIELDS,
+    _manifest_checks,
+    _probe_duration,
+    _script_text_quality_checks,
+    _slot_number,
+    append_video_checks,
     check_research,
+    check_script_scene_series,
+    check_script_single,
     check_story,
-    check_visual_value,
+    check_video_scene_series,
+    check_video_single,
     compact_research_pack_ok,
     dense_story_scene_count,
     story_scene_coverage_ok,
 )
-from toc.stage_evaluation.runner import (
-    append_stage_review_state,
-    evaluate_stage,
-    render_stage_review,
+from toc.stage_evaluation.research_story import (
+    _asset_bible_candidate_count,
+    _image_api_prompt_policy,
+    _image_api_prompt_text,
+    _image_api_prompt_v1_issues,
+    _image_api_prompt_v2_issues,
+    check_visual_value,
 )
 from toc.stage_evaluation.script import (
+    _append_p400_scene_cut_checks,
     _cinematic_min_cuts_for_scene,
+    _coverage_authored_event_beat_ids,
     _coverage_authored_obligation_ids,
     _coverage_minimum_cut_count,
     _cut_event_ref_issue_map,
+    _cut_has_blueprint,
+    _scene_cut_coverage_plan,
     _scene_cut_coverage_plan_issues,
+    _scene_cut_handoff_issues,
     _scene_cut_redundancy_issues,
     _scene_event_issue_map,
     _scene_readiness_issues,
-    check_script_scene_series,
-    check_script_single,
 )
-from toc.stage_evaluation.video import (
-    check_video_scene_series,
-    check_video_single,
-)
+
 
 __all__ = [
     "SCENE_COVERAGE_REVIEW_REQUIRED_KEYS",
-    "_append_grounding_checks",
+    "STORY_REQUIRED_SCENE_FIELDS",
+    "_append_immersive_manifest_checks",
+    "_append_manifest_contract_checks",
+    "_append_p400_scene_cut_checks",
+    "_asset_bible_candidate_count",
     "_cinematic_min_cuts_for_scene",
+    "_coverage_authored_event_beat_ids",
     "_coverage_authored_obligation_ids",
     "_coverage_minimum_cut_count",
+    "_cut_contract_structure_issues",
     "_cut_event_ref_issue_map",
+    "_cut_has_blueprint",
+    "_image_api_prompt_policy",
+    "_image_api_prompt_text",
+    "_image_api_prompt_v1_issues",
     "_image_api_prompt_v2_issues",
+    "_iter_manifest_nodes",
+    "_iter_manifest_nodes_with_selectors",
     "_manifest_checks",
-    "_manifest_rubric",
     "_minimum_cut_issues",
+    "_node_cut_contract",
+    "_probe_duration",
+    "_scene_cut_coverage_plan",
     "_scene_cut_coverage_plan_issues",
+    "_scene_cut_handoff_issues",
     "_scene_cut_redundancy_issues",
     "_scene_event_issue_map",
     "_scene_readiness_issues",
+    "_script_readiness_issues_from_run",
+    "_script_text_quality_checks",
+    "_slot_number",
     "add_check",
-    "append_stage_review_state",
+    "append_video_checks",
     "as_dict",
     "as_dotted_str",
     "as_int",
@@ -101,7 +133,6 @@ __all__ = [
     "contract_list",
     "dense_story_scene_count",
     "detect_flow",
-    "evaluate_stage",
     "flatten_text",
     "flatten_without_keys",
     "has_todo",
@@ -109,12 +140,9 @@ __all__ = [
     "make_stage",
     "nested_get",
     "non_empty",
-    "render_stage_review",
     "scene_time_of_day_contract_marker",
     "scene_time_of_day_contract_missing",
     "scene_time_of_day_visual_basis_contract_marker",
     "scene_time_of_day_visual_basis_issues",
-    "score_from_checks",
-    "score_from_ratio",
     "story_scene_coverage_ok",
 ]

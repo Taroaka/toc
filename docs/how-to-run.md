@@ -1,86 +1,71 @@
 # How to Run (MVP)
 
-本書は `todo.txt` の 15) Documentation に対応する。
+本書は ToC の通常実行手順を定義する。production は直接 authoring → ordinary structural
+validation → generation の順で進む。source、schema、ID、参照、request、file、decode、duration、
+audio/video、provenance の検証は必須で、production の品質採点や別の合格証明は使わない。
 
 ## 前提
-- 起点は assistant command（Codex 主軸。Claude Code slash command 互換: `/toc-run`, `/toc-scene-series`, `/toc-immersive-ride`, `/toc-world-walk`）
-- 成果物は `output/<topic>_<timestamp>/` に生成される
-- 成果物（`research.md` / `story.md` / `script.md` / `video_manifest.md` 等）の本文は **日本語**で記述する（ユーザーがそのまま修正できるように）
-  - 例外: ツール名 / ファイルパス / コード / 固有名詞はそのまま（必要なら英語併記はOK）
-- state は `output/<topic>_<timestamp>/state.txt`（追記型）
-- 方針: **創造→選択**
-  - Research は多様性（登場人物/世界観/解釈）を厚めに集め、Story/Script でスコアが高い案を選択する
-  - 矛盾する複数ソースの要素を同一シーン/設定として混成（ハイブリッド）する必要が出た場合は、確定前にユーザー承認を取る（運用）
 
-## セットアップ（Docker）
+- 起点は Codex assistant command（Claude Code slash command 互換）。
+- 成果物は `output/<topic>_<timestamp>/` に保存する。
+- run の `state.txt` は append-only。
+- 本文 artifact は原則日本語で書き、tool 名、path、code、固有名詞は必要に応じて原文を使う。
+- source の exact bytes、topic、experience、target duration を
+  `logs/orchestration/create_input.json` に保存してから authoring を始める。
+- contradictory source variants の hybridization は明示したユーザー選択として保存する。
 
-1) `.env.example` を `.env` にコピーし、APIキー等を設定する  
-2) 起動:
+## セットアップ
+
+Docker:
 
 ```bash
 docker-compose up --build
 ```
 
-## セットアップ（uv / local）
-
-uv で依存を揃える場合（.venv を作って同期）:
+uv/local:
 
 ```bash
 python -m pip install -U uv
 scripts/uv-sync.sh
 ```
 
-## 実行（想定）
-
-Codex/Claude Code の assistant command で以下を実行:
-
-```
-/toc-run "桃太郎" --dry-run
-```
-
-story review を後回しにして script draft まで一気に進める run:
+## 基本実行
 
 ```text
-/toc-run "かぐや姫" --dry-run --review-policy drafts
+/toc-run "桃太郎" --dry-run
+/toc-immersive-ride --topic "桃太郎"
+/toc-scene-series "桃太郎" --min-seconds 30 --max-seconds 60
 ```
 
-YouTube サムネイル用の prompt だけ作る場合:
+p 番号の coarse target は bucket 最後の active slot まで実行する。
+
+```text
+/toc-immersive-ride --topic "かぐや姫" --stage p300 --experience cinematic_story
+/toc-immersive-ride --topic "かぐや姫" --stage 300 --experience cinematic_story
+/toc-world-walk --source-run output/桃太郎_<timestamp>
+```
+
+active target map:
+
+```text
+p100→p120  p200→p220  p300→p330  p400→p450  p500→p570
+p600→p680  p700→p750  p800→p840  p900→p920
+```
+
+実際の active slots は p110/p120、p210/p220、p310/p330、p410/p420/p440/p450、
+p510/p520/p530/p550/p560/p570、p610/p620/p650/p660/p670/p680、
+p710/p730/p740/p750、p810/p830/p840、p910/p920 である。
+
+YouTube thumbnail prompt:
 
 ```text
 /toc-youtube-thumbnail "桃太郎"
+/toc-youtube-thumbnail "浦島太郎" --run-dir output/浦島太郎_<timestamp>
 ```
 
-既存 run dir を参照して、作品内容に寄せたサムネ prompt を作る場合:
+## Frontend create をヘッドレスで確認する
 
-### Frontend Create UI のレビューモード
-
-画像生成 app の「新しいToCを作成」ダイアログには `レビューモード` の選択欄がある。
-
-- `通常レビュー`（`standard`、既定）: external semantic reviewer と frontend human review を
-  実行する。画像生成後は p680 で `review.image.status=pending` /
-  `gate.image_review=required` のままユーザーへ handoff する。
-- `全レビュー済み（審査を省略）`（`preapproved`）: ユーザーが明示的に選んだ場合だけ使用する。external
-  semantic reviewer turn と frontend human reviewer turn を省略し、各 review pack / digest
-  から `deterministic_preapproval` report を作る。pack、digest、deterministic validation、
-  request-bound provenance、生成 output の存在・decode・completeness は省略しない。
-
-作成モード（通常 / scene storyboard / 世界観散歩）を選んだあと、同じダイアログで
-`レビューモード`を選択して作成する。選択値は request の `review_mode` として送られ、run 内の
-`logs/orchestration/create_input.json`（`toc.create_input.v1`）へ保存される。preapproved は
-作成後に mode を差し替えられず、入力契約との不一致は停止する。
-
-UI の preapproved 警告は「外部レビューエージェントを呼ばず、各審査を承認済みとして進めます。
-構造・参照・生成ファイルの検証は実行されます。」であり、審査 artifact や deterministic check
-を削除する意味ではない。
-
-preapproved の p680 は、生成前に approved へ飛ばない。media generation と terminal
-validation が成功した時だけ `slot.p680.status=done`、`review.image.status=approved`、
-`gate.image_review=skipped`（p670 も `skipped`）になる。standard は
-`slot.p680.status=awaiting_approval` のまま停止する。
-
-### Frontend Create Routeをヘッドレスで検証する
-
-フロントUIを介さず、フロントの作成ボタンと同じ backend endpoint `/api/image-gen/runs/create` から新規runを作る場合:
+フロントの作成ボタンと同じ endpoint を使う。
 
 ```bash
 python scripts/toc-create-run-headless.py \
@@ -89,20 +74,7 @@ python scripts/toc-create-run-headless.py \
   --no-images
 ```
 
-画像生成はデフォルトで有効。設計・manifest・requestだけを高速に確認したい場合だけ `--no-images` を付ける。
-
-明示的な preapproved create をヘッドレスで再現する場合は、`--review-mode preapproved` を
-付ける。外部 reviewer turn は起動しないが、p680 の deterministic / provenance / output
-validation は実行される。
-
-```bash
-python scripts/toc-create-run-headless.py \
-  --title "シンデレラ" \
-  --source "シンデレラ" \
-  --review-mode preapproved
-```
-
-既にbackend serverを起動している場合は、in-processではなく実サーバーへ投げられる。
+画像を生成する場合は `--no-images` を省略する。実 server に送る場合:
 
 ```bash
 python scripts/toc-create-run-headless.py \
@@ -112,574 +84,128 @@ python scripts/toc-create-run-headless.py \
   --no-images
 ```
 
-結果は作成run配下の `logs/regression/headless_regression_report.md` に保存される。
+結果は run の ordinary execution report と `state.txt` に保存される。frontend と CLI は同じ
+source, compiler, request snapshot, provider, structural validator を使う。
+
+## 期待される出力
 
 ```text
-/toc-youtube-thumbnail "浦島太郎" --run-dir output/浦島太郎_<timestamp>
-```
-
-sceneごとにQ&A動画を複数本作る場合:
-
-```
-/toc-scene-series "桃太郎" --min-seconds 30 --max-seconds 60
-```
-
-シーンエージェント（multi-agent）で scene-series の下準備を行う場合:
-
-```bash
-python scripts/ai/toc-scene-series-multiagent.py "桃太郎" --min-seconds 30 --max-seconds 60
-python scripts/toc-scene-series.py "桃太郎" --run-dir output/桃太郎_<timestamp>
-```
-
-没入型（実写シネマティック体験）の単発動画:
-
-```text
-/toc-immersive-ride --topic "桃太郎"
-```
-
-API をまだ使わず、story/script/manifest draft まで進めたい場合:
-
-```text
-/toc-immersive-ride --topic "かぐや姫" --stage script --experience cinematic_story --review-policy drafts
-```
-
-p番号ターゲットは、`p300` と `300` のどちらも使える。`p100` / `p300` のような 100 番台指定は、その stage の human-review handoff slot まで進める:
-
-```text
-/toc-immersive-ride --topic "かぐや姫" --stage p300 --experience cinematic_story
-/toc-immersive-ride --topic "かぐや姫" --stage 300 --experience cinematic_story
-```
-
-既存 run の asset を参照して「世界観を散歩してみた」動画を作る場合:
-
-```text
-/toc-world-walk --source-run output/桃太郎_<timestamp>
-/toc-world-walk --source-run output/桃太郎_<timestamp> --stage script --review-policy drafts
-```
-
-## 期待される出力（/toc-run）
-
-```
 output/<topic>_<timestamp>/
   p000_index.md
   state.txt
   research.md
   story.md
+  visual_value.md
   script.md
   video_manifest.md
-  video.mp4          (プレースホルダでも可)
-  run_report.md
-  logs/
+  asset_inventory.md
+  asset_plan.md
+  assets/
+  audio/
+  video.mp4
+  logs/grounding/
+  logs/orchestration/
 ```
 
-## 期待される出力（/toc-scene-series）
+scene-series は run 内に `scenes/sceneXX/` を持ち、各 scene に evidence、script、manifest、
+assets、video を置く。
 
-```
-output/<topic>_<timestamp>/
-  p000_index.md
-  state.txt
-  research.md
-  story.md
-  series_plan.md
-  scenes/
-    scene01/
-      evidence.md
-      script.md
-      video_manifest.md
-      assets/
-      video.mp4
-    scene02/
-      ...
-```
+## Stage context
 
-## 生成（画像/動画/TTS）について
-
-- 画像: Codex built-in image generation（`tool: "codex_builtin_image"` / 現行想定モデル `gpt-image-2`）
-- 外部課金系の画像 provider（Nano Banana / Gemini image / SeaDream）は標準経路では使わない
-- 互換のため、旧 `google_nanobanana_2` / `gemini_3_1_flash_image` / `seadream` 表記を読んだ場合も実行時は `codex_builtin_image` に正規化する
-- provider 固定は request metadata / 設計書の責務であり、生成 prompt 本文には書かない
-- 画像成果物は実写系（photorealistic / cinematic / live-action）を必須にする。ローカルで手続き生成した疑似ラスター PNG、placeholder PNG、ベクター風/イラスト風/低情報量 raster は canonical p500/p600 成果物として採用しない
-- p500 / p600 の検証では、画像ファイルの存在だけでなく `logs/image_generation_prompts.jsonl` の Codex app-server 生成証跡を確認する。`source=local_raster...` の fallback は hard fail とし、権限エラー時もローカル生成 PNG で代替しない
-- `reference_count == 0` の image request は互換 lane 名 `execution_lane=bootstrap_builtin` のまま扱う
-- `reference_count > 0` の image request は `execution_lane=standard` のまま扱うが、実行 provider は `codex_builtin_image` で固定する
-- 動画: Kling 3.0（default。`video_generation.tool: "kling_3_0"` + `KLING_ACCESS_KEY`/`KLING_SECRET_KEY`）
-- 動画（Omni）: Kling 3.0 Omni（`video_generation.tool: "kling_3_0_omni"` + `KLING_OMNI_*`）
-- 動画（代替）: Seedance（BytePlus ModelArk。`video_generation.tool: "seedance"` + `ARK_API_KEY`）
-- ※ Google Veo はこのリポジトリでは安全のため無効化（Veo系の tool 名は Kling にルーティング）
-- TTS: ElevenLabs
-- 当面は `video_manifest.md` を入力に素材生成→結合でフローを検証する
-- 具体は `docs/implementation/video-integration.md` を参照
-- 画像生成の review 正本は `video_manifest.md` 自体
-- `standard` では `review-image-prompt-story-consistency.py` が manifest を直接監査し、結果を `image_generation.review` へ書き戻してから画像生成へ進む。明示 `review_mode=preapproved` では external semantic / human reviewer turn を省略するが、canonical review pack / digest と `deterministic_preapproval` report、同じ deterministic checks を materialize / 検証してから進む
-  - hard gate は missing contract / missing ids / required prompt block 欠落 / reveal 破り / self-contained 違反のような構造的問題に寄せる
-  - `must_avoid` の素朴な文字列一致、`target_focus` の語一致、`production_readiness` の弱さは warning として残してよい
-- reusable asset が多い run では、standard は cut 画像生成の前に `asset_inventory.md` と `asset_plan.md` を作って review / approve してから asset を生成する。preapproved create では external reviewer turn を省略できるが、asset pack / digest、参照整合、生成 output の deterministic validation は必須とする
-  - p520 では、この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still を `asset_inventory.md` に網羅する
-  - p540 では、standard は review agent が漏れ・矛盾・参照誤用・lane 誤りを確認する cycle を最大 1 round 回す。preapproved では外部 reviewer turn を省略し、同じ pack / digest に対する deterministic checks を実行する
-  - character reference は、全身が見える front / side / back の 3 面図を基本にする
-  - p550 の `asset_generation_requests.md` では、`物語「シンデレラ」の scene10` / `scene30_cut01` / `この画像は物語「シンデレラ」の一場面` のような制作管理メタを prompt 本文に書かず、`灰の台所。石床、大きな暖炉、薄い灰、朝の青灰色の光...` のように具体的に見える対象を書く
-- image の rerun で比較案が欲しい場合だけ、`generate-assets-from-manifest.py --force --test-image-variants N` を使って `assets/test/` に exploratory variant を出す
-- provider 実行前に request file を materialize できる
-  - asset stage: `asset_generation_requests.md`
-  - cut image stage: `image_generation_requests.md`
-  - video stage: `video_generation_requests.md`
-- story cut の動画有無は human review の削除結果で決める
-  - `delete_scene` / `delete_cut` で消していない cut は、sync 時に既定の `video_generation` を持つ
-  - `still_image_plan.mode` は image 圧縮計画であり、動画 request から cut を落とす基準には使わない
-- `p000_index.md` は run 直下の人間向け入口
-  - current stage
-  - next required human review
-  - stage table
-  - current run inventory
-  をまとめる
-  - 手動再生成: `python scripts/build-run-index.py --run-dir output/<topic>_<timestamp>`
-- 変更内容:
-  - fixed `p-slot` workflow を asset/image-first の production order に切り替えた
-  - `p500 asset -> p600 scene/image implementation -> p700 narration/audio -> p800 video -> p900 render` を全 story 共通に固定した
-- 修正理由:
-  - 画像・asset を先に確定し、その visual 実体を見てから narration と video を仕上げるため
-- 旧仕様との差分:
-  - 旧順序は `p500 narration/audio -> p600 asset -> p700 scene implementation -> p800 video` だった
-- `100` 番台ごとに大工程を割り当てる
-  - `p100`: research
-  - `p200`: story
-  - `p300`: visual planning（`visual_value.md` で visual identity / scene visual value / anchor / reference strategy / asset candidates / regeneration risks / p400-p600-p700 handoff を決める）
-  - `p400`: scene completion gate / cut blueprint / script / production readiness council / narration draft / human changes
-  - `p500`: asset
-  - `p600`: scene implementation / image
-  - `p700`: narration / audio runtime
-  - `p800`: video
-  - `p900`: render / QA / runtime
-- これらの slot 意味は固定契約で、story ごとに変えない
-- 実行所有権は3階層に分ける
-  - L1 Run Orchestrator: bucket 順序、stop target、approval boundary、bucket 完了検証だけを担当する。本文 artifact は次 bucket 判定のために読まない
-  - L2 P-Bucket Supervisor: `p100`, `p200`, ... `p900` ごとに担当し、その bucket 内の canonical artifact、`state.txt`、`p000_index.md` を更新する single writer になる
-  - L3 Task / Review Agents: critic、aggregator、grounding auditor、scene worker、image/video/narration reviewer など。L2 配下で isolated report / scratch / review artifact だけを書く
-- 各 L2 supervisor は bucket 完了時に `logs/orchestration/pXXX.supervisor_result.json` を書く
-  - L1 はこの result、required artifact の存在、fixed slot の terminal state だけを見て次 bucket を起動する
-- L1 は各 L2 supervisor を起動した時点で `logs/orchestration/l2_supervisor_progress.md` に進捗行を追記する
-  - ここに記録するのは L2 P-Bucket Supervisor の `invoked|returned|blocked|failed` だけ
-  - L3 critic / aggregator / scene worker / image reviewer などの起動履歴はこの進捗メモには書かない
-  - 記録は `python scripts/record-l2-supervisor-progress.py --run-dir <run_dir> --bucket p600 --event invoked --stop-slot p680` の形式で行う
-  - L2 が返った後は `--event returned --result logs/orchestration/p600.supervisor_result.json` を同じ bucket に対して追記する
-  - `returned|blocked|failed` の terminal event では result JSON path を必ず渡す
-  - `scripts/verify-pipeline.py` は target に必要な bucket の `invoked` progress、`state.txt` の `returned` terminal state、`pXXX.supervisor_result.json` を hard gate として検証する
-- authoring 直後の review slot は最大 1 round の evaluator-improvement loop として実行する
-  - 各 round は 5 critic agents + 1 aggregator
-  - critic は独立 report のみを書き、canonical artifact / `state.txt` / `p000_index.md` を直接編集しない
-  - aggregator は 5 critic report を統合して `passed|changes_requested` を返す
-  - 担当 L2 supervisor が aggregator report から採用する修正だけを bucket 内 canonical artifact へ反映する
-  - round 5 後も `changes_requested` の場合は `eval.<stage>.loop.status=changes_requested` として停止し、人間 review / override を待つ
-- `/toc-immersive-ride --stage` は `p100` / `100` のような p番号指定を受け付ける
-  - 100 番台の stage target は、stage 冒頭ではなく、その stage の human-review handoff slot まで進める
-  - `p100|100|research`: `p130` research review handoff まで
-  - `p200|200|story`: `p230` story review handoff まで
-  - `p300|300|visual_value`: `p330` visual planning handoff まで（`visual_value.md` + p400/p500/p600/p700 handoff）
-  - `p400|400`: `p450` script handoff / skeleton manifest materialization まで
-  - `p450|450|script`: skeleton `video_manifest.md` まで
-  - `p500|500|asset`: `p570` asset continuity / human review handoff まで
-  - `p600|600|scene_implementation|image`: standard は `p680` image review handoff、明示 preapproved は deterministic validation 後の `p680` terminal まで
-  - `p700|700|narration`: `p750` audio QA / human review handoff まで
-  - `p800|800|video_generation`: `p850` video review / exclusions handoff まで
-  - `p900|900|render|video`: `p930` final QA / runtime handoff まで
-- 細番号も固定 slot contract の一部として扱う
-  - `p110`, `p120`, `p130`
-  - `p210`, `p220`, `p230`
-  - `p310`, `p320`, `p330`
-  - `p410`, `p420`, `p430`, `p435`, `p440`, `p450`
-  - `p510`, `p520`, `p530`, `p540`, `p550`, `p560`, `p570`
-  - `p610`, `p620`, `p630`, `p640`, `p650`, `p660`, `p670`, `p680`
-  - `p710`, `p720`, `p730`, `p740`, `p750`
-  - `p810`, `p820`, `p830`, `p840`, `p850`
-  - `p910`, `p920`, `p930`
-- story ごとの差分は `slot.pXXX.status` / `slot.pXXX.requirement` / `slot.pXXX.skip_reason` / `slot.pXXX.note` で表す
-- `skip` は例外ではなく正規状態で、ユーザー指示に応じて run ごとに記録してよい
-- p300 done 条件:
-  - 正本は `docs/data-contracts.md` の "Canonical p300 done 条件"
-  - 要約: `visual_value.md` に scene visual value coverage、asset / anchor candidates、reference strategy、regeneration risks、p400/p500/p600/p700 handoff がある
-  - p300 では本番 cut prompt、画像生成 request、asset 画像、動画 motion prompt を作らない
-- `p000_index.md` の stage table / slot table を、その run の進捗正本とする
-- slot 状態を手で残したい場合は次を使う
+各 stage で次を行う。
 
 ```bash
-python scripts/toc-state.py set-slot \
+python scripts/prepare-stage-context.py \
+  --stage research|story|script|narration|asset|scene_implementation|video_generation|render|qa \
   --run-dir output/<topic>_<timestamp> \
-  --slot p640 \
-  --status skipped \
-  --requirement optional \
-  --skip-reason "asset review not needed for this run"
+  --flow toc-run|scene-series|immersive
 ```
 
-- fixed `p-slot` contract を更新したら `python scripts/validate-slot-contract.py` を実行する
-- `python scripts/generate-assets-from-manifest.py --manifest ... --materialize-request-files-only` で request file だけ更新できる
-- request file の手修正は正本ではなく、次回 materialize で再構成される
-- 修正理由を残したい場合は `script.md.human_change_requests[]` を正本にし、materialized request file の `source_requests` を review に使う
-- 同時に `generation_exclusion_report.md` も更新され、`cut_status: deleted` の cut が request / generation / concat から外れることを確認できる
-- 人間レビューが gate になっている stage では、作業完了時に「次はユーザーの review が必要」という短い促しを必ず返す
-- `review-narration-text-quality.py` は manifest を直接監査し、結果を `audio.narration.review` へ書き戻してから音声生成へ進む
-- ナレーション文面の human review 正本は `script.md`
-  - `script.md` の `narration` / `elevenlabs_prompt` / `tts_text` / `human_review.approved_*` を更新してから manifest へ同期する
-  - `elevenlabs_prompt` を直したときは、同じ変更を `tts_text` にも反映する
-  - 同期コマンド:
+返された source/readset の順序 `global_docs → stage_docs → templates → inputs` で読み、
+canonical artifact を author する。その後、対応する普通の structural validator、request
+validator、output/provenance validator を実行する。source/readset が欠けていれば入力不足として
+停止する。
 
-```bash
-python scripts/sync-narration-from-script.py \
-  --script output/<topic>_<timestamp>/script.md \
-  --manifest output/<topic>_<timestamp>/video_manifest.md
-```
+## 生成 providers
 
-- audio-only 生成の後は、必ず実尺ゲートを通す
-  - `python scripts/generate-assets-from-manifest.py --manifest output/<topic>_<timestamp>/video_manifest.md --skip-images --skip-videos`
-  - `python scripts/sync-manifest-durations-from-audio.py --manifest output/<topic>_<timestamp>/video_manifest.md`
-  - `python scripts/check-audio-duration-gate.py --manifest output/<topic>_<timestamp>/video_manifest.md --run-dir output/<topic>_<timestamp>`
-- `cinematic_story` は既定で 300 秒以上を target にする
-  - `video_metadata.duration_seconds` が target 未満なら、`logs/review/duration_scene.subagent_prompt.md` と `logs/review/duration_narration.subagent_prompt.md` を生成して停止する
-  - これらの prompt は contextless subagent に渡して、scene 再分割と narration 拡張の見直しに使う
-  - gate を超えた run だけが次の human review に進める
-- `video_manifest.md` は二段階で扱う
-  - `manifest_phase: skeleton`
-    - narration review / TTS / duration gate に必要な最小構造
-  - `manifest_phase: production`
-    - image / video 実装 field を埋めた生成正本
-- production `video_manifest.md` では semantic density contract を満たす。各 production scene の cut 数は distinct semantic obligation ID と可視化必須の authored event beat ID から逆算し、importance や `target_duration_seconds` だけでは増やさない。1 beat / 1 obligation を十分に証明する scene は 1 cut でもよい一方、複数の独立責務を scene 直下の `image_generation` 1件へ潰した manifest は p620/p650 review で差し戻す。尺不足は provider capability、意味のある cut の duration、narration / silence、scene 構成または target 調整で解決する。
-- `generate-assets-from-manifest.py` は `manifest_phase: production` でない限り image / video generation を開始しない
+- 画像: Codex built-in image generation（`codex_builtin_image` / `gpt-image-2`）
+- 動画: Kling 3.0（`kling_3_0`）、Kling 3.0 Omni、または Seedance
+- TTS: ElevenLabs
+- provider は request metadata と compiler で指定し、provider-facing prompt に制作管理メタを
+  混ぜない。
+- 画像 request は reference count、execution lane、request snapshot、source digest、
+  reference bytes hash を保存する。
+- 画像/動画は provider の実際の response item、prompt hash、reference hash、destination が
+ 一致した場合だけ run output に copy する。
+- local placeholder、未署名の別 request の画像、存在しない reference、decode 不能 output は
+  canonical output として採用しない。
 
-- `review-research-stage.py` / `review-script-stage.py` / `review-manifest-stage.py` / `review-video-stage.py` は各 stage の evaluator subagent review を担い、report と `state.txt` の `eval.*` summary を更新する
-  - authoring-after review slot では、これらの evaluator review は最大 1 round の improvement loop として扱う
-  - review-loop prompt は `python scripts/build-review-loop-round.py --run-dir output/<run> --slot p230 --round 1` のように slot 番号で materialize できる
-  - 1 round は 5 critic agents が独立評価し、1 aggregator が統合判定する
-  - `eval.*` summary は最新 aggregator result を反映する
-  - round 途中の critic prompt は `logs/eval/<stage>/round_01/prompts/critic_1.prompt.md` 形式、critic report は `logs/eval/<stage>/round_01/critic_1.md` 形式、aggregator report は `logs/eval/<stage>/round_01/aggregated_review.md` に残す
-  - critic / aggregator は、単に failed check や不足項目を列挙せず、根本原因、後段への影響、修正方針、次回 review の通過条件を artifact に残す。修正方針が明確でない場合は、推測で patch を作らず、次に集めるべき証拠を書く
-  - p410b scene_set review では critic_1=`scene_count_coverage`, critic_2=`dramatic_structure + reveal_order`, critic_3=`duration_density`, critic_4=`visual_production`, critic_5=`handoff_integrity` を標準割当とする。scene 数は `maximal_meaningful` まで展開されているかを確認し、これ以上 scene を増やすより cut を厚くすべき理由が説明できない限り aggregator は pass しない。`Scene Count Gate` / `Scene Specificity Gate` / `Reveal Order Gate` / `Handoff Chain Gate` は必須 gate とする
-  - p410c scene_detail review では scene 数 gate を繰り返さず、`Scene Detail Gate` として scene 必要性、内部圧力、価値変化の可視性、因果 turn の可視性、`scene_generation` の prompt 分離、`scene_event.event_sequence[].abstract_function / concrete_event / story_grounding`、`non_replaceable_elements`、具体要素の `story_function`、`specificity_budget`、`canonical_event_coverage_matrix`、隣接 scene handoff を必須 gate とする。抽象表現自体は落とさず、抽象だけで終わる scene、装飾的具体性、source grounding なしの発明、scene prompt への downstream 実行情報混入を落とす
-  - p420 cut review では critic_1=`cut_intent_isolation`, critic_2=`scene_event_coverage`, critic_3=`first_frame_motion_readiness`, critic_4=`multimodal_event_boundary_coverage`, critic_5=`duration_density_and_handoff` を標準割当とする。`Cut Blueprint Gate` の全項目が説明できない限り aggregator は pass しない。混合的感情は全 cut 必須ではなく、採用 cut だけ `viewer_contract.mixed_affect_design` に視覚/語り/音/リズム/handoff の支えを残す
-  - research は `research.md.evaluation_contract`
-  - script は `script.md.evaluation_contract`
-  - scene/cut は `video_manifest.md.scenes[].cuts[].cut_contract` を正本とし、`scene_contract` は旧 reader 用 alias としてのみ扱う
-  - video は `video_manifest.md.quality_check.review_contract`
-- narration の作成前に `audio.narration.contract` を置き、cut ごとの done 条件を明示してから原稿を書く
-- review では、不足 `character_ids` の自動補完、prompt が環境寄りに流れすぎていないか、story 上の関係性/ブロッキングが抜けていないかを点検する
-- `image_generation.review` は `agent_review_ok` / `agent_review_reason_keys` / `rubric_scores` / `overall_score` / `human_review_ok` / `human_review_reason` を持つ
-  - `image_generation.contract` は `target_focus` / `must_include` / `must_avoid` / `done_when` を持てる
-  - criterion score は `rubric_scores`、加重合計は `overall_score` に入る
-  - 現行表記として `agent_review_reason_codes` を使っていてもよいが、意味は `agent_review_reason_keys` と同じに保つ
-  - review 実行後に subagent が `agent_review_ok` を更新する
-  - `human_review_ok` は初期値 `false`
-  - false の cut には reason key を 1 つ以上残す
-  - canonical reason key は `image_contract_missing` / `image_contract_must_include_unmet` / `image_contract_must_avoid_violated` / `image_contract_target_focus_unmet` / `missing_required_prompt_block` / `image_prompt_action_window_missing` / `image_prompt_missing_not_yet_state` / `image_prompt_time_mixed` / `image_prompt_reveal_boundary_conflict` / `image_prompt_reference_usage_missing` / `image_prompt_character_state_gate_missing` / `image_prompt_object_visibility_missing` / `image_prompt_camera_composition_weak` / `image_prompt_scene_material_pack_missing` / `image_prompt_design_meta_leaked` / `image_prompt_visual_translation_missing` / `image_prompt_primary_visual_anchor_missing` / `image_prompt_motion_affordance_weak` / `image_prompt_motion_ceiling_missing` / `image_prompt_future_event_leak` / `image_prompt_object_visibility_conflict` / `image_prompt_reference_binding_weak` / `image_prompt_subject_priority_missing` / `image_prompt_scene_material_too_generic` / `image_prompt_action_completion_state_missing` / `image_prompt_start_state_not_drawable` / `image_prompt_overpacked_visual_intent` / `image_prompt_frame_edge_handoff_missing` / `image_prompt_character_pose_too_generic` / `image_prompt_not_yet_state_too_generic` / `prompt_not_self_contained` / `prompt_contains_nonvisual_metadata` / `prompt_contains_first_frame_metadata` / `prompt_leaks_motion_brief` / `non_japanese_prompt_term` / `prompt_mentions_character_but_character_ids_empty` / `source_anchor_missing_from_prompt` / `missing_character_id` / `missing_object_id` / `prompt_only_local_mismatch` / `prompt_missing_expected_character_anchor` / `prompt_missing_expected_object_anchor` / `prompt_subject_drift` / `blocking_drift` / `image_prompt_not_first_frame_ready` / `image_prompt_story_alignment_weak` / `image_prompt_subject_specificity_weak` / `image_prompt_prompt_craft_weak` / `image_prompt_continuity_weak` / `image_prompt_first_frame_readiness_weak` / `image_prompt_production_readiness_weak`
-  - prompt は新しい 11 block が揃っているだけでは不十分。本文は 220 文字以上を目安にし、subject / blocking / setting / light / camera / material のうち 4 系統以上の具体要素を含める
-  - これを満たさない場合の canonical reason key は `image_prompt_prompt_craft_weak`
-  - required block `[参照画像の使い方]` / `[このcutの開始状態]` / `[単一瞬間ルール]` / `[画面に必ず見えるもの]` / `[画面に入れてはいけないもの]` / `[人物状態]` / `[小道具 / 舞台装置]` / `[構図]` / `[光 / 質感]` / `[動画化のための開始余地]` / `[禁止]` のいずれかが欠けていれば、subagent は `agent_review_ok: false` にする
-  - この場合の canonical reason key は `missing_required_prompt_block`
-  - scene image prompt は `scene_event / source_event_contract / event_context_for_cut / first_frame_contract / motion_contract` から派生した `first_frame_visual_plan` を経由して作る。`first_frame_visual_plan` は review/log 用の中間契約であり、API に送る prompt 本文には `first_frame_visual_plan` / `source_event_contract` / `event_context_for_cut` / `p600` / `p800` を出さない
-  - `[このcutの開始状態]` には `event_time_position` / `event_fact_visible_in_still` / `not_yet_happened_in_still` / `action_completion_state` を置き、`[画面に必ず見えるもの]` には `primary_visual_anchor` を置く。欠落時は `image_prompt_action_window_missing` / `image_prompt_missing_not_yet_state` / `image_prompt_action_completion_state_missing` / `image_prompt_primary_visual_anchor_missing` で false にする
-  - `[動画化のための開始余地]` には `movable_subject` / `movement_vector` / `must_not_resolve_in_image` / `motion_ceiling` を置く。欠落時は `image_prompt_motion_affordance_weak` / `image_prompt_motion_ceiling_missing` で false にする
-  - 「価値変化」「場所の圧力」「観客理解」「因果」などの抽象語が描画可能な人物状態・小道具・構図・光へ変換されず prompt 本文に残る場合は `image_prompt_visual_translation_missing` として false にする
-  - prompt が `[cut契約からの可視要件]` / `場面の核:` / `観客理解の増分:` / `因果の証明:` のようなレビュー用メタ情報を含む場合、subagent は `agent_review_ok: false` にする
-  - この場合の canonical reason key は `image_prompt_design_meta_leaked`
-  - prompt が `scene03_cut01` のような他 cut 参照や `前カット` / `次カット` / `前のprompt` のような参照依存表現を含む場合、subagent は `agent_review_ok: false` にする
-  - この場合の canonical reason key は `prompt_not_self_contained`
-  - prompt が `物語「シンデレラ」の scene10` / `この画像は物語「シンデレラ」の一場面` / `[物語の文脈]` のような API に描画対象として伝わらない制作メタ情報を含む場合、subagent は `agent_review_ok: false` にする
-  - この場合の canonical reason key は `prompt_contains_nonvisual_metadata`
-  - scene image prompt は後段動画の first frame 候補として設計する。ただし `最初の1フレーム` / `1フレーム目` / `first frame` は authoring/review 用メタ情報であり、prompt 本文に入れない
-  - この場合の canonical reason key は `prompt_contains_first_frame_metadata`
-  - prompt が action の途中または完了後の絵に見え、動画冒頭の静止画として不自然な場合、subagent は `agent_review_ok: false` にする
-  - この場合の canonical reason key は `image_prompt_not_first_frame_ready`
-  - prompt に `rideable` のような英語 shorthand が混ざる場合も false にする
-  - この場合の canonical reason key は `non_japanese_prompt_term`
-  - prompt に人物が明示されているのに `image_generation.character_ids` が空なら false にする
-  - この場合の canonical reason key は `prompt_mentions_character_but_character_ids_empty`
-  - false reason に対応する修正を manifest に反映し、修正後に再 review して finding が消えれば、subagent はその cut を `agent_review_ok: true` に戻す
-  - `human_review_ok: true` は finding を理解して例外許容した記録であり、subagent finding を消す意味ではない
-  - `human_review_ok: true` のときは `human_review_reason` を残す
-  - **両方 `false` の cut が残っていると画像生成は止まる**
-- `audio.narration.review` は `agent_review_ok` / `agent_review_reason_keys` / `agent_review_reason_messages` / `human_review_ok` / `human_review_reason` を持つ
-  - `audio.narration.contract` は `target_function` / `must_cover` / `must_avoid` / `done_when` を持てる
-  - human review は先に `script.md` 側で行い、manifest 側は同期結果を gate する
-  - criterion score は `rubric_scores`、加重合計は `overall_score` に入る
-  - review 実行後に subagent が `agent_review_ok` を更新する
-  - `human_review_ok` は初期値 `false`
-  - false の cut/scene には reason key を 1 つ以上残す
-  - canonical reason key は `narration_contract_missing` / `narration_contract_must_cover_unmet` / `narration_contract_must_avoid_violated` / `narration_contract_target_function_unmet` / `narration_empty` / `narration_tts_text_missing` / `narration_contains_meta_marker` / `tts_unfriendly_literal` / `needs_text_normalization` / `sentence_too_long_for_tts` / `missing_pause_punctuation` / `visual_direction_leaked_into_narration` / `narration_story_role_mismatch` / `narration_too_visual_redundant` / `narration_pacing_mismatch` / `narration_spoken_japanese_weak`
-  - false reason に対応する修正を manifest に反映し、修正後に再 review して finding が消えれば、subagent はその node を `agent_review_ok: true` に戻す
-  - `human_review_ok: true` は finding を理解して例外許容した記録であり、subagent finding を消す意味ではない
-  - **両方 `false` の node が残っていると音声生成は止まる**
-- 画像生成の既定サイズは `1K`（必要な scene だけ `image_generation.image_size` で上書き）
-- story still の既定生成対象は `still_image_plan.mode: generate_still` のみ
-  - `reuse_anchor` / `no_dedicated_still` は既定では生成しない
-  - 例外的に広げるときだけ `--image-plan-modes generate_still,reuse_anchor` のように指定する
-- `image_generation_requests.md` には review 用に image prompt を持つ全 scene/cut を出す
-  - `still_mode` と `generation_status` を見れば、新規生成 / 再利用 / bridge の扱いが分かる
-  - `generation_status` は `missing|created|recreate`
-  - `cut_status: deleted` の cut は request 本文には出さず、`generation_exclusion_report.md` に送る
-  - `references` は explicit path だけでなく、`character_ids` / `object_ids` / `location_ids` から解決された asset も含め、人レビュー時に参照元が見えるようにする
-  - p600 の画像gateは生成済み scene still と参照画像を実画像として検査する。scene still がベクター風/イラスト風/低情報量 raster で参照画像が正常なら p600 を再生成し、参照画像も同様に失敗するなら p500/p560 の参照asset再生成へ戻す。生成証跡が app-server 由来でない場合も再生成対象にする
-  - frontend resume で scene still だけが再生成対象なら image-only 経路を使える。参照 asset の再生成が一つでも必要なら、画像を先に削除せず canonical p500 dry-run/exact-token/apply へ戻す。unknown / malformed / request-unbound な再生成 plan は fail closed とする
-  - 画像生成は依存のない cut から並列化され、`--image-max-concurrency` で同時実行数を制御できる（上限 10）
-  - `recreate` を実際に回すときは `--force` を使う
-  - `recreate + --force` では既存 canonical 画像を `assets/test/` に退避してから上書きする
-  - `--force --test-image-variants N` を併用すれば exploratory variant を複数出せる
-- scene 3 以降など大きい範囲をまとめて見直すときは、scene 単位で request authoring subagent を並列起動して scratch rewrite を作り、担当 `p600` L2 supervisor が `image_generation_requests.md` へ統合する
-  - 各担当は `script.md`、`video_manifest.md`、現在の request draft、`docs/implementation/image-prompting.md` を必ず読む
-  - motion や first/last frame の判断が絡む scene では `docs/video-generation.md` も必ず読む
-  - 担当 scene の `visual_beat` を semantic source にして、stateless な request 文へ書き直す
-  - この scene 分割は毎回の image generation run で再現できるよう、順番・担当範囲・統合手順を固定する
-  - semantic source は `script.md`、implementation source は `video_manifest.md`
-  - request 本文の具体化はコードで自動変換せず、自然言語エージェントと人レビューで決める
-- `scripts/build-clip-lists.py` は `*_generation_exclusions.md` も出力する
-  - `cut_status: deleted` の cut は `video_clips.txt` / `video_narration_list.txt` から自動で除外される
-  - scene に `render_units[]` がある場合、`video_clips.txt` は render unit 単位、`video_narration_list.txt` は `source_cut_ids[]` の順で作る
-  - 最終 render はこの concat list を正本として使う
-- `--apply-asset-guides --asset-guides-character-refs scene` で人物 still を回す場合、既存の `assets/characters/*_refstrip.png` は reference に自動で追加される
-
-例（`momotaro` のマニフェストから素材生成→結合）:
-
-```bash
-python scripts/review-image-prompt-story-consistency.py \
-  --manifest output/momotaro_20260110_1700/video_manifest.md \
-  --fix-character-ids
-
-python scripts/review-research-stage.py \
-  --run-dir output/momotaro_20260110_1700 \
-  --profile standard
-
-python scripts/review-script-stage.py \
-  --run-dir output/momotaro_20260110_1700 \
-  --profile standard
-
-python scripts/review-manifest-stage.py \
-  --run-dir output/momotaro_20260110_1700 \
-  --profile standard
-
-# 必要なら source manifest を修正して再 review する
-
-python scripts/review-image-prompt-story-consistency.py \
-  --manifest output/momotaro_20260110_1700/video_manifest.md \
-  --set-human-review scene02_cut01 \
-  --set-human-review scene02_cut02 \
-  --human-review-reason "物語上必要な例外として許容"
-
-python scripts/generate-assets-from-manifest.py \
-  --manifest output/momotaro_20260110_1700/video_manifest.md \
-  --character-reference-views front,side,back \
-  --character-reference-strip \
-  --image-batch-size 10 --image-batch-index 1 \
-  # ナレーション音声を生成しない（意図的にサイレントで進める）場合だけ --skip-audio を付ける
-
-# 既定値:
-# - video generation は 1080p
-# - provider 音声は sound off（別途 narration/BGM を render で合成）
-# - standard の画像生成前は story/script review を自動実行し、missing character_ids は補完してから進む
-# - 明示 preapproved create は external semantic / human reviewer turn を省略するが、review pack / digest、deterministic / provenance / output validation を実行する
-# - 音声生成前に narration review を自動実行し、未正規化 text や v2 非対応 tag を止める
-# - 追加した無音 cut は `audio.narration.tool: "silent"` だけでなく `audio.narration.silence_contract` がないと止まる
-# - story still は `still_image_plan.mode: generate_still` だけを既定で生成する
-# - 両方 false の cut が残っていると画像生成は止まる
-# - 両方 false の narration node が残っていると音声生成は止まる
-
-python scripts/build-clip-lists.py \
-  --manifest output/momotaro_20260110_1700/video_manifest.md \
-  --out-dir output/momotaro_20260110_1700
-
-scripts/render-video.sh \
-  --clip-list output/momotaro_20260110_1700/video_clips.txt \
-  --narration-list output/momotaro_20260110_1700/video_narration_list.txt \
-  --out output/momotaro_20260110_1700/video.mp4
-
-python scripts/review-video-stage.py \
-  --run-dir output/momotaro_20260110_1700 \
-  --profile standard
-```
-
-## state運用
-
-- `state.txt` は追記型（最新ブロックが現在状態）
-- 擬似ロールバックは「過去ブロックのコピーを末尾に追記」で再現する
-- スキーマは `workflow/state-schema.txt` を参照
-- 高レベルの現在地は `status=`、工程別の進行は `stage.*.status=` で読む
-- `awaiting_approval` は「作業は終わったが、ユーザー承認待ちで次工程へ進めない」を意味する
-- 各 stage は開始前に grounding preflight を必ず実行する
-  - `python scripts/resolve-stage-grounding.py --stage research|story|script|narration|asset|scene_implementation|video_generation --run-dir output/<topic>_<timestamp> --flow toc-run|scene-series|immersive`
-  - 証跡は `logs/grounding/<stage>.json`
-  - 続けて `python scripts/audit-stage-grounding.py --stage research|story|script|narration|asset|scene_implementation|video_generation --run-dir output/<topic>_<timestamp>` を実行する
-  - `logs/grounding/<stage>.readset.json` が「その stage で読むべき対象」の正本になる
-- `stage.<name>.grounding.status=ready` と `stage.<name>.audit.status=passed` を確認できない限り、その stage を開始しない
-- chat/manual で stage 作業を始めるときは、`python scripts/prepare-stage-context.py --stage <stage> --run-dir output/<topic>_<timestamp> [--flow toc-run|scene-series|immersive]` を標準入口として使う
-- この helper は `resolve -> audit -> readset確認` を直列で実行し、`readset_path`、`grounding_report_path`、`audit_report_path`、`read_order` を含む JSON を返す
-- 返ってきた `readset_path` の `global_docs -> stage_docs -> templates -> inputs` の順に読む
-- stage 完了後に独立検証をしたいときは `python scripts/build-subagent-audit-prompt.py --stage <stage> --run-dir output/<topic>_<timestamp> [--flow toc-run|scene-series|immersive]` を使う
-  - この script は prompt を stdout に出すだけでなく、`logs/grounding/<stage>.subagent_prompt.md` に保存し、`state.txt` に `stage.<name>.subagent.prompt=...` を追記する
-  - 保存された prompt artifact をそのまま contextless subagent に渡してよい
-- image prompt の意味評価を独立 subagent に任せたいときは `python scripts/build-subagent-image-review-prompt.py --run-dir output/<topic>_<timestamp> [--flow toc-run|scene-series|immersive]` を使う
-  - この script は prompt を stdout に出すだけでなく、`logs/review/image_prompt.subagent_prompt.md` に保存し、`state.txt` に `review.image_prompt.subagent.prompt=...` を追記する
-  - judgment subagent は content 生成や schema 判定をせず、story/script/manifest の意味整合と revision 優先度だけを見る
-- run 開始時に review policy を固定する
-  - `runtime.review_mode=standard|preapproved`（`logs/orchestration/create_input.json` の `review_mode` と一致）
-  - `runtime.review_policy=frontend|preapproved`
-  - `review.policy.story=required|optional|skipped`
-  - `review.policy.image=required|optional|skipped`
-  - `review.policy.narration=required|optional|skipped`
-  - 既定は `required`
-  - `--review-policy drafts` は 3 つすべてを `optional` に倒す
-  - 必要なら `--story-review optional` のように個別 override する
-  - `skipped` は明示 frontend create の `review_mode=preapproved` だけで使い、external reviewer turn の省略を記録する。pack / digest / deterministic / provenance / output validation は省略しない
-- 物語の矛盾ソースを同一シーン/設定として混成（ハイブリッド）する場合は、確定前に人間承認を取る（運用）
-  - 承認: `python scripts/toc-state.py approve-hybridization --run-dir output/<topic>_<timestamp> --note "OK"`
-- 画像 prompt review の finding を人間判断で許容する場合は、対象 cut の `human_review_ok` を true にする
-  - `human_review_ok: true` は subagent false を解消した意味ではなく、例外許容を記録しただけとみなす
-  - `--human-review-reason` で `human_review_reason` に判断理由も残す。理由が空なら blocking hard finding は解除されない
-  - 例: `python scripts/review-image-prompt-story-consistency.py --manifest output/<topic>_<timestamp>/video_manifest.md --set-human-review scene02_cut01 --human-review-reason "許容理由"`
-
-### 各作業で何を書くか
-
-`state.txt` は、各作業の **開始時** と **完了時** に追記するのを基本とする。
-
-canonical production / generation stage:
-
-- `stage.research`
-- `stage.story`
-- `stage.script`
-- `stage.narration`
-- `stage.asset`
-- `stage.scene_implementation`
-- `stage.video_generation`
-- `stage.render`
-- `stage.qa`
-
-p-slot planning stage key:
-
-- `stage.visual_value`
-
-`stage.visual_value` は `p300` / `300` / `visual_value` 指定で使う grounding・進捗 key であり、canonical generation stage ではない。これらの stage target は `p330` visual planning handoff まで進める。
-
-legacy compatibility keys:
-
-- `stage.image_prompt_review`
-- `stage.image_generation`
-
-これらは旧 run の互換キーであり、公開 workflow の標準 stage としては数えない。
-
-基本ルール:
-
-1. 作業開始時
-   - grounding preflight を実行し、`stage.<name>.grounding.status=ready` を記録する
-   - audit を実行し、`stage.<name>.audit.status=passed` を記録する
-   - `status=...`
-   - `stage.<name>.status=in_progress`
-   - `stage.<name>.started_at=...`
-2. 作業完了時
-   - grounding が `ready` かつ audit が `passed` の stage だけ完了扱いに進める
-   - 承認不要なら `stage.<name>.status=done`
-   - 承認が必要なら `stage.<name>.status=awaiting_approval`
-   - `stage.<name>.finished_at=...`
-   - 対応する `artifact.*` / `review.*` / `eval.*` もあれば同じ block に追記
-3. 作業失敗時
-   - `stage.<name>.status=failed`
-   - `last_error=...`
-4. 作業を意図的に飛ばす時
-   - `stage.<name>.status=skipped`
-
-承認待ちが標準で発生する作業:
-
-- 台本作成後
-  - `stage.script.status=awaiting_approval`
-  - `gate.script_review=required`
-  - `review.script.status=pending`
-- 画像作成後
-  - `stage.scene_implementation.status=awaiting_approval`
-  - `gate.image_review=required`
-  - `review.image.status=pending`
-- ナレーション作成後
-  - `stage.narration.status=awaiting_approval`
-  - `gate.narration_review=required`
-  - `review.narration.status=pending`
-
-この状態では、**次工程へ進んではならない**。
-
-ただし、frontend create の request で `review_mode=preapproved` を明示した場合は、外部
-semantic reviewer turn と frontend human review turn を作らずに進める。これは review を無条件に
-無効化する設定ではない。canonical pack / digest と `deterministic_preapproval` report を作り、
-grounding、schema、参照整合、request-bound provenance、生成 output の存在・decode・
-fixed-slot completeness を検証する。media generation 前は `gate.image_review=skipped` でも
-`review.image.status=pending` のままとし、p680 terminal validation 後だけ次を記録する。
+## Authoring → validation → generation
 
 ```text
-slot.p670.status=skipped
-slot.p680.status=done
-review.image.status=approved
-gate.image_review=skipped
+research.md
+  → story.md
+  → visual_value.md
+  → script.md + video_manifest.md (manifest_phase: skeleton)
+  → asset_inventory.md + asset_plan.md + asset requests
+  → production manifest + image requests
+  → image generation and file/provenance checks
+  → narration/TTS + measured duration
+  → video requests + clip generation
+  → stream normalization + final render
+  → ordinary QA data
 ```
 
-`standard` は従来どおり `gate.image_review=required` /
-`review.image.status=pending` / `slot.p680.status=awaiting_approval` で frontend handoff する。
+`p410` は scene intent/event sequence、`p420` は cut blueprint の authoring slot である。
+cut は event beat、first frame、motion boundary、narration boundary、asset dependency、handoff を
+持ち、構造 validator が exact ID と順序を確認する。target duration の割り算だけで scene/cut を
+水増ししない。
 
-例:
+### 画像
 
-- 調査開始:
-  - `stage.research.grounding.status=ready`
-  - `stage.research.audit.status=passed`
-  - `status=RESEARCH`
-  - `stage.research.status=in_progress`
-- 調査完了:
-  - `stage.research.status=done`
-  - `artifact.research=.../research.md`
-- 物語開始:
-  - `stage.story.grounding.status=ready`
-  - `stage.story.audit.status=passed`
-  - `status=STORY`
-  - `stage.story.status=in_progress`
-- 台本完了（承認待ち）:
-  - `stage.script.grounding.status=ready`
-  - `stage.script.audit.status=passed`
-  - `status=SCRIPT`
-  - `stage.script.status=awaiting_approval`
-  - `review.script.status=pending`
-- ナレーション完了（承認待ち）:
-  - `status=SCRIPT`
-  - `stage.narration.status=awaiting_approval`
-  - `review.narration.status=pending`
-- asset 開始:
-  - `status=VIDEO`
-  - `stage.asset.status=in_progress`
-- scene implementation 完了（承認待ち）:
-  - `status=VIDEO`
-  - `stage.scene_implementation.grounding.status=ready`
-  - `stage.scene_implementation.status=awaiting_approval`
-  - `review.image.status=pending`
-- evaluator 実行後:
-  - `eval.research.status=approved|changes_requested`
-  - `eval.script.status=approved|changes_requested`
-  - `eval.manifest.status=approved|changes_requested`
-  - `eval.video.status=approved|changes_requested`
-  - `eval.image_prompt.score=...`
-  - `eval.image_prompt.unresolved_entries=...`
-  - `eval.narration.score=...`
-  - `eval.narration.unresolved_entries=...`
-- evaluator-improvement loop 実行中:
-  - `eval.<stage>.loop.status=pending|running|passed|changes_requested|failed`
-  - `eval.<stage>.loop.max_rounds=5`
-  - `eval.<stage>.loop.current_round=1-5`
-  - `eval.<stage>.loop.final_report=<stage>_review.md`
-  - `eval.<stage>.loop.round_01.critic_1=logs/eval/<stage>/round_01/critic_1.md`
-  - `eval.<stage>.loop.round_01.critic_1_prompt=logs/eval/<stage>/round_01/prompts/critic_1.prompt.md`
-  - `eval.<stage>.loop.round_01.critic_5=logs/eval/<stage>/round_01/critic_5.md`
-  - `eval.<stage>.loop.round_01.critic_5_prompt=logs/eval/<stage>/round_01/prompts/critic_5.prompt.md`
-  - `eval.<stage>.loop.round_01.aggregator_prompt=logs/eval/<stage>/round_01/prompts/aggregator.prompt.md`
-  - `eval.<stage>.loop.round_01.aggregated_review=logs/eval/<stage>/round_01/aggregated_review.md`
-- render 開始:
-  - `status=VIDEO`
-  - `stage.render.status=in_progress`
-- render 完了:
-  - `stage.render.status=done`
-  - `artifact.video=.../video.mp4`
-- QA 完了:
-  - `status=DONE`
-  - `stage.qa.status=done`
+`scene_event → cut_contract → first_frame_visual_plan → drawable_prompt_ir →
+image_generation.api_prompt_payload` の一方向 compiler を使う。provider には drawable な現在状態、
+許可された motion constraints、provider settings だけを送る。request snapshot の prompt、hash、
+reference bindings、destination は provider 呼び出し前後で一致させる。
 
-## verify
+### ナレーション
 
-run ごとの標準 verify:
+`script.md` が narration source of truth で、`tts_text` は TTS 用 projection である。
+pronunciation dictionary、candidate listening、text editing は任意の user choice。TTS output は
+実測 duration と decode を確認し、intentional silence には reason、duration、確認 actor を持たせる。
+audio timeline は spoken audio と明示した silence を合計し、video timeline と混同しない。
+
+### 動画
+
+保存済み compiled motion payload を使い、first/last frame、ordered references、provider settings、
+prompt hash、source digest を request に束縛する。未 materialize、current design drift、reference
+bytes drift、provider option drift は stale request として拒否する。
+
+## Optional user actions
+
+candidate の選択、音声の listening、画像の編集、narration の編集、change request は任意である。
+選択/編集を `human_choice.*` として保存し、変更後の request revision を再検証してから生成する。
+hybridization は `toc-state.py approve-hybridization` など明示操作で記録する。publication は生成
+とは別の明示ユーザー操作である。
+
+## State と resume
+
+state の確認:
+
+```text
+status=IMAGE
+stage.asset.status=done
+stage.scene_implementation.status=in_progress
+slot.p660.status=in_progress
+request.scene01_cut01.status=generated
+output.scene01_cut01.provenance_status=matched
+```
+
+resume は state history を書き換えず、upstream digest が変わった downstream item だけを stale と
+して再 materialize/再生成する。valid output は binding が一致する限り保持する。run lease と
+destination lock を使い、同じ run を二つの process で mutate しない。
+
+## Ordinary verification
 
 ```bash
 python scripts/verify-pipeline.py \
@@ -688,14 +214,25 @@ python scripts/verify-pipeline.py \
   --profile fast|standard
 ```
 
-生成物:
+確認対象:
 
-- `run_status.json`
-- `eval_report.json`
-- `run_report.md`
-- `p000_index.md`
+- required artifact と fixed slot state
+- YAML/JSON/Markdown schema、type、unique ID、reference、selector closure
+- manifest/request/prompt/source/provider hash の一致
+- generated file existence、file type、decode、duration、audio/video stream
+- request-bound provenance と destination lock
+- final render の ffprobe、aspect ratio、audio sync、subtitle files
 
-画像生成前レビューの成果物:
+`run_report.md` や `eval_report.json` が存在する古い run は入力として読めるが、現在の stage の
+進行条件ではない。新しい run は必要な ordinary execution data と `p000_index.md` を生成する。
 
-- `video_manifest.md` 内の `image_generation.review`
-- `image_prompt_story_review.md`
+## Hybridization and publishing
+
+```bash
+python scripts/toc-state.py approve-hybridization \
+  --run-dir output/<topic>_<timestamp> \
+  --note "ユーザーが明示した選択"
+```
+
+source variant、選択 actor、時刻、publication target、publish result は run artifact に保存する。
+

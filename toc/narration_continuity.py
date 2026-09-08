@@ -42,10 +42,8 @@ def _cut_texts(cut: dict[str, Any]) -> tuple[str, str]:
     if narration:
         public_text = _text(narration.get("text"))
         return public_text, _text(narration.get("tts_text")) or public_text
-    review = _dict(cut.get("human_review"))
-    public_text = _text(review.get("approved_narration")) or _text(cut.get("narration"))
-    approved_tts = _text(review.get("approved_tts_text"))
-    return public_text, approved_tts or resolve_script_cut_tts_text(cut) or public_text
+    public_text = _text(cut.get("narration"))
+    return public_text, resolve_script_cut_tts_text(cut) or public_text
 
 
 def narration_cut_index(data: dict[str, Any]) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, str]]:
@@ -212,9 +210,11 @@ def invalidate_stale_tts_context_audio(data: dict[str, Any]) -> list[str]:
             continue
         current_hash = _text(_dict(contexts.get(selector)).get("tts_continuity_hash"))
         generation = _dict(narration.get("generation"))
+        selection = _dict(narration.get("audio_selection"))
         audio_review = _dict(narration.get("audio_review"))
         active_ids = {
             _text(generation.get("candidate_id")),
+            _text(selection.get("candidate_id")),
             _text(audio_review.get("approved_candidate_id")),
         } - {""}
         active_stale = False
@@ -225,7 +225,7 @@ def invalidate_stale_tts_context_audio(data: dict[str, Any]) -> list[str]:
             status = _text(candidate.get("status"))
             if frozen_hash != current_hash and status not in {"failed", "rejected", "stale", "superseded"}:
                 candidate["status"] = "stale"
-                if _text(candidate.get("candidate_id")) in active_ids or status == "human_approved":
+                if _text(candidate.get("candidate_id")) in active_ids or status in {"selected", "human_approved", "approved"}:
                     active_stale = True
         if not active_stale:
             continue
@@ -236,13 +236,14 @@ def invalidate_stale_tts_context_audio(data: dict[str, Any]) -> list[str]:
             "candidate_id": "",
             "generated_from_tts_hash": "",
         }
-        narration["audio_review"] = {
-            "status": "pending",
-            "approved_candidate_id": "",
-            "approved_revision": 0,
-            "approved_text_hash": "",
-            "approved_tts_hash": "",
-            "approved_at": "",
+        narration["audio_selection"] = {
+            **selection,
+            "status": "unselected",
+            "candidate_id": "",
+            "revision": 0,
+            "text_hash": "",
+            "tts_hash": "",
+            "selected_at": "",
         }
         invalidated.append(selector)
     return invalidated

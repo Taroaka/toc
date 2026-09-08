@@ -43,10 +43,12 @@ def main() -> None:
         help="Video generation tool passed through to toc-immersive-ride.py.",
     )
     parser.add_argument("--force", action="store_true", help="Overwrite existing files.")
-    parser.add_argument("--review-policy", choices=["strict", "drafts"], default=None)
-    parser.add_argument("--story-review", choices=["required", "optional"], default=None)
-    parser.add_argument("--image-review", choices=["required", "optional"], default=None)
-    parser.add_argument("--narration-review", choices=["required", "optional"], default=None)
+    # Legacy compatibility flags are accepted and ignored.  Review policy no
+    # longer changes the world-walk production path.
+    parser.add_argument("--review-policy", choices=["strict", "drafts"], default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--story-review", choices=["required", "optional"], default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--image-review", choices=["required", "optional"], default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--narration-review", choices=["required", "optional"], default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     try:
@@ -77,15 +79,6 @@ def main() -> None:
         command.extend(["--video-tool", args.video_tool])
     if args.force:
         command.append("--force")
-    if args.review_policy:
-        command.extend(["--review-policy", args.review_policy])
-    if args.story_review:
-        command.extend(["--story-review", args.story_review])
-    if args.image_review:
-        command.extend(["--image-review", args.image_review])
-    if args.narration_review:
-        command.extend(["--narration-review", args.narration_review])
-
     result = subprocess.run(command, cwd=REPO_ROOT)
     raise SystemExit(result.returncode)
 

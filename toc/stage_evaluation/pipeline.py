@@ -1,12 +1,15 @@
-"""Pipeline-specific stage evaluation policy.
+"""Structural checks used by the ToC production pipeline.
 
-This module preserves the p-slot gate schema independently from canonical stage
-reviews. Callers inject semantic-review and duration-probe seams where the
-legacy script exposes module-level monkeypatch points.
+The old implementation in this module was an evaluator: it calculated
+rubrics, inspected review reports, and wrote approval state.  Production now
+only needs deterministic contract checks.  These functions deliberately avoid
+quality heuristics and return a small ``stage`` result with ordinary checks.
 """
+
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,26 +20,97 @@ from toc.adaptation_value_contract import (
     story_adaptation_issues,
 )
 from toc.harness import load_structured_document, parse_state_file
-from toc.story_duration import MINIMUM_EFFECTIVE_RATIO, audit_duration, normalize_target_duration
+from toc.story_duration import audit_duration, normalize_target_duration
 
 from .common import (
+    IMAGE_API_PROMPT_POLICY_VERSION,
+    IMAGE_API_PROMPT_POLICY_VERSION_V2,
+    P400_READINESS_CHECK_IDS,
+    SCENE_GENERATION_REQUIRED_BLOCKS,
+    SCENE_GENERATION_REQUIRED_OUTPUTS,
+    SCENE_PROMPT_PAYLOAD_FORBIDDEN_DIRECTING_TERMS_RE,
+    SCENE_PROMPT_PAYLOAD_FORBIDDEN_DOWNSTREAM_FIELDS,
+    SCENE_PROMPT_PAYLOAD_FIXED_CUT_COUNT_RE,
     STORY_REQUIRED_SCENE_FIELDS,
-    _append_grounding_checks as append_grounding_checks,
+    _cut_contract_structure_issues,
+    _node_cut_contract,
+    _scene_cut_selector,
     add_check,
+    as_dict,
+    as_dotted_str,
+    as_int,
     as_list,
-    has_todo,
+    detect_flow,
+    make_stage,
     nested_get,
     non_empty,
     scene_time_of_day_contract_missing,
+    scene_time_of_day_contract_marker,
+    scene_time_of_day_visual_basis_contract_marker,
+    scene_time_of_day_visual_basis_issues,
 )
 
-SemanticReviewAppender = Callable[..., None]
+
 DurationProbe = Callable[[Path], float | None]
 
 
-def _declares_adaptation_contract(data: dict[str, Any], metadata_key: str) -> bool:
-    metadata = data.get(metadata_key)
-    return isinstance(metadata, dict) and "adaptation_value_contract" in metadata
+def _document(path: Path) -> tuple[str, dict[str, Any]]:
+    if not path.is_file():
+        return "", {}
+    return load_structured_document(path)
+
+
+def _scenes(data: dict[str, Any]) -> list[Any]:
+    return as_list(data.get("scenes")) or as_list(nested_get(data, ["script", "scenes"], []))
+
+
+def _scene_id(scene: Any, fallback: int) -> str:
+    return as_dotted_str(scene.get("scene_id")) if isinstance(scene, dict) and scene.get("scene_id") is not None else str(fallback)
+
+
+def _validate_unique_ids(
+    values: list[Any],
+    *,
+    id_key: str,
+    label: str,
+    checks: list[dict[str, Any]],
+) -> None:
+    missing: list[str] = []
+    duplicates: list[str] = []
+    seen: set[str] = set()
+    for index, value in enumerate(values, start=1):
+        if not isinstance(value, dict):
+            missing.append(str(index))
+            continue
+        identifier = as_dotted_str(value.get(id_key))
+        if not identifier:
+            missing.append(str(index))
+            continue
+        if identifier in seen:
+            duplicates.append(identifier)
+        seen.add(identifier)
+    add_check(
+        checks,
+        f"{label}.ids",
+        not missing and not duplicates,
+        f"{label} entries use unique {id_key} values"
+        + (f" (missing: {','.join(missing[:8])})" if missing else "")
+        + (f" (duplicates: {','.join(duplicates[:8])})" if duplicates else ""),
+    )
+
+
+def _valid_relative_path(run_dir: Path, value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    path = Path(value.strip())
+    if path.is_absolute():
+        return False
+    try:
+        (run_dir / path).resolve().relative_to(run_dir.resolve())
+    except ValueError:
+        return False
+    return True
+
 
 def compact_research_pack_ok(
     *,
@@ -46,11 +120,13 @@ def compact_research_pack_ok(
     conflict_items: list[Any],
     handoff_to_story: Any,
 ) -> bool:
-    """Accept focused research when it is grounded enough to avoid count padding."""
-    has_canonical = non_empty(canonical_story)
-    has_conflict_or_handoff = bool(conflict_items) or non_empty(handoff_to_story)
-    has_source_grounding = len(sources) >= 3 or (len(sources) >= 1 and passage_count >= 5)
-    return has_canonical and has_source_grounding and passage_count >= 3 and has_conflict_or_handoff
+    """Compatibility helper for callers that describe a focused research pack."""
+
+    return bool(
+        non_empty(canonical_story)
+        and passage_count >= 3
+        and (len(sources) >= 1 or bool(conflict_items) or non_empty(handoff_to_story))
+    )
 
 
 def dense_story_scene_count(scenes: list[Any]) -> int:
@@ -58,581 +134,484 @@ def dense_story_scene_count(scenes: list[Any]) -> int:
         1
         for scene in scenes
         if isinstance(scene, dict)
-        and all(non_empty(scene.get(field)) for field in STORY_REQUIRED_SCENE_FIELDS)
-        and bool(as_list(scene.get("research_refs")))
+        and as_dotted_str(scene.get("scene_id"))
+        and as_list(scene.get("research_refs"))
     )
 
 
 def story_scene_coverage_ok(scenes: list[Any]) -> bool:
-    return len(scenes) >= 20 or dense_story_scene_count(scenes) >= 8
+    # Kept for API compatibility. It is no longer used as a quality threshold
+    # by any production check.
+    return bool(scenes)
 
 
-def score_from_checks(checks: list[dict[str, Any]]) -> float:
-    if not checks:
-        return 0.0
-    passed = sum(1 for check in checks if check["passed"])
-    return round(passed / len(checks), 4)
-
-
-def make_stage(stage: str, artifact: str, checks: list[dict[str, Any]], *, details: dict[str, Any] | None = None) -> dict[str, Any]:
-    score = score_from_checks(checks)
-    return {
-        "stage": stage,
-        "artifact": artifact,
-        "passed": all(check["passed"] for check in checks),
-        "score": score,
-        "checks": checks,
-        "details": details or {},
-    }
-
-
-def check_research(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, str]]:
-    path = run_dir / "research.md"
-    checks: list[dict[str, Any]] = []
-    details: dict[str, Any] = {}
-    updates: dict[str, str] = {}
-
-    add_check(checks, "research.file_exists", path.exists(), f"{path.name} exists")
-    if not path.exists():
-        return make_stage("research", path.name, checks), updates
-
-    text, data = load_structured_document(path)
-    if profile == "standard":
-        add_check(checks, "research.no_todo", not has_todo(text), "research.md does not contain TODO/TBD markers", kind="rubric")
-    append_grounding_checks(checks, run_dir=run_dir, stage="research")
-
+def _research_structure_checks(
+    checks: list[dict[str, Any]],
+    data: dict[str, Any],
+) -> dict[str, int]:
     sources = as_list(data.get("source_inventory") or data.get("sources"))
-    story_materials = data.get("story_materials")
-    chronological_events = nested_get(data, ["story_materials", "chronological_events"], [])
-    source_passages = as_list(data.get("source_passages"))
-    primary_sources = as_list(data.get("primary_sources"))
-    legacy_passages: list[Any] = []
-    for source in primary_sources:
-        if isinstance(source, dict):
-            legacy_passages.extend(as_list(source.get("key_passages")))
-    beat_sheet = nested_get(data, ["story_baseline", "canonical_synopsis", "beat_sheet"], [])
-    conflicts = data.get("conflicts")
-    conflict_items = as_list(conflicts)
+    passages = as_list(data.get("source_passages"))
     facts_value = data.get("facts")
     facts = as_list(facts_value.get("items")) if isinstance(facts_value, dict) else as_list(facts_value)
-    handoff_to_story = data.get("handoff_to_story")
-    confidence = nested_get(data, ["metadata", "confidence_score"])
+    story_materials = data.get("story_materials")
     synopsis = nested_get(data, ["story_baseline", "canonical_synopsis", "short_summary"]) or nested_get(
         data, ["story_baseline", "canonical_synopsis", "one_liner"]
     )
-    canonical_story_dump = nested_get(data, ["story_materials", "canonical_story_dump"])
-    canonical_story = canonical_story_dump or synopsis
-
-    details["sources"] = len(sources)
-    details["event_count"] = len(as_list(chronological_events)) or len(as_list(beat_sheet))
-    details["source_passage_count"] = len(source_passages) or len(legacy_passages)
-    details["fact_count"] = len(as_list(facts))
+    events = as_list(nested_get(data, ["story_materials", "chronological_events"], []))
+    conflicts = data.get("conflicts")
+    handoff = data.get("handoff_to_story")
 
     add_check(checks, "research.structured", bool(data), "research.md contains structured YAML output")
-    story_materials_ok = bool(story_materials) or non_empty(synopsis)
-    passage_count = len(source_passages) or len(legacy_passages)
-    compact_pack_ok = compact_research_pack_ok(
-        sources=sources,
-        passage_count=passage_count,
-        canonical_story=canonical_story,
-        conflict_items=conflict_items,
-        handoff_to_story=handoff_to_story,
-    )
-    source_coverage_ok = len(sources) >= 12 or compact_pack_ok
     add_check(
         checks,
-        "research.sources",
-        source_coverage_ok,
-        f"sources meet broad target >= 12 or compact grounded pack is present (got sources={len(sources)}, passages={passage_count})",
-        kind="rubric",
+        "research.sources_type",
+        isinstance(data.get("source_inventory", data.get("sources")), list),
+        "research source inventory is a list",
     )
     add_check(
         checks,
-        "research.story_materials",
-        story_materials_ok,
-        "story_materials or legacy story baseline is present",
-        kind="rubric",
+        "research.story_materials_type",
+        isinstance(story_materials, dict) or non_empty(synopsis),
+        "research contains story material or a canonical synopsis",
     )
     add_check(
         checks,
-        "research.canonical_story",
-        non_empty(canonical_story),
-        "canonical story dump or legacy synopsis is present",
-        kind="rubric",
-    )
-    event_count = len(as_list(chronological_events)) or len(as_list(beat_sheet))
-    add_check(
-        checks,
-        "research.chronological_events",
-        event_count >= 20 or compact_pack_ok,
-        f"chronological coverage meets broad target >= 20 or compact grounded pack is present (got events={event_count}, passages={passage_count})",
-        kind="rubric",
+        "research.passages_type",
+        isinstance(data.get("source_passages"), list) if "source_passages" in data else True,
+        "research source_passages is a list when declared",
     )
     add_check(
         checks,
-        "research.source_passages",
-        passage_count >= 1,
-        f"source passages are present (got {passage_count})",
-        kind="rubric",
+        "research.facts_type",
+        isinstance(facts_value, (list, dict)) if facts_value is not None else True,
+        "research facts are a list or items mapping when declared",
     )
     add_check(
         checks,
-        "research.facts",
-        len(as_list(facts)) >= 10 or compact_pack_ok,
-        f"facts meet broad target >= 10 or compact grounded pack is present (got facts={len(as_list(facts))}, passages={passage_count})",
-        kind="rubric",
+        "research.conflicts_type",
+        isinstance(conflicts, (list, dict)) if conflicts is not None else True,
+        "research conflicts are a list or mapping when declared",
     )
-    add_check(checks, "research.conflicts_field", conflicts is not None, "conflicts field is present", kind="rubric")
-    add_check(checks, "research.handoff_to_story", bool(handoff_to_story), "handoff_to_story is present", kind="rubric")
-
-    confidence_ok = isinstance(confidence, (int, float)) and 0.0 <= float(confidence) <= 1.0
-    add_check(checks, "research.confidence", confidence_ok, "metadata.confidence_score is between 0.0 and 1.0", kind="rubric")
-
-    updates["eval.research.score"] = f"{score_from_checks(checks):.4f}"
-    return make_stage("research", path.name, checks, details=details), updates
+    add_check(
+        checks,
+        "research.handoff_type",
+        isinstance(handoff, (dict, list, str)) if handoff is not None else True,
+        "research handoff_to_story has a serializable shape when declared",
+    )
+    return {
+        "sources": len(sources),
+        "passages": len(passages),
+        "facts": len(facts),
+        "events": len(events),
+    }
 
 
-def check_story(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, str]]:
+def check_research(run_dir: Path, profile: str = "standard") -> tuple[dict[str, Any], dict[str, str]]:
+    path = run_dir / "research.md"
+    checks: list[dict[str, Any]] = []
+    add_check(checks, "research.file_exists", path.is_file(), f"{path.name} exists")
+    if not path.is_file():
+        return make_stage("research", path.name, checks), {}
+    text, data = _document(path)
+    counts = _research_structure_checks(checks, data)
+    return make_stage("research", path.name, checks, details=counts), {}
+
+
+def _story_scenes(data: dict[str, Any]) -> list[Any]:
+    return as_list(nested_get(data, ["script", "scenes"], [])) or as_list(data.get("scenes"))
+
+
+def check_story(run_dir: Path, profile: str = "standard") -> tuple[dict[str, Any], dict[str, str]]:
     path = run_dir / "story.md"
     checks: list[dict[str, Any]] = []
-    details: dict[str, Any] = {}
-    updates: dict[str, str] = {}
-
-    add_check(checks, "story.file_exists", path.exists(), f"{path.name} exists")
-    if not path.exists():
-        return make_stage("story", path.name, checks), updates
-
-    text, data = load_structured_document(path)
-    if profile == "standard":
-        add_check(checks, "story.no_todo", not has_todo(text), "story.md does not contain TODO/TBD markers", kind="rubric")
-    append_grounding_checks(checks, run_dir=run_dir, stage="story")
-
-    selection = nested_get(data, ["selection"], {})
-    candidates = as_list(selection.get("candidates")) if isinstance(selection, dict) else []
-    chosen_id = selection.get("chosen_candidate_id") if isinstance(selection, dict) else None
-    rationale = selection.get("rationale") if isinstance(selection, dict) else None
-    scenes = as_list(nested_get(data, ["script", "scenes"], []))
-    hybrid_status = nested_get(data, ["hybridization", "approval_status"])
-
-    details["candidate_count"] = len(candidates)
-    details["scene_count"] = len(scenes)
-    details["chosen_candidate_id"] = chosen_id
-
+    add_check(checks, "story.file_exists", path.is_file(), f"{path.name} exists")
+    if not path.is_file():
+        return make_stage("story", path.name, checks), {}
+    _text, data = _document(path)
     add_check(checks, "story.structured", bool(data), "story.md contains structured YAML output")
-    if _declares_adaptation_contract(data, "story_metadata"):
-        adaptation_issues = story_adaptation_issues(data)
-        add_check(
-            checks,
-            "story.adaptation_value_contract",
-            not adaptation_issues,
-            "declared adaptation source contract has stable values and preservation boundaries"
-            + (f" (issues: {', '.join(adaptation_issues[:8])})" if adaptation_issues else ""),
-            kind="rubric",
-        )
-    add_check(checks, "story.candidates", 2 <= len(candidates) <= 4, f"selection has 2-4 candidates (got {len(candidates)})", kind="rubric")
-    add_check(checks, "story.choice", non_empty(chosen_id), "chosen_candidate_id is set", kind="rubric")
-    add_check(checks, "story.rationale", non_empty(rationale), "selection rationale is present", kind="rubric")
-    add_check(
-        checks,
-        "story.scenes",
-        story_scene_coverage_ok(scenes),
-        f"story has >= 20 scenes or >= 8 dense grounded scenes (got scenes={len(scenes)}, dense_grounded={dense_story_scene_count(scenes)})",
-        kind="rubric",
-    )
+    scenes = _story_scenes(data)
+    add_check(checks, "story.scenes_type", isinstance(nested_get(data, ["script", "scenes"], data.get("scenes")), list), "story scenes are represented as a list")
+    _validate_unique_ids(scenes, id_key="scene_id", label="story.scene", checks=checks)
+    invalid_refs: list[str] = []
+    for index, scene in enumerate(scenes, start=1):
+        if not isinstance(scene, dict):
+            continue
+        refs = scene.get("research_refs")
+        if refs is not None and not isinstance(refs, list):
+            invalid_refs.append(_scene_id(scene, index))
+    add_check(checks, "story.research_refs_type", not invalid_refs, "declared scene research_refs values are lists" + (f" (invalid: {','.join(invalid_refs[:8])})" if invalid_refs else ""))
 
-    for field in STORY_REQUIRED_SCENE_FIELDS:
-        missing = [
-            str(scene.get("scene_id") or index + 1)
-            for index, scene in enumerate(scenes)
-            if not isinstance(scene, dict) or not non_empty(scene.get(field))
-        ]
-        if missing:
-            details[f"missing_{field}_scene_ids"] = ",".join(missing[:20])
-        add_check(checks, f"story.scene_{field}", not missing, f"all scripted scenes include {field}", kind="rubric")
+    selection = data.get("selection")
+    if selection is not None:
+        add_check(checks, "story.selection_type", isinstance(selection, dict), "selection is a mapping when declared")
+        if isinstance(selection, dict):
+            candidates = selection.get("candidates")
+            if candidates is not None:
+                add_check(checks, "story.candidates_type", isinstance(candidates, list), "selection.candidates is a list when declared")
+                if isinstance(candidates, list):
+                    _validate_unique_ids(candidates, id_key="candidate_id", label="story.candidate", checks=checks)
+            chosen = selection.get("chosen_candidate_id")
+            if chosen is not None and candidates and isinstance(candidates, list):
+                candidate_ids = {as_dotted_str(item.get("candidate_id")) for item in candidates if isinstance(item, dict)}
+                add_check(checks, "story.choice_reference", as_dotted_str(chosen) in candidate_ids, "chosen_candidate_id references a declared candidate")
 
-    missing_time_of_day = scene_time_of_day_contract_missing(data, artifact="story")
-    if missing_time_of_day is not None:
-        if missing_time_of_day:
-            details["missing_time_of_day_scene_ids"] = ",".join(missing_time_of_day[:20])
-        add_check(
-            checks,
-            "story.scene_time_of_day",
-            not missing_time_of_day,
-            "all newly authored story scenes include non-empty time_of_day"
-            + (f" (missing: {', '.join(missing_time_of_day[:8])})" if missing_time_of_day else ""),
-            kind="rubric",
-        )
+    declared, valid = scene_time_of_day_contract_marker(data, artifact="story")
+    if declared:
+        missing = scene_time_of_day_contract_missing(data, artifact="story") or []
+        add_check(checks, "story.scene_time_of_day_contract", valid and not missing, "declared story time-of-day contract has valid scene values" + (f" (issues: {','.join(missing[:8])})" if missing else ""))
+    basis_declared, basis_valid = scene_time_of_day_visual_basis_contract_marker(data, artifact="story")
+    if basis_declared:
+        issues = scene_time_of_day_visual_basis_issues(data, artifact="story") or []
+        add_check(checks, "story.scene_time_of_day_visual_basis", basis_valid and not issues, "declared story lighting basis has required fields" + (f" (issues: {','.join(issues[:8])})" if issues else ""))
 
-    research_refs_missing = [
-        str(scene.get("scene_id") or index + 1)
-        for index, scene in enumerate(scenes)
-        if not isinstance(scene, dict) or not as_list(scene.get("research_refs"))
-    ]
-    if research_refs_missing:
-        details["missing_research_refs_scene_ids"] = ",".join(research_refs_missing[:20])
-    add_check(checks, "story.research_refs", not research_refs_missing, "scripted scenes keep research_refs", kind="rubric")
+    if isinstance(data.get("story_metadata"), dict) and "adaptation_value_contract" in data["story_metadata"]:
+        issues = story_adaptation_issues(data)
+        add_check(checks, "story.adaptation_value_contract", not issues, "declared adaptation source contract is structurally consistent" + (f" (issues: {','.join(issues[:8])})" if issues else ""))
+    return make_stage("story", path.name, checks, details={"scene_count": len(scenes)}), {}
 
-    hybrid_ok = hybrid_status in {None, "", "not_needed", "approved", "rejected"}
-    add_check(checks, "story.hybrid_gate", hybrid_ok, "hybridization approval is not left pending", kind="rubric")
 
-    updates["eval.story.score"] = f"{score_from_checks(checks):.4f}"
-    if candidates:
-        updates["selection.story.candidate_count"] = str(len(candidates))
-    if non_empty(chosen_id):
-        updates["selection.story.chosen_id"] = str(chosen_id)
-    return make_stage("story", path.name, checks, details=details), updates
+def _script_scenes(data: dict[str, Any]) -> list[Any]:
+    return as_list(data.get("scenes")) or as_list(nested_get(data, ["script", "scenes"], []))
+
+
+def _scene_contract_issues(scene: dict[str, Any], *, selector: str) -> list[str]:
+    issues: list[str] = []
+    scene_event = scene.get("scene_event")
+    if scene_event is not None:
+        if not isinstance(scene_event, dict):
+            issues.append(f"{selector}:scene_event.type")
+        else:
+            sequence = scene_event.get("event_sequence")
+            if sequence is not None and not isinstance(sequence, list):
+                issues.append(f"{selector}:scene_event.event_sequence.type")
+            if isinstance(sequence, list):
+                beat_ids = [as_dotted_str(item.get("beat_id")) for item in sequence if isinstance(item, dict)]
+                if any(not beat_id for beat_id in beat_ids) or len(set(beat_ids)) != len(beat_ids):
+                    issues.append(f"{selector}:scene_event.beat_ids")
+            forbidden = scene_event.get("forbidden_event_changes")
+            if forbidden is not None and not isinstance(forbidden, list):
+                issues.append(f"{selector}:scene_event.forbidden_event_changes.type")
+            for key, value in scene_event.items():
+                if key in {"event_sequence", "forbidden_event_changes"}:
+                    continue
+                if key in {"camera", "lens", "framing", "shot", "image_prompt", "video_prompt", "motion_prompt"}:
+                    issues.append(f"{selector}:scene_event.forbidden_directing_field:{key}")
+    generation = scene.get("scene_generation")
+    if generation is not None:
+        if not isinstance(generation, dict):
+            issues.append(f"{selector}:scene_generation.type")
+        else:
+            for key in SCENE_GENERATION_REQUIRED_BLOCKS:
+                if key in generation and not isinstance(generation[key], (dict, list, str)):
+                    issues.append(f"{selector}:scene_generation.{key}.type")
+            for key in SCENE_GENERATION_REQUIRED_OUTPUTS:
+                if key in generation and generation[key] is None:
+                    issues.append(f"{selector}:scene_generation.{key}.null")
+            payload = generation.get("scene_prompt_payload")
+            if isinstance(payload, dict):
+                for key in SCENE_PROMPT_PAYLOAD_FORBIDDEN_DOWNSTREAM_FIELDS:
+                    if key in payload:
+                        issues.append(f"{selector}:scene_prompt_payload.forbidden_field:{key}")
+                payload_text = " ".join(str(value) for value in payload.values())
+                if SCENE_PROMPT_PAYLOAD_FORBIDDEN_DIRECTING_TERMS_RE.search(payload_text):
+                    issues.append(f"{selector}:scene_prompt_payload.directing_terms")
+                if SCENE_PROMPT_PAYLOAD_FIXED_CUT_COUNT_RE.search(payload_text):
+                    issues.append(f"{selector}:scene_prompt_payload.fixed_cut_count")
+    cuts = scene.get("cuts")
+    if cuts is not None:
+        if not isinstance(cuts, list):
+            issues.append(f"{selector}:cuts.type")
+        else:
+            _seen: set[str] = set()
+            for index, cut in enumerate(cuts, start=1):
+                if not isinstance(cut, dict):
+                    issues.append(f"{selector}:cut[{index}].type")
+                    continue
+                cut_id = as_dotted_str(cut.get("cut_id"))
+                if not cut_id:
+                    issues.append(f"{selector}:cut[{index}].cut_id")
+                elif cut_id in _seen:
+                    issues.append(f"{selector}:cut[{index}].cut_id.duplicate")
+                _seen.add(cut_id or f"#{index}")
+                if "cut_contract" in cut:
+                    issues.extend(f"{selector}_cut{cut_id or index}:{issue}" for issue in _cut_contract_structure_issues(cut.get("cut_contract")))
+                for key in ("image_generation", "video_generation", "audio"):
+                    if key in cut and not isinstance(cut[key], dict):
+                        issues.append(f"{selector}_cut{cut_id or index}:{key}.type")
+    return issues
+
+
+def _append_script_structure_checks(
+    checks: list[dict[str, Any]],
+    data: dict[str, Any],
+    *,
+    label: str = "script",
+) -> dict[str, Any]:
+    scenes = _script_scenes(data)
+    add_check(checks, f"{label}.scenes_type", isinstance(data.get("scenes"), list) or isinstance(nested_get(data, ["script", "scenes"], None), list), f"{label} scenes are represented as a list")
+    _validate_unique_ids(scenes, id_key="scene_id", label=f"{label}.scene", checks=checks)
+    contract_issues: list[str] = []
+    invalid_refs: list[str] = []
+    for index, scene in enumerate(scenes, start=1):
+        if not isinstance(scene, dict):
+            contract_issues.append(f"{label}.scene[{index}].type")
+            continue
+        selector = _scene_id(scene, index)
+        contract_issues.extend(_scene_contract_issues(scene, selector=f"scene{selector}"))
+        refs = scene.get("research_refs")
+        if refs is not None and not isinstance(refs, list):
+            invalid_refs.append(selector)
+    add_check(checks, f"{label}.contracts", not contract_issues, f"{label} scene/cut contracts have valid structure" + (f" (issues: {','.join(contract_issues[:8])})" if contract_issues else ""))
+    add_check(checks, f"{label}.research_refs_type", not invalid_refs, f"{label} scene research_refs values are lists" + (f" (invalid: {','.join(invalid_refs[:8])})" if invalid_refs else ""))
+    return {"scene_count": len(scenes), "contract_issue_count": len(contract_issues)}
 
 
 def _script_text_quality_checks(checks: list[dict[str, Any]], text: str, data: dict[str, Any], profile: str) -> None:
-    meaningful_len = len("".join(text.split()))
-    add_check(checks, "script.content_length", meaningful_len >= 80, f"script content length is meaningful (got {meaningful_len} chars)", kind="rubric")
-    if profile == "standard":
-        add_check(checks, "script.no_todo", not has_todo(text), "script does not contain TODO/TBD markers", kind="rubric")
+    """Compatibility helper retaining only parse/type checks."""
 
-    scenes = []
-    if isinstance(data.get("scenes"), list):
-        scenes = as_list(data.get("scenes"))
-    elif isinstance(nested_get(data, ["script", "scenes"], []), list):
-        scenes = as_list(nested_get(data, ["script", "scenes"], []))
-    if scenes:
-        add_check(checks, "script.structured_scenes", len(scenes) >= 1, "structured script includes scene list", kind="rubric")
+    add_check(checks, "script.content_present", bool(text.strip()), "script contains source text")
+    if data:
+        _append_script_structure_checks(checks, data)
 
 
-def check_script_single(
-    run_dir: Path,
-    profile: str,
-    *,
-    append_semantic_review: SemanticReviewAppender,
-    target_slot: str = "p450",
-) -> tuple[dict[str, Any], dict[str, str]]:
+def check_script_single(run_dir: Path, profile: str = "standard", *, target_slot: str = "p450") -> tuple[dict[str, Any], dict[str, str]]:
     path = run_dir / "script.md"
     checks: list[dict[str, Any]] = []
-    updates: dict[str, str] = {}
-    target_number = _slot_number(target_slot, default=450)
-
-    add_check(checks, "script.file_exists", path.exists(), f"{path.name} exists")
-    if not path.exists():
-        return make_stage("script", path.name, checks), updates
-
-    text, data = load_structured_document(path)
-    append_grounding_checks(checks, run_dir=run_dir, stage="script")
-    _script_text_quality_checks(checks, text, data, profile)
-    missing_time_of_day = scene_time_of_day_contract_missing(data, artifact="script")
-    if missing_time_of_day is not None:
-        add_check(
-            checks,
-            "script.scene_time_of_day",
-            not missing_time_of_day,
-            "all newly authored script scenes include non-empty time_of_day"
-            + (f" (missing: {', '.join(missing_time_of_day[:8])})" if missing_time_of_day else ""),
-            kind="rubric",
-        )
-    if _declares_adaptation_contract(data, "script_metadata"):
-        story_data = load_structured_document(run_dir / "story.md")[1] if (run_dir / "story.md").exists() else {}
-        visual_value_data = (
-            load_structured_document(run_dir / "visual_value.md")[1]
-            if (run_dir / "visual_value.md").exists()
-            else {}
-        )
-        adaptation_issues = script_adaptation_issues(
-            data,
-            source_value_ids=adaptation_source_value_ids(story_data),
-            visual_value=visual_value_data,
-        )
-        add_check(
-            checks,
-            "script.adaptation_value_contract",
-            not adaptation_issues,
-            "declared adaptation value contract reaches every scene and cut with valid source value references"
-            + (f" (issues: {', '.join(adaptation_issues[:8])})" if adaptation_issues else ""),
-            kind="rubric",
-        )
-    details: dict[str, Any] = {}
-    require_scene_semantic = target_number in {410, 420} or target_number >= 500
-    append_semantic_review(checks, details, run_dir=run_dir, stage="scene_set", required=require_scene_semantic)
-    append_semantic_review(
-        checks,
-        details,
-        run_dir=run_dir,
-        stage="scene_detail",
-        required=require_scene_semantic,
-        allow_localized_partial=True,
-        require_generation_receipt=target_number >= 680,
-    )
-    append_semantic_review(
-        checks,
-        details,
-        run_dir=run_dir,
-        stage="cut_blueprint",
-        required=target_number == 420 or target_number >= 500,
-        allow_localized_partial=True,
-        require_generation_receipt=target_number >= 680,
-    )
-    updates["eval.script.score"] = f"{score_from_checks(checks):.4f}"
-    return make_stage("script", path.name, checks, details=details), updates
+    add_check(checks, "script.file_exists", path.is_file(), f"{path.name} exists")
+    if not path.is_file():
+        return make_stage("script", path.name, checks), {}
+    text, data = _document(path)
+    add_check(checks, "script.structured", bool(data), "script.md contains structured YAML output")
+    details = _append_script_structure_checks(checks, data)
+    declared, valid = scene_time_of_day_contract_marker(data, artifact="script")
+    if declared:
+        missing = scene_time_of_day_contract_missing(data, artifact="script") or []
+        add_check(checks, "script.scene_time_of_day_contract", valid and not missing, "declared script time-of-day contract has valid scene values" + (f" (issues: {','.join(missing[:8])})" if missing else ""))
+    basis_declared, basis_valid = scene_time_of_day_visual_basis_contract_marker(data, artifact="script")
+    if basis_declared:
+        issues = scene_time_of_day_visual_basis_issues(data, artifact="script") or []
+        add_check(checks, "script.scene_time_of_day_visual_basis", basis_valid and not issues, "declared script lighting basis has required fields" + (f" (issues: {','.join(issues[:8])})" if issues else ""))
+    if isinstance(data.get("script_metadata"), dict) and "adaptation_value_contract" in data["script_metadata"]:
+        story_data = _document(run_dir / "story.md")[1]
+        visual_value_data = _document(run_dir / "visual_value.md")[1]
+        issues = script_adaptation_issues(data, source_value_ids=adaptation_source_value_ids(story_data), visual_value=visual_value_data)
+        add_check(checks, "script.adaptation_value_contract", not issues, "declared script adaptation contract is structurally consistent" + (f" (issues: {','.join(issues[:8])})" if issues else ""))
+    return make_stage("script", path.name, checks, details=details), {}
 
 
-def check_script_scene_series(
-    run_dir: Path,
-    profile: str,
-    *,
-    append_semantic_review: SemanticReviewAppender,
-    target_slot: str = "p450",
-) -> tuple[dict[str, Any], dict[str, str]]:
+def check_script_scene_series(run_dir: Path, profile: str = "standard", *, target_slot: str = "p450") -> tuple[dict[str, Any], dict[str, str]]:
     checks: list[dict[str, Any]] = []
-    target_number = _slot_number(target_slot, default=450)
-    scene_dirs = sorted((run_dir / "scenes").glob("scene*"))
+    scene_dirs = sorted(path for path in (run_dir / "scenes").glob("scene*") if path.is_dir())
     script_paths = [scene_dir / "script.md" for scene_dir in scene_dirs]
-
-    add_check(checks, "script.scene_dirs", len(scene_dirs) >= 1, f"scene-series has scene directories (got {len(scene_dirs)})")
-    add_check(checks, "script.scene_files", all(path.exists() for path in script_paths), "each scene has script.md")
-    append_grounding_checks(checks, run_dir=run_dir, stage="script")
-
-    all_no_todo = True
-    adaptation_issues: list[str] = []
-    story_data = load_structured_document(run_dir / "story.md")[1] if (run_dir / "story.md").exists() else {}
-    visual_value_data = load_structured_document(run_dir / "visual_value.md")[1] if (run_dir / "visual_value.md").exists() else {}
+    add_check(checks, "script.scene_dirs", bool(scene_dirs), f"scene-series has scene directories (got {len(scene_dirs)})")
+    add_check(checks, "script.scene_files", bool(scene_dirs) and all(path.is_file() for path in script_paths), "each scene has script.md")
+    issue_values: list[str] = []
     for path in script_paths:
-        if not path.exists():
-            all_no_todo = False
+        if not path.is_file():
             continue
-        text = path.read_text(encoding="utf-8")
-        if profile == "standard" and has_todo(text):
-            all_no_todo = False
-        _scene_text, data = load_structured_document(path)
-        scene_data = data.get("scene") if isinstance(data.get("scene"), dict) else data
-        scenes = as_list(data.get("scenes")) or as_list(nested_get(data, ["script", "scenes"], []))
-        if not scenes and isinstance(scene_data, dict):
-            scenes = [scene_data]
-        scene_series_metadata = data.get("scene_script_metadata")
-        if isinstance(scene_series_metadata, dict) and "adaptation_value_contract" in scene_series_metadata:
-            normalized_data = {
-                **data,
-                "script_metadata": scene_series_metadata,
-                "scenes": scenes,
-            }
-            adaptation_issues.extend(
-                script_adaptation_issues(
-                    normalized_data,
-                    source_value_ids=adaptation_source_value_ids(story_data),
-                    visual_value=visual_value_data,
-                )
-            )
-    if profile == "standard":
-        add_check(checks, "script.scene_no_todo", all_no_todo, "scene scripts do not contain TODO/TBD markers", kind="rubric")
-    if adaptation_issues:
-        add_check(
-            checks,
-            "script.scene_series_adaptation_value_contract",
-            False,
-            "scene-series artifacts that declare adaptation_value_contract preserve the source-to-scene-to-cut lineage"
-            f" (issues: {', '.join(adaptation_issues[:8])})",
-            kind="rubric",
-        )
-
-    details: dict[str, Any] = {"scene_count": len(scene_dirs)}
-    require_scene_semantic = target_number in {410, 420} or target_number >= 500
-    append_semantic_review(checks, details, run_dir=run_dir, stage="scene_set", required=require_scene_semantic)
-    append_semantic_review(
-        checks,
-        details,
-        run_dir=run_dir,
-        stage="scene_detail",
-        required=require_scene_semantic,
-        allow_localized_partial=True,
-        require_generation_receipt=target_number >= 680,
-    )
-    append_semantic_review(
-        checks,
-        details,
-        run_dir=run_dir,
-        stage="cut_blueprint",
-        required=target_number == 420 or target_number >= 500,
-        allow_localized_partial=True,
-        require_generation_receipt=target_number >= 680,
-    )
-    updates = {"eval.script.score": f"{score_from_checks(checks):.4f}"}
-    return make_stage("script", "scenes/*/script.md", checks, details=details), updates
+        _text, data = _document(path)
+        issue_values.extend(_append_script_structure_checks([], data, label=path.parent.name).get("contract_issue_count", 0) * [path.parent.name])
+    add_check(checks, "script.scene_contracts", not issue_values, "scene-series script contracts have valid structure" + (f" (issues: {','.join(issue_values[:8])})" if issue_values else ""))
+    return make_stage("script", "scenes/*/script.md", checks, details={"scene_count": len(scene_dirs)}), {}
 
 
 def _iter_manifest_nodes(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     nodes: list[dict[str, Any]] = []
     for scene in as_list(manifest.get("scenes")):
-        cuts = as_list(scene.get("cuts")) if isinstance(scene, dict) else []
-        if cuts:
-            nodes.extend([cut for cut in cuts if isinstance(cut, dict)])
-        elif isinstance(scene, dict):
+        if not isinstance(scene, dict):
+            continue
+        if str(scene.get("kind") or "").strip().endswith("_reference"):
+            continue
+        cuts = scene.get("cuts")
+        if isinstance(cuts, list) and cuts:
+            nodes.extend(cut for cut in cuts if isinstance(cut, dict) and str(cut.get("cut_status") or "").lower() != "deleted")
+        else:
             nodes.append(scene)
     return nodes
 
 
-def _manifest_checks(checks: list[dict[str, Any]], text: str, data: dict[str, Any], *, profile: str, flow: str, path_label: str) -> None:
-    add_check(checks, f"{path_label}.structured", bool(data), f"{path_label} contains structured YAML output")
-    if not data:
-        return
+def _iter_manifest_nodes_with_selectors(manifest: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    values: list[tuple[str, dict[str, Any]]] = []
+    for scene in as_list(manifest.get("scenes")):
+        if not isinstance(scene, dict) or str(scene.get("kind") or "").strip().endswith("_reference"):
+            continue
+        scene_id = as_dotted_str(scene.get("scene_id"))
+        if not scene_id:
+            continue
+        cuts = scene.get("cuts")
+        if isinstance(cuts, list) and cuts:
+            for cut in cuts:
+                if not isinstance(cut, dict) or str(cut.get("cut_status") or "").lower() == "deleted":
+                    continue
+                cut_id = as_dotted_str(cut.get("cut_id"))
+                if cut_id:
+                    values.append((_scene_cut_selector(scene_id, cut), cut))
+        else:
+            values.append((_scene_cut_selector(scene_id, {}), scene))
+    return values
 
+
+def _manifest_checks(
+    checks: list[dict[str, Any]],
+    text: str,
+    data: dict[str, Any],
+    *,
+    profile: str,
+    flow: str,
+    path_label: str,
+) -> None:
     scenes = as_list(data.get("scenes"))
+    add_check(checks, f"{path_label}.scenes_type", isinstance(data.get("scenes"), list), f"{path_label} scenes are represented as a list")
+    _validate_unique_ids(scenes, id_key="scene_id", label=f"{path_label}.scene", checks=checks)
     nodes = _iter_manifest_nodes(data)
-    add_check(checks, f"{path_label}.scenes", len(scenes) >= 1, f"{path_label} contains scenes", kind="rubric")
-    add_check(checks, f"{path_label}.nodes", len(nodes) >= 1, f"{path_label} exposes renderable nodes", kind="rubric")
-    missing_time_of_day = scene_time_of_day_contract_missing(data, artifact="manifest")
-    if missing_time_of_day is not None:
-        add_check(
-            checks,
-            f"{path_label}.scene_time_of_day",
-            not missing_time_of_day,
-            "all newly authored manifest scenes include non-empty time_of_day"
-            + (f" (missing: {', '.join(missing_time_of_day[:8])})" if missing_time_of_day else ""),
-            kind="rubric",
-        )
-
-    if profile == "standard":
-        add_check(checks, f"{path_label}.no_todo", not has_todo(text), f"{path_label} does not contain TODO/TBD markers", kind="rubric")
-
-    duration_ok = True
-    narration_field_ok = True
-    narration_text_ok = True
-    ids_ok = True
-    for node in nodes:
-        video_generation = node.get("video_generation") if isinstance(node, dict) else None
-        image_generation = node.get("image_generation") if isinstance(node, dict) else None
-        audio = node.get("audio") if isinstance(node, dict) else None
-
-        if isinstance(video_generation, dict):
-            duration = video_generation.get("duration_seconds")
-            if isinstance(duration, int) and duration > 15:
-                duration_ok = False
-
-        if isinstance(image_generation, dict):
-            if "character_ids" not in image_generation or "object_ids" not in image_generation:
-                ids_ok = False
-
-        narration = (audio or {}).get("narration") if isinstance(audio, dict) else None
-        if not isinstance(narration, dict):
-            narration_field_ok = False
-            narration_text_ok = False
+    invalid: list[str] = []
+    path_issues: list[str] = []
+    for index, scene in enumerate(scenes, start=1):
+        if not isinstance(scene, dict):
+            invalid.append(str(index))
             continue
-        if "text" not in narration:
-            narration_field_ok = False
-            narration_text_ok = False
-            continue
-        narration_tool = str(narration.get("tool") or "").strip().lower()
-        rendered_text = narration.get("tts_text") if narration_tool == "elevenlabs" and "tts_text" in narration else narration.get("text")
-        if profile == "standard" and narration_tool != "silent" and not non_empty(rendered_text):
-            narration_text_ok = False
-
-    add_check(checks, f"{path_label}.cut_duration", duration_ok, "cut duration is <= 15 seconds", kind="rubric")
-    add_check(checks, f"{path_label}.narration_field", narration_field_ok, "each renderable node has audio.narration.text", kind="rubric")
-    if profile == "standard":
-        add_check(checks, f"{path_label}.narration_text", narration_text_ok, "narration text/tts_text is non-empty for final manifests unless tool is silent", kind="rubric")
-    add_check(checks, f"{path_label}.asset_ids", ids_ok, "image_generation includes explicit character_ids/object_ids", kind="rubric")
-
+        scene_id = _scene_id(scene, index)
+        cuts = scene.get("cuts")
+        if cuts is not None and not isinstance(cuts, list):
+            invalid.append(f"scene{scene_id}:cuts")
+        if isinstance(cuts, list):
+            seen_cut_ids: set[str] = set()
+            for cut_index, cut in enumerate(cuts, start=1):
+                if not isinstance(cut, dict):
+                    invalid.append(f"scene{scene_id}:cut{cut_index}")
+                    continue
+                cut_id = as_dotted_str(cut.get("cut_id"))
+                if cut_id and cut_id in seen_cut_ids:
+                    invalid.append(f"scene{scene_id}:cut{cut_id}:duplicate")
+                if cut_id:
+                    seen_cut_ids.add(cut_id)
+        for node in ([scene] if not isinstance(cuts, list) or not cuts else [cut for cut in cuts if isinstance(cut, dict)]):
+            for key in ("image_generation", "video_generation", "audio"):
+                if key in node and not isinstance(node[key], dict):
+                    invalid.append(f"scene{scene_id}:{key}.type")
+            image = as_dict(node.get("image_generation"))
+            for key in ("character_ids", "object_ids", "location_ids"):
+                if key in image and not isinstance(image[key], list):
+                    invalid.append(f"scene{scene_id}:{key}.type")
+            video = as_dict(node.get("video_generation"))
+            duration = video.get("duration_seconds", node.get("duration_seconds"))
+            if duration is not None and (not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration <= 0 or duration > 15):
+                invalid.append(f"scene{scene_id}:duration_seconds")
+            audio = as_dict(node.get("audio"))
+            narration = audio.get("narration")
+            if narration is not None and not isinstance(narration, dict):
+                invalid.append(f"scene{scene_id}:audio.narration.type")
+            elif isinstance(narration, dict) and "output" in narration and not _valid_relative_path(Path("/"), narration.get("output")):
+                # The helper only checks lexical containment; absolute paths
+                # are rejected before a caller joins them to a run root.
+                path_issues.append(f"scene{scene_id}:audio.narration.output")
+            image_payload = image.get("api_prompt_payload")
+            if image_payload is not None and not isinstance(image_payload, dict):
+                invalid.append(f"scene{scene_id}:image_generation.api_prompt_payload.type")
+            elif isinstance(image_payload, dict) and "prompt" in image_payload and not isinstance(image_payload.get("prompt"), str):
+                invalid.append(f"scene{scene_id}:image_generation.api_prompt_payload.prompt.type")
+    add_check(checks, f"{path_label}.node_types", not invalid, f"{path_label} scene/cut nodes use valid field types" + (f" (issues: {','.join(invalid[:8])})" if invalid else ""))
+    add_check(checks, f"{path_label}.output_paths", not path_issues, f"{path_label} declared output paths are relative files" + (f" (issues: {','.join(path_issues[:8])})" if path_issues else ""))
+    declared, valid = scene_time_of_day_contract_marker(data, artifact="manifest")
+    if declared:
+        missing = scene_time_of_day_contract_missing(data, artifact="manifest") or []
+        add_check(checks, f"{path_label}.scene_time_of_day_contract", valid and not missing, f"{path_label} declared time-of-day contract has valid scene values" + (f" (issues: {','.join(missing[:8])})" if missing else ""))
+    basis_declared, basis_valid = scene_time_of_day_visual_basis_contract_marker(data, artifact="manifest")
+    if basis_declared:
+        issues = scene_time_of_day_visual_basis_issues(data, artifact="manifest") or []
+        add_check(checks, f"{path_label}.scene_time_of_day_visual_basis", basis_valid and not issues, f"{path_label} declared lighting basis has required fields" + (f" (issues: {','.join(issues[:8])})" if issues else ""))
     if flow == "immersive":
         experience = nested_get(data, ["video_metadata", "experience"])
-        prompt_mentions_text_rule = ("画面内テキスト" in text) or ("No on-screen text" in text)
-        add_check(checks, f"{path_label}.experience", non_empty(experience), "immersive manifest records video_metadata.experience", kind="rubric")
-        add_check(checks, f"{path_label}.no_onscreen_text_rule", prompt_mentions_text_rule, "immersive manifest includes no on-screen text invariant", kind="rubric")
+        if experience is not None:
+            add_check(checks, f"{path_label}.experience_type", isinstance(experience, str), f"{path_label} video_metadata.experience is a string")
 
 
-def check_manifest_single(run_dir: Path, profile: str, flow: str) -> tuple[dict[str, Any], dict[str, str]]:
+def _minimum_cut_issues(manifest: dict[str, Any], *, min_cuts_per_scene: int | None = None) -> list[str]:
+    """Return only malformed scene/cut shape issues.
+
+    Cut-count quality floors belonged to the removed evaluator and are no
+    longer enforced here.
+    """
+
+    issues: list[str] = []
+    for index, scene in enumerate(as_list(manifest.get("scenes")), start=1):
+        if not isinstance(scene, dict):
+            issues.append(f"scene[{index}]:invalid")
+            continue
+        cuts = scene.get("cuts")
+        if cuts is not None and not isinstance(cuts, list):
+            issues.append(f"scene{_scene_id(scene, index)}:cuts:type")
+    return issues
+
+
+def check_manifest_single(run_dir: Path, profile: str = "standard", flow: str = "toc-run") -> tuple[dict[str, Any], dict[str, str]]:
     path = run_dir / "video_manifest.md"
     checks: list[dict[str, Any]] = []
-    updates: dict[str, str] = {}
-    add_check(checks, "manifest.file_exists", path.exists(), f"{path.name} exists")
-    if not path.exists():
-        return make_stage("manifest", path.name, checks), updates
-
-    text, data = load_structured_document(path)
-    if _declares_adaptation_contract(data, "video_metadata"):
-        story_data = load_structured_document(run_dir / "story.md")[1] if (run_dir / "story.md").exists() else {}
-        script_data = load_structured_document(run_dir / "script.md")[1] if (run_dir / "script.md").exists() else None
-        adaptation_issues = manifest_adaptation_issues(
-            data,
-            source_value_ids=adaptation_source_value_ids(story_data),
-            script=script_data,
-        )
-        add_check(
-            checks,
-            "manifest.adaptation_value_contract",
-            not adaptation_issues,
-            "declared adaptation value contract is an exact script projection through every scene and cut"
-            + (f" (issues: {', '.join(adaptation_issues[:8])})" if adaptation_issues else ""),
-            kind="rubric",
-        )
-    append_grounding_checks(checks, run_dir=run_dir, stage="manifest")
-    manifest_phase = str(data.get("manifest_phase") or "production").strip().lower()
-    add_check(checks, "manifest.phase", manifest_phase == "production", f"video_manifest.md is production phase (got {manifest_phase or '(unset)'})", kind="rubric")
+    add_check(checks, "manifest.file_exists", path.is_file(), f"{path.name} exists")
+    if not path.is_file():
+        return make_stage("manifest", path.name, checks), {}
+    text, data = _document(path)
+    add_check(checks, "manifest.structured", bool(data), "video_manifest.md contains structured YAML output")
     _manifest_checks(checks, text, data, profile=profile, flow=flow, path_label="manifest")
-    updates["eval.manifest.score"] = f"{score_from_checks(checks):.4f}"
-    return make_stage("manifest", path.name, checks), updates
+    phase = data.get("manifest_phase")
+    if phase is not None:
+        phase_value = str(phase).strip().lower()
+        add_check(checks, "manifest.phase", phase_value in {"skeleton", "production"}, f"manifest_phase is skeleton or production (got {phase_value or '(unset)'})")
+    metadata = as_dict(data.get("video_metadata"))
+    if "target_duration_seconds" in metadata:
+        raw_target = metadata.get("target_duration_seconds")
+        try:
+            normalized = normalize_target_duration(raw_target)
+        except (TypeError, ValueError):
+            normalized = None
+        add_check(checks, "manifest.target_duration_type", normalized is not None, "video_metadata.target_duration_seconds is a valid 300-1200 second value")
+    story_data = _document(run_dir / "story.md")[1]
+    script_data = _document(run_dir / "script.md")[1]
+    if isinstance(data.get("video_metadata"), dict) and "adaptation_value_contract" in data["video_metadata"]:
+        issues = manifest_adaptation_issues(data, source_value_ids=adaptation_source_value_ids(story_data), script=script_data or None)
+        add_check(checks, "manifest.adaptation_value_contract", not issues, "declared manifest adaptation contract is structurally consistent" + (f" (issues: {','.join(issues[:8])})" if issues else ""))
+    return make_stage("manifest", path.name, checks, details={"node_count": len(_iter_manifest_nodes(data))}), {}
 
 
-def check_manifest_scene_series(run_dir: Path, profile: str) -> tuple[dict[str, Any], dict[str, str]]:
+def check_manifest_scene_series(run_dir: Path, profile: str = "standard") -> tuple[dict[str, Any], dict[str, str]]:
     checks: list[dict[str, Any]] = []
-    scene_dirs = sorted((run_dir / "scenes").glob("scene*"))
+    scene_dirs = sorted(path for path in (run_dir / "scenes").glob("scene*") if path.is_dir())
     manifest_paths = [scene_dir / "video_manifest.md" for scene_dir in scene_dirs]
-
-    add_check(checks, "manifest.scene_dirs", len(scene_dirs) >= 1, f"scene-series has scene directories (got {len(scene_dirs)})")
-    add_check(checks, "manifest.scene_files", all(path.exists() for path in manifest_paths), "each scene has video_manifest.md")
-    append_grounding_checks(checks, run_dir=run_dir, stage="manifest")
-    if not scene_dirs or not all(path.exists() for path in manifest_paths):
-        return make_stage("manifest", "scenes/*/video_manifest.md", checks, details={"scene_count": len(scene_dirs)}), {
-            "eval.manifest.score": f"{score_from_checks(checks):.4f}"
-        }
-
-    nested_ok = True
-    phase_ok = True
-    adaptation_issues: list[str] = []
-    adaptation_declared = False
-    story_data = load_structured_document(run_dir / "story.md")[1] if (run_dir / "story.md").exists() else {}
+    add_check(checks, "manifest.scene_dirs", bool(scene_dirs), f"scene-series has scene directories (got {len(scene_dirs)})")
+    add_check(checks, "manifest.scene_files", bool(scene_dirs) and all(path.is_file() for path in manifest_paths), "each scene has video_manifest.md")
+    issues: list[str] = []
     for path in manifest_paths:
-        text, data = load_structured_document(path)
-        local_checks: list[dict[str, Any]] = []
-        if str(data.get("manifest_phase") or "production").strip().lower() != "production":
-            phase_ok = False
-        if _declares_adaptation_contract(data, "video_metadata"):
-            adaptation_declared = True
-            script_path = path.parent / "script.md"
-            script_data = load_structured_document(script_path)[1] if script_path.exists() else {}
-            scene_script_metadata = script_data.get("scene_script_metadata")
-            if isinstance(scene_script_metadata, dict):
-                scene_data = script_data.get("scene") if isinstance(script_data.get("scene"), dict) else script_data
-                scenes = as_list(script_data.get("scenes")) or ([scene_data] if isinstance(scene_data, dict) else [])
-                script_data = {**script_data, "script_metadata": scene_script_metadata, "scenes": scenes}
-            adaptation_issues.extend(
-                manifest_adaptation_issues(
-                    data,
-                    source_value_ids=adaptation_source_value_ids(story_data),
-                    script=script_data,
-                )
-            )
-        _manifest_checks(local_checks, text, data, profile=profile, flow="scene-series", path_label=path.name)
-        if not all(check["passed"] for check in local_checks):
-            nested_ok = False
-    add_check(checks, "manifest.scene_phase", phase_ok, "scene manifests are in production phase", kind="rubric")
-    add_check(checks, "manifest.scene_contracts", nested_ok, "scene manifests satisfy render contract checks", kind="rubric")
-    if adaptation_declared:
-        add_check(
-            checks,
-            "manifest.scene_series_adaptation_value_contract",
-            not adaptation_issues,
-            "scene-series manifests that declare adaptation_value_contract preserve exact script projection"
-            + (f" (issues: {', '.join(adaptation_issues[:8])})" if adaptation_issues else ""),
-            kind="rubric",
-        )
-
-    updates = {"eval.manifest.score": f"{score_from_checks(checks):.4f}"}
-    return make_stage("manifest", "scenes/*/video_manifest.md", checks, details={"scene_count": len(scene_dirs)}), updates
+        if not path.is_file():
+            continue
+        text, data = _document(path)
+        local: list[dict[str, Any]] = []
+        _manifest_checks(local, text, data, profile=profile, flow="scene-series", path_label=path.parent.name)
+        issues.extend(str(check["id"]) for check in local if not check.get("passed"))
+    add_check(checks, "manifest.scene_contracts", not issues, "scene-series manifests have valid structure" + (f" (issues: {','.join(issues[:8])})" if issues else ""))
+    return make_stage("manifest", "scenes/*/video_manifest.md", checks, details={"scene_count": len(scene_dirs)}), {}
 
 
 def _slot_number(value: str | None, *, default: int) -> int:
     match = re.search(r"(\d+)", str(value or ""))
-    if not match:
-        return default
+    return int(match.group(1)) if match else default
+
+
+def _probe_duration(path: Path) -> float | None:
     try:
-        return int(match.group(1))
-    except Exception:
-        return default
+        completed = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        value = float(completed.stdout.strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
 
 
 def append_video_checks(
@@ -643,126 +622,82 @@ def append_video_checks(
     run_dir: Path,
     duration_probe: DurationProbe,
 ) -> None:
-    video_exists = video_path.exists()
-    add_check(checks, "video.file_exists", video_exists, f"{video_path.name} exists")
-    if not video_exists:
+    exists = video_path.is_file()
+    add_check(checks, "video.file_exists", exists, f"{video_path.name} exists")
+    if not exists:
         return
-
-    render_status = state.get("runtime.render.status", "").strip().lower()
-    add_check(checks, "video.render_status", render_status in {"success", "started", ""}, f"render status is set to success/started (got {render_status or '(unset)'})", kind="rubric")
-
-    review_status = state.get("review.video.status", "").strip().lower()
-    add_check(checks, "video.review_status", review_status in {"pending", "approved", "changes_requested"}, f"review.video.status is present (got {review_status or '(unset)'})", kind="rubric")
-
-    report_exists = (run_dir / "run_report.md").exists()
-    if report_exists:
-        add_check(checks, "video.run_report", True, "run_report.md exists", kind="rubric")
-
+    render_status = str(state.get("runtime.render.status") or "").strip().lower()
+    if render_status:
+        add_check(checks, "video.render_status", render_status in {"success", "started", "completed"}, f"render status is a known terminal/in-progress value (got {render_status})")
     narration_list = run_dir / "video_narration_list.txt"
-    if narration_list.exists():
-        audio_paths = [
-            Path(line.strip())
-            for line in narration_list.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        resolved = [(path if path.is_absolute() else run_dir / path) for path in audio_paths]
-        add_check(checks, "video.narration_list", all(path.exists() for path in resolved), "all narration files in video_narration_list.txt exist", kind="rubric")
-
-    video_duration = duration_probe(video_path)
-    if video_duration is not None:
-        add_check(checks, "video.duration", video_duration > 0.0, f"video duration is positive ({video_duration:.2f}s)", kind="rubric")
-
-    manifest_path = run_dir / "video_manifest.md"
-    if manifest_path.exists():
-        _manifest_text, manifest = load_structured_document(manifest_path)
-    else:
-        manifest = {}
-    raw_target_seconds = nested_get(manifest, ["video_metadata", "target_duration_seconds"])
-    try:
-        target_seconds = (
-            normalize_target_duration(raw_target_seconds)
-            if raw_target_seconds is not None
-            else None
-        )
-    except ValueError:
-        target_seconds = None
-    add_check(
-        checks,
-        "video.target_duration",
-        target_seconds is not None,
-        "final video verification requires a valid manifest target_duration_seconds (300-1200)",
-        kind="rubric",
-    )
-    if video_duration is not None:
-        try:
-            duration_audit = (
-                audit_duration(
-                    target_seconds=target_seconds,
-                    actual_seconds=video_duration,
-                    measurement_layer="final_media_ffprobe",
-                )
-                if target_seconds is not None
-                else None
-            )
-        except ValueError:
-            duration_audit = None
-        add_check(
-            checks,
-            "video.duration_fit",
-            duration_audit is not None and duration_audit.passed,
-            f"final media ffprobe duration reaches at least {MINIMUM_EFFECTIVE_RATIO:.0%} of manifest target without adding audio/render layers"
-            + (
-                f" ({duration_audit.actual_seconds:g}/{duration_audit.target_seconds}s)"
-                if duration_audit is not None
-                else " (manifest target is missing/invalid)"
-            ),
-            kind="rubric",
-        )
+    if narration_list.is_file():
+        missing = []
+        for line in narration_list.read_text(encoding="utf-8").splitlines():
+            value = line.strip()
+            if not value:
+                continue
+            path = Path(value)
+            candidate = path if path.is_absolute() else run_dir / path
+            if not candidate.is_file():
+                missing.append(value)
+        add_check(checks, "video.narration_list", not missing, "all files in video_narration_list.txt exist" + (f" (missing: {','.join(missing[:8])})" if missing else ""))
+    duration = duration_probe(video_path)
+    if duration is not None:
+        add_check(checks, "video.duration", duration > 0, f"video duration is positive ({duration:.2f}s)")
+        _text, manifest = _document(run_dir / "video_manifest.md")
+        raw_target = nested_get(manifest, ["video_metadata", "target_duration_seconds"])
+        if raw_target is not None:
+            try:
+                target = normalize_target_duration(raw_target)
+            except (TypeError, ValueError):
+                target = None
+            if target is not None:
+                audit = audit_duration(target_seconds=target, actual_seconds=duration, measurement_layer="final_media_ffprobe")
+                add_check(checks, "video.duration_fit", audit.passed, f"final video reaches the declared runtime floor ({duration:g}/{target}s)")
 
 
-def check_video_single(
-    run_dir: Path,
-    *,
-    append_semantic_review: SemanticReviewAppender,
-    duration_probe: DurationProbe,
-    target_slot: str = "p930",
-) -> tuple[dict[str, Any], dict[str, str]]:
+def check_video_single(run_dir: Path, *, target_slot: str = "p930", duration_probe: DurationProbe | None = None) -> tuple[dict[str, Any], dict[str, str]]:
+    checks: list[dict[str, Any]] = []
     state = parse_state_file(run_dir / "state.txt")
-    checks: list[dict[str, Any]] = []
-    details: dict[str, Any] = {}
-    target_number = _slot_number(target_slot, default=930)
-    append_grounding_checks(checks, run_dir=run_dir, stage="video")
-    append_video_checks(
-        checks,
-        video_path=run_dir / "video.mp4",
-        state=state,
-        run_dir=run_dir,
-        duration_probe=duration_probe,
-    )
-    append_semantic_review(
-        checks,
-        details,
-        run_dir=run_dir,
-        stage="video_motion",
-        required=target_number >= 820,
-        check_id="video.motion_semantic_review_subagent_passed",
-    )
-    return make_stage("video", "video.mp4", checks, details=details), {}
+    append_video_checks(checks, video_path=run_dir / "video.mp4", state=state, run_dir=run_dir, duration_probe=duration_probe or _probe_duration)
+    return make_stage("video", "video.mp4", checks), {}
 
 
-def check_video_scene_series(
-    run_dir: Path,
-    *,
-    append_semantic_review: SemanticReviewAppender,
-    target_slot: str = "p930",
-) -> tuple[dict[str, Any], dict[str, str]]:
-    scene_dirs = sorted((run_dir / "scenes").glob("scene*"))
+def check_video_scene_series(run_dir: Path, *, target_slot: str = "p930", duration_probe: DurationProbe | None = None) -> tuple[dict[str, Any], dict[str, str]]:
     checks: list[dict[str, Any]] = []
-    details: dict[str, Any] = {"scene_count": len(scene_dirs)}
-    target_number = _slot_number(target_slot, default=930)
-    add_check(checks, "video.scene_dirs", len(scene_dirs) >= 1, f"scene-series has scene directories (got {len(scene_dirs)})")
-    video_paths = [scene_dir / "video.mp4" for scene_dir in scene_dirs]
-    add_check(checks, "video.scene_files", all(path.exists() for path in video_paths), "each scene has video.mp4")
-    append_grounding_checks(checks, run_dir=run_dir, stage="video")
-    append_semantic_review(checks, details, run_dir=run_dir, stage="video_motion", required=target_number >= 820)
-    return make_stage("video", "scenes/*/video.mp4", checks, details=details), {}
+    scene_dirs = sorted(path for path in (run_dir / "scenes").glob("scene*") if path.is_dir())
+    add_check(checks, "video.scene_dirs", bool(scene_dirs), f"scene-series has scene directories (got {len(scene_dirs)})")
+    paths = [path / "video.mp4" for path in scene_dirs]
+    add_check(checks, "video.scene_files", bool(paths) and all(path.is_file() for path in paths), "each scene has video.mp4")
+    state = parse_state_file(run_dir / "state.txt")
+    probe = duration_probe or _probe_duration
+    for path in paths:
+        if path.is_file():
+            append_video_checks(checks, video_path=path, state=state, run_dir=path.parent, duration_probe=probe)
+    return make_stage("video", "scenes/*/video.mp4", checks, details={"scene_count": len(scene_dirs)}), {}
+
+
+__all__ = [
+    "P400_READINESS_CHECK_IDS",
+    "STORY_REQUIRED_SCENE_FIELDS",
+    "_iter_manifest_nodes",
+    "_iter_manifest_nodes_with_selectors",
+    "_manifest_checks",
+    "_minimum_cut_issues",
+    "_probe_duration",
+    "_script_text_quality_checks",
+    "_slot_number",
+    "append_video_checks",
+    "check_manifest_scene_series",
+    "check_manifest_single",
+    "check_research",
+    "check_script_scene_series",
+    "check_script_single",
+    "check_story",
+    "check_video_scene_series",
+    "check_video_single",
+    "compact_research_pack_ok",
+    "dense_story_scene_count",
+    "make_stage",
+    "story_scene_coverage_ok",
+]

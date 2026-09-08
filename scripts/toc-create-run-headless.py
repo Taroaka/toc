@@ -29,7 +29,6 @@ from toc.image_request_snapshot import sha256_canonical_json  # noqa: E402
 
 
 OUTPUT_ROOT = (REPO_ROOT / "output").resolve()
-REVIEW_MODES = {"standard", "preapproved"}
 
 
 def _parse_state(path: Path) -> dict[str, str]:
@@ -454,15 +453,17 @@ async def create_run_via_frontend_route(
     poll_interval: float,
     create_mode: str = "normal",
     target_duration_seconds: int = 300,
-    review_mode: str = "standard",
+    review_mode: str | None = None,
     base_url: str | None = None,
 ) -> dict[str, Any]:
+    # ``review_mode`` is accepted for compatibility with older regression
+    # invocations.  Both historical values now use the same create route and
+    # no value is forwarded to the backend.
+    del review_mode
     if create_mode not in {"normal", "scene_storyboard"}:
         raise ValueError(
             "create_mode must be normal or scene_storyboard"
         )
-    if review_mode not in REVIEW_MODES:
-        raise ValueError("review_mode must be standard or preapproved")
     if create_mode == "scene_storyboard" and not generate_images:
         raise ValueError(
             "storyboard create requires image generation"
@@ -498,7 +499,6 @@ async def create_run_via_frontend_route(
             "title": title,
             "source": source,
             "target_duration_seconds": target_duration_seconds,
-            "review_mode": review_mode,
         }
         if create_mode == "normal":
             payload["generate_images"] = generate_images
@@ -525,12 +525,6 @@ async def create_run_via_frontend_route(
                 "create response mode changed: "
                 f"expected {create_mode!r}, got {returned_mode!r}"
             )
-        returned_review_mode = str(job.get("reviewMode") or "").strip()
-        if returned_review_mode and returned_review_mode != review_mode:
-            raise RuntimeError(
-                "create response reviewMode changed: "
-                f"expected {review_mode!r}, got {returned_review_mode!r}"
-            )
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             latest = await client.get(f"/api/image-gen/runs/create/{job_id}")
@@ -542,12 +536,6 @@ async def create_run_via_frontend_route(
             if latest_job_id != job_id:
                 raise RuntimeError(
                     f"create status identity changed: expected jobId {job_id!r}, got {latest_job_id!r}"
-                )
-            latest_review_mode = str(job.get("reviewMode") or "").strip()
-            if latest_review_mode and latest_review_mode != review_mode:
-                raise RuntimeError(
-                    "create status reviewMode changed: "
-                    f"expected {review_mode!r}, got {latest_review_mode!r}"
                 )
             latest_run_id = str(job.get("runId") or "").strip()
             latest_path = str(job.get("path") or "").strip()
@@ -610,12 +598,8 @@ def main() -> int:
     parser.add_argument("--target-duration-seconds", type=int, default=300, help="Target video duration in seconds (300-1200).")
     parser.add_argument(
         "--review-mode",
-        choices=sorted(REVIEW_MODES),
-        default="standard",
-        help=(
-            "standard runs external review agents; preapproved emits "
-            "digest-bound approved review artifacts without reviewer turns"
-        ),
+        default=None,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--base-url", default="", help="Optional running backend URL, e.g. http://127.0.0.1:8000. Omit for in-process ASGI.")
     parser.add_argument(

@@ -15,11 +15,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from toc.duration_fit_review import (  # noqa: E402
-    build_duration_narration_review_prompt,
-    build_duration_scene_review_prompt,
-    write_review_prompt,
-)
 from toc.grounding import detect_flow  # noqa: E402
 from toc.harness import append_state_snapshot, load_structured_document, now_iso, parse_state_file  # noqa: E402
 from toc.story_duration import (  # noqa: E402
@@ -143,19 +138,19 @@ def _measurement_state(
     ratio: float,
 ) -> dict[str, str]:
     return {
-        "review.duration_fit.target_seconds": str(target_seconds),
-        "review.duration_fit.minimum_seconds": _format_number(minimum_seconds),
-        "review.duration_fit.actual_seconds": _format_number(measurement.effective_seconds),
-        "review.duration_fit.ratio": _format_number(ratio),
-        "review.duration_fit.measurement_layer": "manifest_runtime",
-        "review.duration_fit.measurement_complete": str(bool(measurement.complete)).lower(),
-        "review.duration_fit.spoken_audio_seconds": _format_number(measurement.spoken_audio_seconds),
-        "review.duration_fit.intentional_silence_seconds": _format_number(measurement.intentional_silence_seconds),
-        "review.duration_fit.audio_timeline_seconds": _format_number(measurement.audio_timeline_seconds),
-        "review.duration_fit.video_timeline_seconds": _format_number(measurement.video_timeline_seconds),
-        "review.duration_fit.video_timeline_source": str(measurement.video_timeline_source),
-        "review.duration_fit.missing_items": json.dumps(measurement.missing_items, ensure_ascii=False),
-        "review.duration_fit.invalid_items": json.dumps(measurement.invalid_items, ensure_ascii=False),
+        "runtime.duration_fit.target_seconds": str(target_seconds),
+        "runtime.duration_fit.minimum_seconds": _format_number(minimum_seconds),
+        "runtime.duration_fit.actual_seconds": _format_number(measurement.effective_seconds),
+        "runtime.duration_fit.ratio": _format_number(ratio),
+        "runtime.duration_fit.measurement_layer": "manifest_runtime",
+        "runtime.duration_fit.measurement_complete": str(bool(measurement.complete)).lower(),
+        "runtime.duration_fit.spoken_audio_seconds": _format_number(measurement.spoken_audio_seconds),
+        "runtime.duration_fit.intentional_silence_seconds": _format_number(measurement.intentional_silence_seconds),
+        "runtime.duration_fit.audio_timeline_seconds": _format_number(measurement.audio_timeline_seconds),
+        "runtime.duration_fit.video_timeline_seconds": _format_number(measurement.video_timeline_seconds),
+        "runtime.duration_fit.video_timeline_source": str(measurement.video_timeline_source),
+        "runtime.duration_fit.missing_items": json.dumps(measurement.missing_items, ensure_ascii=False),
+        "runtime.duration_fit.invalid_items": json.dumps(measurement.invalid_items, ensure_ascii=False),
     }
 
 
@@ -220,9 +215,10 @@ def main() -> int:
                 run_dir / "state.txt",
                 {
                     **measurement_state,
-                    "review.duration_fit.status": "skipped",
-                    "review.duration_fit.note": "no minimum runtime target configured",
-                    "review.duration_fit.at": now_iso(),
+                    **measurement_state,
+                    "runtime.duration_fit.status": "skipped",
+                    "runtime.duration_fit.note": "no minimum runtime target configured",
+                    "runtime.duration_fit.at": now_iso(),
                     "slot.p740.status": "skipped",
                     "slot.p740.requirement": "optional",
                     "slot.p750.status": "pending",
@@ -261,36 +257,17 @@ def main() -> int:
         )
         return 0
 
-    scene_prompt = build_duration_scene_review_prompt(
-        run_dir=run_dir,
-        minimum_seconds=int(minimum_seconds) if minimum_seconds.is_integer() else minimum_seconds,
-        actual_seconds=int(actual_seconds) if actual_seconds.is_integer() else actual_seconds,
-        flow=flow,
-    )
-    scene_prompt_path = write_review_prompt(run_dir=run_dir.resolve(), kind="scene", prompt=scene_prompt)
-    narration_prompt = build_duration_narration_review_prompt(
-        run_dir=run_dir,
-        minimum_seconds=int(minimum_seconds) if minimum_seconds.is_integer() else minimum_seconds,
-        actual_seconds=int(actual_seconds) if actual_seconds.is_integer() else actual_seconds,
-        flow=flow,
-    )
-    narration_prompt_path = write_review_prompt(run_dir=run_dir.resolve(), kind="narration", prompt=narration_prompt)
-
     append_state_snapshot(
         run_dir / "state.txt",
         {
             **measurement_state,
-            "review.duration_fit.status": "changes_requested",
-            "review.duration_fit.note": (
+            "runtime.duration_fit.status": "failed",
+            "runtime.duration_fit.note": (
                 "manifest runtime measurement is incomplete"
                 if not measurement.complete
-                else "actual audio-driven runtime is below the minimum target; run scene and narration stretch review before human review"
+                else "actual audio-driven runtime is below the minimum target"
             ),
-            "review.duration_fit.at": now_iso(),
-            "review.duration_fit.scene_prompt": str(scene_prompt_path.relative_to(run_dir.resolve())),
-            "review.duration_fit.scene_prompt.generated_at": now_iso(),
-            "review.duration_fit.narration_prompt": str(narration_prompt_path.relative_to(run_dir.resolve())),
-            "review.duration_fit.narration_prompt.generated_at": now_iso(),
+            "runtime.duration_fit.at": now_iso(),
             "slot.p740.status": "failed",
             "slot.p740.requirement": "required",
             "slot.p750.status": "blocked",
@@ -301,7 +278,7 @@ def main() -> int:
         if not measurement.complete
         else f"actual runtime {_format_number(actual_seconds)}s is below minimum {_format_number(minimum_seconds)}s"
     )
-    print(f"[fail] {reason}\n  scene prompt: {scene_prompt_path}\n  narration prompt: {narration_prompt_path}")
+    print(f"[fail] {reason}")
     return 2
 
 

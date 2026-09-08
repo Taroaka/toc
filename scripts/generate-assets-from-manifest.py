@@ -5094,7 +5094,7 @@ def generate_seedance_video(
         raise SystemExit(str(e)) from e
 
 
-def _reviewed_video_provider_request_values(
+def _video_provider_request_values(
     *,
     selector: str,
     api_prompt_payload: dict[str, Any],
@@ -5148,7 +5148,7 @@ def _video_output_provenance_path(out_path: Path) -> Path:
     return out_path.with_name(out_path.name + ".provenance.json")
 
 
-def _approved_video_provider_request_sha256(
+def _video_provider_request_sha256(
     *,
     selector: str,
     tool: str,
@@ -5318,7 +5318,7 @@ def _require_exact_video_output_provenance(
         )
 
 
-def _dispatch_reviewed_video_provider_call(
+def _dispatch_video_provider_call(
     *,
     selector: str,
     tool: str,
@@ -5343,19 +5343,19 @@ def _dispatch_reviewed_video_provider_call(
         selector=selector,
         payload=api_prompt_payload,
     )
-    reviewed = _reviewed_video_provider_request_values(
+    materialized = _video_provider_request_values(
         selector=selector,
         api_prompt_payload=api_prompt_payload,
     )
-    duration_seconds = int(reviewed["duration_seconds"])
-    aspect_ratio = str(reviewed["aspect_ratio"])
-    resolution = str(reviewed["quality"])
-    backend = str(reviewed["backend"])
-    model = str(reviewed["model"])
-    extra_payload = dict(reviewed["extra_payload"])
+    duration_seconds = int(materialized["duration_seconds"])
+    aspect_ratio = str(materialized["aspect_ratio"])
+    resolution = str(materialized["quality"])
+    backend = str(materialized["backend"])
+    model = str(materialized["model"])
+    extra_payload = dict(materialized["extra_payload"])
     log_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", selector).strip("._-") or "video"
     provider_log_path = log_dir / f"{log_slug}_video.json"
-    approved_provider_request_sha256 = _approved_video_provider_request_sha256(
+    provider_request_sha256 = _video_provider_request_sha256(
         selector=selector,
         tool=tool,
         api_prompt_payload=api_prompt_payload,
@@ -5367,7 +5367,7 @@ def _dispatch_reviewed_video_provider_call(
         if out_path.exists() and not force:
             _require_exact_video_output_provenance(
                 selector=selector,
-                approved_provider_request_sha256=approved_provider_request_sha256,
+                approved_provider_request_sha256=provider_request_sha256,
                 out_path=out_path,
             )
             return
@@ -5386,7 +5386,7 @@ def _dispatch_reviewed_video_provider_call(
             tool=tool,
             backend=backend,
             model=model,
-            approved_provider_request_sha256=approved_provider_request_sha256,
+            approved_provider_request_sha256=provider_request_sha256,
             out_path=out_path,
             log_path=provider_log_path,
         )
@@ -5533,8 +5533,8 @@ def _dispatch_reviewed_video_provider_call(
             input_image=input_image,
             last_frame_image=last_frame_image,
             reference_images=reference_images,
-            generate_audio=bool(reviewed["generate_audio"]),
-            watermark=bool(reviewed["watermark"]),
+            generate_audio=bool(materialized["generate_audio"]),
+            watermark=bool(materialized["watermark"]),
             extra_payload=extra_payload,
             out_path=out_path,
             poll_every=poll_every,
@@ -7108,7 +7108,7 @@ def _final_image_prompt_editor(
     references: list[str],
     topic: str = "",
 ) -> str:
-    text = _rewrite_request_prompt_for_review(
+    text = _rewrite_request_prompt(
         prompt=prompt,
         output=output,
         references=references,
@@ -7490,7 +7490,7 @@ def _video_reference_content_sha256s(
     return content_sha256s
 
 
-def _snapshot_reviewed_video_reference_inputs(
+def _snapshot_video_reference_inputs(
     *,
     base_dir: Path,
     selector: str,
@@ -7514,13 +7514,13 @@ def _snapshot_reviewed_video_reference_inputs(
     ]
     if len(reference_bindings) != len(reference_images):
         raise SystemExit(
-            f"{selector}: reviewed video reference list does not match resolved inputs"
+            f"{selector}: materialized video reference list does not match resolved inputs"
         )
     if bool(first_binding) != bool(input_image) or bool(last_binding) != bool(
         last_frame_image
     ):
         raise SystemExit(
-            f"{selector}: reviewed video frame bindings do not match resolved inputs"
+            f"{selector}: materialized video frame bindings do not match resolved inputs"
         )
 
     raw_inputs: list[tuple[str, Path | None]] = [
@@ -7548,7 +7548,7 @@ def _snapshot_reviewed_video_reference_inputs(
         for index, (reference, source) in enumerate(present_inputs, start=1):
             if not reference or source is None:
                 raise SystemExit(
-                    f"{selector}: reviewed video reference binding is incomplete"
+                    f"{selector}: materialized video reference binding is incomplete"
                 )
             expected_source = _resolve_run_confined_video_path(
                 base_dir=base_dir,
@@ -7564,12 +7564,12 @@ def _snapshot_reviewed_video_reference_inputs(
             )
             if expected_source is None or expected_source.absolute() != source.absolute():
                 raise SystemExit(
-                    f"{selector}: reviewed video reference path changed before provider submission"
+                    f"{selector}: materialized video reference path changed before provider submission"
                 )
             expected_digest = str(expected_by_binding.get(reference) or "").strip()
             if not expected_digest:
                 raise SystemExit(
-                    f"{selector}: reviewed video reference content hash is missing"
+                    f"{selector}: materialized video reference content hash is missing"
                 )
             copied = copied_by_source.get(source)
             if copied is None:
@@ -7579,7 +7579,7 @@ def _snapshot_reviewed_video_reference_inputs(
                 copied_by_source[source] = copied
             if sha256_file(copied) != expected_digest:
                 raise SystemExit(
-                    f"{selector}: reviewed video reference content changed before provider submission"
+                    f"{selector}: materialized video reference content changed before provider submission"
                 )
 
         copied_input = copied_by_source.get(input_image) if input_image else None
@@ -7641,9 +7641,9 @@ def _video_execution_options_with_reference_content(
             ]
             if stale:
                 raise SystemExit(
-                    "video reference content changed after prompt review: "
+                    "video reference content changed after request materialization: "
                     + ", ".join(stale)
-                    + "; rematerialize and review"
+                    + "; rematerialize the request"
                 )
     if content_sha256s:
         bound_options["reference_content_sha256"] = content_sha256s
@@ -7710,8 +7710,6 @@ def _write_request_preview_md(
             lines.append(f"- execution_lane: `{entry['execution_lane']}`")
         if entry.get("reference_count") is not None:
             lines.append(f"- reference_count: `{entry['reference_count']}`")
-        if entry.get("review_status"):
-            lines.append(f"- review_status: `{entry['review_status']}`")
         if entry.get("creation_status"):
             lines.append(f"- creation_status: `{entry['creation_status']}`")
         if "bootstrap_allowed" in entry:
@@ -7830,7 +7828,7 @@ def _write_request_preview_md(
         else:
             lines.append("```text")
             lines.append(
-                _rewrite_request_prompt_for_review(
+                _rewrite_request_prompt(
                     prompt=entry.get("prompt") or "",
                     output=entry.get("output") or "",
                     references=list(entry.get("references") or []),
@@ -7938,30 +7936,33 @@ def _obsolete_video_request_selectors_for_selected_scenes(
     return obsolete
 
 
-def _validated_video_prompts_from_review_artifact(
+def _validated_video_prompts_from_request_artifact(
     *,
     request_path: Path,
     entries: list[dict[str, Any]],
 ) -> dict[str, str]:
-    """Return reviewed prompt bytes only when the current projection is identical."""
+    """Return persisted prompt bytes when the current request is identical.
+
+    The request file is a deterministic projection used to bind provider
+    inputs.  It is not a reviewer artifact and does not require a status,
+    score, or approval entry in state.
+    """
 
     if not entries:
         return {}
     if not request_path.is_file():
         raise SystemExit(
-            "video generation request materialization is missing; rematerialize and review before generation"
+            "video generation request materialization is missing; rematerialize before generation"
         )
     text = request_path.read_text(encoding="utf-8")
-    reviewed = _parse_video_request_artifact(text)
-    state_path = request_path.parent / "state.txt"
-    state = parse_state_file(state_path) if state_path.is_file() else {}
+    materialized_requests = _parse_video_request_artifact(text)
     prompts: dict[str, str] = {}
     for entry in entries:
         selector = str(entry.get("selector") or "").strip()
-        materialized = reviewed.get(selector)
+        materialized = materialized_requests.get(selector)
         if materialized is None:
             raise SystemExit(
-                f"video generation request is stale or missing for {selector}; rematerialize and review"
+                f"video generation request is stale or missing for {selector}; rematerialize before generation"
             )
         payload = entry.get("api_prompt_payload") if isinstance(entry.get("api_prompt_payload"), dict) else {}
         current_prompt = str(payload.get("prompt") or "").strip()
@@ -7993,34 +7994,22 @@ def _validated_video_prompts_from_review_artifact(
         ]
         if str(payload.get("sha256") or "").strip() != current_prompt_sha256:
             mismatches.append("current_prompt_sha256")
-        reviewed_prompt = str(materialized.get("prompt") or "").strip()
-        reviewed_prompt_sha256 = hashlib.sha256(reviewed_prompt.encode("utf-8")).hexdigest()
-        if reviewed_prompt_sha256 != str(materialized.get("prompt_sha256") or "").strip():
-            mismatches.append("reviewed_prompt_sha256")
-        if reviewed_prompt != current_prompt:
+        materialized_prompt = str(materialized.get("prompt") or "").strip()
+        materialized_prompt_sha256 = hashlib.sha256(materialized_prompt.encode("utf-8")).hexdigest()
+        if materialized_prompt_sha256 != str(materialized.get("prompt_sha256") or "").strip():
+            mismatches.append("materialized_prompt_sha256")
+        if materialized_prompt != current_prompt:
             mismatches.append("prompt")
-        reviewed_negative_prompt = str(materialized.get("negative_prompt") or "").strip()
+        materialized_negative_prompt = str(materialized.get("negative_prompt") or "").strip()
         current_negative_prompt = str(payload.get("negative_prompt") or "").strip()
-        if reviewed_negative_prompt != current_negative_prompt:
+        if materialized_negative_prompt != current_negative_prompt:
             mismatches.append("negative_prompt")
-        state_prefix = _video_prompt_approval_state_prefix(selector)
-        approval_expected = {
-            "status": "approved",
-            "prompt_sha256": current_prompt_sha256,
-            "source_digest": str(payload.get("source_digest") or "").strip(),
-            "request_section_sha256": str(
-                materialized.get("request_section_sha256") or ""
-            ).strip(),
-        }
-        for field, expected_value in approval_expected.items():
-            if state.get(f"{state_prefix}.{field}", "").strip() != expected_value:
-                mismatches.append(f"approval_{field}")
         if mismatches:
             raise SystemExit(
                 f"video generation request is stale for {selector} ({', '.join(dict.fromkeys(mismatches))}); "
-                "rematerialize and review"
+                "rematerialize the request"
             )
-        prompts[selector] = reviewed_prompt
+        prompts[selector] = materialized_prompt
     return prompts
 
 
@@ -8068,87 +8057,6 @@ def _parse_video_request_artifact(text: str) -> dict[str, dict[str, str]]:
         ).hexdigest()
         parsed[selector] = values
     return parsed
-
-
-def _video_prompt_approval_state_prefix(item_id: str) -> str:
-    safe_item_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", item_id).strip("._-")
-    return f"review.video_prompt.item.{safe_item_id or 'unknown'}"
-
-
-def _video_prompt_pending_state_updates(
-    *,
-    request_path: Path,
-    entries: list[dict[str, Any]],
-) -> dict[str, str]:
-    if not entries:
-        return {}
-    reviewed = _parse_video_request_artifact(request_path.read_text(encoding="utf-8"))
-    updates: dict[str, str] = {}
-    for entry in entries:
-        selector = str(entry.get("selector") or "").strip()
-        materialized = reviewed.get(selector)
-        if materialized is None:
-            raise SystemExit(
-                f"video generation request is missing after materialization for {selector}"
-            )
-        payload = (
-            entry.get("api_prompt_payload")
-            if isinstance(entry.get("api_prompt_payload"), dict)
-            else {}
-        )
-        prefix = _video_prompt_approval_state_prefix(selector)
-        updates.update(
-            {
-                f"{prefix}.status": "pending",
-                f"{prefix}.request_section_sha256": materialized[
-                    "request_section_sha256"
-                ],
-                f"{prefix}.prompt_sha256": str(payload.get("sha256") or ""),
-                f"{prefix}.source_digest": str(payload.get("source_digest") or ""),
-                f"{prefix}.approved_by": "",
-                f"{prefix}.approved_at": "",
-            }
-        )
-    if entries:
-        updates.update(
-            {
-                "review.video_prompt.status": "pending",
-                "gate.video_prompt_review": "required",
-            }
-        )
-    return updates
-
-
-def _obsolete_video_prompt_state_updates(
-    selectors: Iterable[str],
-) -> dict[str, str]:
-    obsolete_selectors = {
-        str(selector).strip()
-        for selector in selectors
-        if str(selector).strip()
-    }
-    if not obsolete_selectors:
-        return {}
-    updates: dict[str, str] = {}
-    for selector in sorted(obsolete_selectors):
-        prefix = _video_prompt_approval_state_prefix(selector)
-        updates.update(
-            {
-                f"{prefix}.status": "revoked",
-                f"{prefix}.request_section_sha256": "",
-                f"{prefix}.prompt_sha256": "",
-                f"{prefix}.source_digest": "",
-                f"{prefix}.approved_by": "",
-                f"{prefix}.approved_at": "",
-            }
-        )
-    updates.update(
-        {
-            "review.video_prompt.status": "pending",
-            "gate.video_prompt_review": "required",
-        }
-    )
-    return updates
 
 
 def _manifest_video_generation_node(
@@ -8277,7 +8185,7 @@ def _require_exact_persisted_video_payload(
     if not stored_payload:
         raise SystemExit(
             f"video prompt payload is not persisted for {target.selector}; "
-            "rematerialize and review"
+            "rematerialize before generation"
         )
     if stored_payload != current_payload:
         changed = sorted(
@@ -8287,7 +8195,7 @@ def _require_exact_persisted_video_payload(
         )
         raise SystemExit(
             f"persisted video prompt payload is stale for {target.selector} "
-            f"({', '.join(changed)}); rematerialize and review"
+            f"({', '.join(changed)}); rematerialize before generation"
         )
     return stored_payload
 
@@ -8351,7 +8259,7 @@ def _write_image_request_snapshot(
         payload = entry.get("api_prompt_payload") if isinstance(entry.get("api_prompt_payload"), dict) else {}
         prompt = str(payload.get("prompt") or "").strip()
         if not prompt:
-            prompt = _rewrite_request_prompt_for_review(
+            prompt = _rewrite_request_prompt(
                 prompt=str(entry.get("prompt") or ""),
                 output=str(entry.get("output") or ""),
                 references=list(entry.get("references") or []),
@@ -8491,7 +8399,7 @@ def _strip_nonvisual_story_context(text: str) -> str:
     return stripped
 
 
-def _rewrite_request_prompt_for_review(*, prompt: str, output: str, references: list[str], topic: str = "") -> str:
+def _rewrite_request_prompt(*, prompt: str, output: str, references: list[str], topic: str = "") -> str:
     text = (prompt or "").strip()
     if not text:
         return ""
@@ -8618,33 +8526,6 @@ def main() -> None:
     parser.add_argument("--skip-images", action="store_true")
     parser.add_argument("--skip-videos", action="store_true")
     parser.add_argument("--skip-audio", action="store_true")
-    parser.add_argument(
-        "--ignore-duration-fit-gate",
-        action="store_true",
-        help="Allow video generation even if review.duration_fit.status=changes_requested.",
-    )
-    parser.add_argument(
-        "--ignore-p400-readiness-gate",
-        action="store_true",
-        help="Allow read-only dry-run diagnostics even if eval.p400_readiness.status is not approved.",
-    )
-    parser.add_argument(
-        "--skip-image-prompt-review",
-        action="store_true",
-        help="Skip the pre-image-generation story consistency review gate.",
-    )
-    parser.add_argument(
-        "--skip-narration-review",
-        action="store_true",
-        help="Skip the pre-audio-generation narration text review gate.",
-    )
-    parser.add_argument(
-        "--image-prompt-review-fix-character-ids",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Before image generation, auto-add missing character_ids inferred by the review script.",
-    )
-
     parser.add_argument("--scene-ids", default=None, help='Comma-separated list like "1,3,5" (default: all).')
 
     # Gemini Image
@@ -8897,10 +8778,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.chain_first_frame_from_prev_video:
         raise SystemExit(
-            "--chain-first-frame-from-prev-video is deprecated and unsupported because "
-            "a post-review dynamic frame cannot match the approved provider request. "
-            "Generate the boundary frame first, then rematerialize and approve the next "
-            "video target before execution."
+            "--chain-first-frame-from-prev-video is deprecated and unsupported. "
+            "Generate the boundary frame first, then rematerialize the next video request."
         )
     if not args.elevenlabs_language_code:
         args.elevenlabs_language_code = DEFAULT_ELEVENLABS_LANGUAGE_CODE
@@ -8955,40 +8834,19 @@ def main() -> None:
             f"  expected: {canonical_manifest_path}\n"
             f"  got: {manifest_path.resolve()}"
         )
-    p400_override_is_read_only_diagnostic = bool(
-        args.ignore_p400_readiness_gate
-        and args.dry_run
-        and args.skip_images
-        and args.skip_videos
-        and args.skip_audio
-        and not args.materialize_request_files_only
-    )
-    if args.ignore_p400_readiness_gate and not p400_override_is_read_only_diagnostic:
-        raise SystemExit(
-            "--ignore-p400-readiness-gate is limited to read-only diagnostics: "
-            "use it only with --dry-run --skip-images --skip-videos --skip-audio and without --materialize-request-files-only."
-        )
-    if not p400_override_is_read_only_diagnostic and not is_asset_stage_manifest:
+    if not is_asset_stage_manifest:
         _stage_result, p400_updates = check_manifest_single(base_dir, "standard", "immersive")
-        append_state_snapshot(state_path, p400_updates)
-    if not p400_override_is_read_only_diagnostic and not is_asset_stage_manifest:
-        state = parse_state_file(state_path) if state_path.exists() else {}
-        if state.get("eval.p400_readiness.status", "").strip().lower() != "approved":
-            raise SystemExit(
-                "p400 readiness gate is not approved.\n"
-                "  Run the p400 deterministic readiness review and resolve scene/cut/duration/review findings before p500+ generation,\n"
-                "  or pass --ignore-p400-readiness-gate only with read-only dry-run diagnostic flags."
-            )
-    if args.skip_audio and not args.skip_videos and not args.ignore_duration_fit_gate and state_path.exists():
-        state = parse_state_file(state_path)
-        if state.get("review.duration_fit.status", "").strip().lower() == "changes_requested":
-            raise SystemExit(
-                "Audio duration gate is still requesting scene/narration expansion.\n"
-                f"  Review prompts:\n"
-                f"  - {base_dir / 'logs/review/duration_scene.subagent_prompt.md'}\n"
-                f"  - {base_dir / 'logs/review/duration_narration.subagent_prompt.md'}\n"
-                "  Resolve the duration-fit review before generating videos, or pass --ignore-duration-fit-gate."
-            )
+        # The evaluator may expose ordinary structural diagnostics alongside
+        # legacy review keys while an older run is being resumed.  Persist only
+        # execution state; reviewer reports and approval statuses are never a
+        # generation prerequisite.
+        structural_updates = {
+            key: value
+            for key, value in p400_updates.items()
+            if not key.startswith(("review.", "eval.", "gate."))
+        }
+        if structural_updates:
+            append_state_snapshot(state_path, structural_updates)
     allowed_image_plan_modes = _parse_csv_set(args.image_plan_modes)
 
     metadata, guides, scenes = parse_manifest_yaml_full(yaml_text)
@@ -9015,51 +8873,6 @@ def main() -> None:
             "Manifest is still in skeleton phase.\n"
             "  Promote video_manifest.md to manifest_phase=production before generating scene images or videos."
         )
-    if p400_override_is_read_only_diagnostic:
-        print("[dry-run] p400 readiness override diagnostic only; no request files or assets were materialized.")
-        return
-
-    if not args.skip_images and not args.skip_image_prompt_review and manifest_phase == "production" and not is_asset_stage_request:
-        review_cmd = [
-            sys.executable,
-            str(REPO_ROOT / "scripts/review-image-prompt-story-consistency.py"),
-            "--manifest",
-            str(manifest_path),
-            "--story",
-            str(base_dir / "story.md"),
-            "--script",
-            str(base_dir / "script.md"),
-            "--image-plan-modes",
-            args.image_plan_modes,
-            "--fail-on-findings",
-        ]
-        if args.image_prompt_review_fix_character_ids:
-            review_cmd.append("--fix-character-ids")
-        subprocess.run(review_cmd, check=True)
-
-    if not args.skip_audio and not args.skip_narration_review:
-        review_cmd = [
-            sys.executable,
-            str(REPO_ROOT / "scripts/run-p720-narration-l3.py"),
-            "--run-dir",
-            str(base_dir),
-            "--manifest",
-            str(manifest_path),
-            "--script",
-            str(base_dir / "script.md"),
-            "--fail-on-findings",
-        ]
-        subprocess.run(review_cmd, check=True)
-        semantic_review_cmd = [
-            sys.executable,
-            str(REPO_ROOT / "scripts/run-p720-narration-semantic.py"),
-            "--run-dir",
-            str(base_dir),
-            "--manifest",
-            str(manifest_path),
-            "--fail-on-findings",
-        ]
-        subprocess.run(semantic_review_cmd, check=True)
     script_visual_beat_map: dict[str, str] = {}
     script_path = base_dir / "script.md"
     if script_path.exists():
@@ -9489,9 +9302,9 @@ def main() -> None:
                     }
             authoring_role = "reusable_asset_candidate" if is_asset_stage_request else "video_first_frame_candidate"
             authoring_note = (
-                "このメタ情報はp550 reusable asset生成/レビュー用。prompt本文には物語タイトルやscene idを書かず、見える人物・場所・道具・行為だけを具体化する。"
+                "このメタ情報はp550 reusable asset生成用。prompt本文には物語タイトルやscene idを書かず、見える人物・場所・道具・行為だけを具体化する。"
                 if is_asset_stage_request
-                else "このメタ情報はプロンプト生成/レビュー用。prompt本文には「最初の1フレーム」等を書かず、見えている初期状態だけを具体化する。"
+                else "このメタ情報はプロンプト生成用。prompt本文には「最初の1フレーム」等を書かず、見えている初期状態だけを具体化する。"
             )
             first_frame_visual_plan = {}
             api_prompt_payload = {}
@@ -9526,7 +9339,6 @@ def main() -> None:
                     "asset_type": scene.image_asset_type or "",
                     "execution_lane": _effective_image_execution_lane(scene),
                     "reference_count": len(list(scene.image_references or [])),
-                    "review_status": scene.image_review_status or "",
                     "authoring_role": authoring_role,
                     "authoring_note": authoring_note,
                     "output": str(out_path.relative_to(base_dir)) if out_path is not None else "",
@@ -9563,9 +9375,9 @@ def main() -> None:
         if snapshot_path is not None:
             written_request_paths.append(snapshot_path)
 
-    reviewed_video_prompts: dict[str, str] = {}
-    reviewed_video_negative_prompts: dict[str, str] = {}
-    reviewed_video_payloads: dict[str, dict[str, Any]] = {}
+    materialized_video_prompts: dict[str, str] = {}
+    materialized_video_negative_prompts: dict[str, str] = {}
+    materialized_video_payloads: dict[str, dict[str, Any]] = {}
     if manifest_phase == "production":
         video_targets_preview: list[VideoRenderTargetSpec] = []
         for target in video_render_targets:
@@ -9729,23 +9541,15 @@ def main() -> None:
                 ),
                 drop_existing_sections=obsolete_video_request_selectors,
             )
-            pending_updates = _obsolete_video_prompt_state_updates(
-                obsolete_video_request_selectors
-            )
-            pending_updates.update(
-                _video_prompt_pending_state_updates(
-                    request_path=video_request_path,
-                    entries=video_preview_entries,
-                )
-            )
-            if pending_updates:
-                append_state_snapshot(state_path, pending_updates)
+            # Request files are deterministic provider-input projections.  No
+            # reviewer state is emitted when a selected-scene projection is
+            # refreshed.
         else:
-            reviewed_video_prompts = _validated_video_prompts_from_review_artifact(
+            materialized_video_prompts = _validated_video_prompts_from_request_artifact(
                 request_path=video_request_path,
                 entries=video_preview_entries,
             )
-            reviewed_video_negative_prompts = {
+            materialized_video_negative_prompts = {
                 str(entry.get("selector") or ""): str(
                     (entry.get("api_prompt_payload") or {}).get("negative_prompt") or ""
                 )
@@ -9919,7 +9723,7 @@ def main() -> None:
                 selector=str(target.selector),
                 payload=video_api_prompt_payload,
             )
-            reviewed_video_payloads[str(target.selector)] = video_api_prompt_payload
+            materialized_video_payloads[str(target.selector)] = video_api_prompt_payload
             video_preview_entries.append(
                 {
                     "selector": target.selector,
@@ -9943,11 +9747,11 @@ def main() -> None:
                     },
                 }
             )
-        reviewed_video_prompts = _validated_video_prompts_from_review_artifact(
+        materialized_video_prompts = _validated_video_prompts_from_request_artifact(
             request_path=base_dir / "video_generation_requests.md",
             entries=video_preview_entries,
         )
-        reviewed_video_negative_prompts = {
+        materialized_video_negative_prompts = {
             str(entry.get("selector") or ""): str(
                 (entry.get("api_prompt_payload") or {}).get("negative_prompt") or ""
             )
@@ -9988,12 +9792,12 @@ def main() -> None:
         if last_image and not args.dry_run and not last_image.exists():
             raise SystemExit(f"{target.selector}: last frame image not found: {last_image}")
 
-        prompt = reviewed_video_prompts.get(str(target.selector), "")
+        prompt = materialized_video_prompts.get(str(target.selector), "")
         if not prompt:
             raise SystemExit(
-                f"video generation request is missing for {target.selector}; rematerialize and review"
+                f"video generation request is missing for {target.selector}; rematerialize before generation"
             )
-        negative_prompt = reviewed_video_negative_prompts.get(str(target.selector), "")
+        negative_prompt = materialized_video_negative_prompts.get(str(target.selector), "")
         if args.log_prompts:
             log_dir.mkdir(parents=True, exist_ok=True)
             (log_dir / f"{_video_target_log_slug(target)}_video_prompt.txt").write_text(prompt + "\n", encoding="utf-8")
@@ -10018,15 +9822,15 @@ def main() -> None:
                 raise SystemExit(f"{target.selector}: reference image not found: {ref_path}")
             video_ref_paths.append(ref_path)
 
-        reviewed_payload = reviewed_video_payloads.get(str(target.selector))
-        if reviewed_payload is None:
+        materialized_payload = materialized_video_payloads.get(str(target.selector))
+        if materialized_payload is None:
             raise SystemExit(
                 f"video prompt payload is missing for {target.selector}; "
-                "rematerialize and review"
+                "rematerialize before generation"
             )
         _assert_video_prompt_quality_allows_provider_execution(
             selector=str(target.selector),
-            payload=reviewed_payload,
+            payload=materialized_payload,
         )
         snapshot_dir: Path | None = None
         provider_input_image = input_image
@@ -10039,18 +9843,18 @@ def main() -> None:
                     provider_input_image,
                     provider_last_image,
                     provider_reference_images,
-                ) = _snapshot_reviewed_video_reference_inputs(
+                ) = _snapshot_video_reference_inputs(
                     base_dir=base_dir,
                     selector=str(target.selector),
-                    api_prompt_payload=reviewed_payload,
+                    api_prompt_payload=materialized_payload,
                     input_image=input_image,
                     last_frame_image=last_image,
                     reference_images=video_ref_paths,
                 )
-            _dispatch_reviewed_video_provider_call(
+            _dispatch_video_provider_call(
                 selector=str(target.selector),
                 tool=tool,
-                api_prompt_payload=reviewed_payload,
+                api_prompt_payload=materialized_payload,
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 input_image=provider_input_image,
@@ -10086,7 +9890,7 @@ def main() -> None:
                 )
             except FileNotFoundError as exc:
                 raise SystemExit(
-                    f"{target.selector}: could not extract the reviewed chained first frame"
+                    f"{target.selector}: could not extract the chained first frame"
                 ) from exc
 
     write_run_index(base_dir)

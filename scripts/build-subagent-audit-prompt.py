@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Build a pasteable prompt for a contextless subagent audit."""
+"""Build a pasteable prompt for inspecting stage grounding context.
+
+The filename remains for compatibility with older callers.  Production no
+longer launches a grounding audit agent or asks it to produce a passed report.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +19,6 @@ if str(REPO_ROOT) not in sys.path:
 from toc.grounding import (  # noqa: E402
     canonical_stage_name,
     detect_flow,
-    grounding_audit_relpath,
     grounding_readset_relpath,
     grounding_report_relpath,
     load_grounding_contract,
@@ -46,38 +49,33 @@ def build_subagent_audit_prompt(*, stage: str, run_dir: Path, flow: str | None =
 
     report_path = resolved_run_dir / grounding_report_relpath(canonical_stage)
     readset_path = resolved_run_dir / grounding_readset_relpath(canonical_stage)
-    audit_path = resolved_run_dir / grounding_audit_relpath(canonical_stage)
     state_path = resolved_run_dir / "state.txt"
 
     lines = [
-        "You are a contextless, audit-only verification subagent.",
+        "You are a contextless grounding-context reader.",
         "",
-        f"Audit the completed ToC stage `{canonical_stage}` in run dir `{resolved_run_dir}`.",
+        f"Inspect the ToC stage `{canonical_stage}` in run dir `{resolved_run_dir}`.",
         f"Flow: `{resolved_flow}`.",
         "",
         "Do not generate content and do not edit story, script, manifest, or other content artifacts.",
-        "You may refresh grounding audit artifacts by rerunning the helper command below.",
+        "Do not generate content or modify any artifact.",
         "Do not rely on parent conversation context.",
         "",
-        "If the helper command exits nonzero or any expected artifact is missing, report the missing items and stop; do not repair anything.",
-        "",
-        "First run this command:",
-        f"`python scripts/audit-stage-grounding.py --stage {canonical_stage} --run-dir {resolved_run_dir}`",
+        "If an expected artifact is missing, report the missing items and stop; do not repair anything.",
         "",
         "Then inspect these artifacts directly:",
         f"- `{report_path}`",
         f"- `{readset_path}`",
-        f"- `{audit_path}`",
         f"- `{state_path}`",
         "",
         "Use those files to verify:",
         "- the grounding report is `ready`",
         "- the readset is marked `verified_before_edit: true`",
         "- the readset covers the required global docs, stage docs, templates, and inputs",
-        "- the audit report is `passed`",
+        "- the report status is `ready`",
         "",
         "Return only a compact structured result with these keys:",
-        "status: passed|failed",
+        "status: ready|missing|failed",
         "missing_artifacts: [...]",
         "missing_reads: [...]",
         "notes: [...]",

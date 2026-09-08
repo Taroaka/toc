@@ -205,7 +205,7 @@ PROMPT_NONVISUAL_METADATA_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (
         re.compile(r"物語「[^」]+」の\s*scene\d+(?:[_\s-]*cut\d+)?", re.I),
-        "prompt uses story title plus internal scene id; use concrete wording such as `シンデレラの灰の台所`.",
+        "prompt uses story title plus internal scene id; use concrete wording such as `主人公の作業場`.",
     ),
     (
         re.compile(r"(?<![A-Za-z0-9_/.-])scene\d+(?:[_-]cut\d+)?(?![A-Za-z0-9_/.-])", re.I),
@@ -1166,10 +1166,10 @@ def disambiguate_declared_variant_alias_hits(
     """Drop generic aliases already covered by a declared, more-specific variant.
 
     Character state variants commonly share an identity token: a prompt that
-    says ``シンデレラ`` while declaring ``変身後のシンデレラ`` must not be
+    says ``主人公`` while declaring ``変装後の主人公`` must not be
     interpreted as an additional, undeclared base-character dependency.  A
-    genuinely distinct alias (for example ``王子``) remains unambiguous and is
-    preserved as a finding candidate.
+    genuinely distinct alias (for example ``案内役``) remains unambiguous and
+    is preserved as a finding candidate.
     """
 
     filtered: dict[str, set[str]] = {}

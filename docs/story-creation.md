@@ -39,8 +39,8 @@
 - `script.scenes[].time_of_day` は各 scene 固有の**一日の時間帯**を表す、非空の open string とする。`朝` / `昼` / `夕方` / `夜` に限定せず、`夜明け前` / `真夜中` / `薄暮` など、物語に必要な粒度を許容する
 - 新規 artifact は `story_metadata.scene_time_of_day_contract: required_v1` を持つ。この marker がある場合は全 scene の `time_of_day` を非空必須とし、歴史的時代の `story_metadata.time` の有無を新契約判定に使わない
 - `time_of_day` の authoring root は `story.md.script.scenes[]` とし、`story.md.script.scenes[].time_of_day -> script.md.scenes[].time_of_day -> video_manifest.md.scenes[].time_of_day` の一方向だけで projection する。scene/cut 画像の空の明るさ、自然光と人工光、影、色温度へ反映し、`story_metadata.time` と同じ値にしたり、相互に代用したりしない
-- 新規 artifact は `story_metadata.scene_time_of_day_visual_basis_contract: required_v1` も持ち、各 scene に derived review key `time_of_day_visual_basis` を置く。この値は `time_of_day` を光源・空/窓外の明るさ・影・色温度へ具体化した根拠であり、第二の時間帯 authoring root にはしない。同一値を script / manifest へ一方向 projection し、画像・動画・ナレーションの registry では用途を明示分類する
-- 一つの scene が複数場所の出来事を担う場合は `location.mode: sequence` と順序付き `location.sequence` を持ち、各場所を一度ずつ覆う `location.segments[]` を必須にする。各 segment は `location / responsibility / primary_subject / visible_action / required_visual_evidence / required_roles / motion_brief / motion_end_state` を持ち、必要なら `visible_character_state`（`posture / gaze / expression / hands / feet`）で静止画の人物状態を確定する。同じ場所で beat function ごとに主被写体や出来事が変わる場合だけ、任意の `primary_subject_by_function` / `beat_overrides` を使う。scene review は経路全体の因果を評価し、cut compiler は一つの segment と event beat だけを投影する。経路全体の `visualizable_action` を一枚の静止画や一つの clip に転記しない
+- 新規 artifact は `story_metadata.scene_time_of_day_visual_basis_contract: required_v1` も持ち、各 scene に derived `time_of_day_visual_basis` を置く。この値は `time_of_day` を光源・空/窓外の明るさ・影・色温度へ具体化した根拠であり、第二の時間帯 authoring root にはしない。同一値を script / manifest へ一方向 projection し、画像・動画・ナレーションの registry では用途を明示分類する
+- 一つの scene が複数場所の出来事を担う場合は `location.mode: sequence` と順序付き `location.sequence` を持ち、各場所を一度ずつ覆う `location.segments[]` を必須にする。各 segment は `location / responsibility / primary_subject / visible_action / required_visual_evidence / required_roles / motion_brief / motion_end_state` を持ち、必要なら `visible_character_state`（`posture / gaze / expression / hands / feet`）で静止画の人物状態を確定する。同じ場所で beat function ごとに主被写体や出来事が変わる場合だけ、任意の `primary_subject_by_function` / `beat_overrides` を使う。structural validator は経路全体の因果を確認し、cut compiler は一つの segment と event beat だけを投影する。経路全体の `visualizable_action` を一枚の静止画や一つの clip に転記しない
 - reusable character / object / location asset の基準画像 prompt には scene 固有の `time_of_day` を自動付与しない。時間帯差分が再利用対象として必要な場合だけ、明示した variant として設計する
 - 動画プロバイダが未指定なら、汎用ルールとして `docs/video-generation.md` を前提にしてよい
 - 動画プロバイダが `kling_3_0` / `kling_3_0_omni` と明示されている場合、後続 agent が参照する動画 prompt guide は
@@ -108,9 +108,49 @@ p100 に `scene_plan` や `scene_ids` が含まれていても参考扱いであ
 - `scene_prompt_payload` は scene 正本生成だけに使い、first-frame / motion / API prompt / camera / lens / framing / shot / 固定cut数を混ぜない。cut/image/video は `scene_event` と `scene_cut_coverage_plan` から逆算する
 - `concrete_event` は人物・場所・関係性・小道具・ルール・視覚証拠のうち、その物語で置換できない要素へ接地する。抽象表現は禁止しないが、抽象だけで終わる scene は不可
 - 具体ディテールは `story_function` を持つものに限る。装飾的な小物や背景描写を、source grounding なしに story fact のように扱わない
-- 原典・既知筋・ユーザー入力の重要出来事は `canonical_event_coverage_matrix` で scene / event beat へ割り当て、欠落・順序破壊・承認なしの発明を review gate にする
+- 原典・既知筋・ユーザー入力の重要出来事は `canonical_event_coverage_matrix` で scene / event beat へ割り当て、欠落・順序破壊・source reference のない発明を structural check で止める
 - 矛盾するソースを混成する場合は、hybridization gate でユーザー承認を得ている
 - 下流の prompt 設計で `1 clip = 1意図` に分けられる scene 意図が残っている
+
+### Story Author runtime
+
+新規 `story.md` の物語本文は、決定論関数で汎用 prose を連結して作らない。
+既定 `gpt-6-astra` の Story Architect と同じモデルの batched
+Scene Author が、source/readset を解決した `research.md` の完全な registry から
+structured JSON を生成する。それぞれ `TOC_STORY_AUTHOR_MODEL` /
+`TOC_SCENE_AUTHOR_MODEL` で差し替え可能。reasoning effort は共通 app-server runtime が各 turn に `high` を明示する。
+
+```text
+research.md full registry
+  -> Story Architect: scene ownership / order / handoff
+  -> batched Scene Author: all scenes, each with start / all beats / turn / end / reveal / preservation
+  -> deterministic validation
+  -> bounded key-level repair
+  -> atomic story.md publish
+```
+
+- Story Architect と Scene Author は production author として実行する。入力を省略したり
+  generic scaffold に置き換えたりしない
+- scene 数は canonical event と因果境界から決め、target duration だけで
+  semantic scene を複製しない
+- 文字数の固定下限ではなく、event / character / relationship / place /
+  world rule / passage / fact / conflict の source coverage と lifecycle 完全性を
+  done 条件にする
+- Python は input pack、ID検証、event順、handoff、reveal、repair対象key、
+  atomic publishを担当し、story proseをauthorしない
+- model出力がない、source IDが未知、eventが欠落/重複、handoffが不一致の場合、
+  generic scaffoldへfallbackせずfail-closeする
+
+### シーン間は「なぜなら」で接続する
+
+物語上の並びは最初の scene から順に設計する。現在の実行は、Architect が全体の順序・責務・handoff を決め、各 scene の本文を最大5件並列で生成し、計画順に組み立てる。前 scene の本文が完成してから次を生成する逐次実行ではない。
+
+- 最初の scene は初期状況を設定する。2番目以降は全て「この scene が起こる。なぜなら直前の scene で○○が起こったから」と、具体的な出来事・選択・発見・未解決の結果で説明する。「そしてそれから」という時間的な並びだけでは不足する。
+- Architect は各 `scene_plan[].causal_connection_from_previous` に「直前の原因 → その結果 → 今の行動や制約」を記述する。最初だけ `null` とする。単独の Scene Author にも plan と一緒に渡す。
+- Scene Author はその理由を冒頭 beat の `trigger`、`start_state`、`handoff_chain.incoming` に具体化する。前 scene の結果と今 scene の動機を対応させ、修復時も保持する。最終 scene に次 scene の原因は求めない。
+- 構成時に「直前の出来事を取り除いても、今の scene は同じ理由で起きるか」を問い、そうなら根拠に沿って接続を練り直す。原典の出来事や順序を勝手に変えない。
+- 原典が因果を支えない場合、時間的・主題的な隣接を因果と偽らず、接続欄と `grounding_note` に根拠不足を明示する。事実として原因を創作しない。
+- これは構成・執筆時の必須指示であり、ナレーションに毎回「なぜなら」を挿入する指定ではない。因果の意味的な強さを文字列検査で保証するものでも、新しい評価 stage でもない。
 
 ### Source vs creative boundary
 
@@ -126,33 +166,31 @@ p100 に `scene_plan` や `scene_ids` が含まれていても参考扱いであ
 - 複数ソースの矛盾を同一シーンや設定として混成する必要がある
 - 物語価値を上げるために research にない事実主張を追加したくなる
 
-### Subagent use
+### Author workers
 
-- story candidate の複数案出し、source-vs-creative audit、grounding audit は contextless subagent に任せてよい
-- subagent には `research.md`、stage readset、出力先 scratch path、評価目的だけを渡す
-- `story.md` の確定、hybridization 承認確認、`subagent_trace` の採否理由は担当 `p200` L2 supervisor が統合する
-- p230 `story_review.md` では、subagent が候補スコアリング、20 scene の厚み、根拠境界、後続工程への接続性を評価する
-- p230 は p210 grounding audit と分離する。p210 は前提監査、p230 は成果物レビューである
+- Story Architect は source registry から scene ownership、order、handoff を作る。
+- Scene Author は担当 scene の source slice から start state、event beats、turn、end state、reveal、preservation を作る。
+- worker には `research.md`、stage readset、担当範囲、出力先 scratch path だけを渡し、canonical `story.md` は p200 owner が統合する。
+- 複数候補の選択は任意の user choice として保存できる。候補の採否を品質 score や別の production worker に委ねない。
 
 ---
 
 ## 創造と選択（重要）
 
 物語価値の中心は、登場人物と物語世界（世界観）が生む **多様性**にある。
-台本は「既に流行しているナラティブを映像化する」ことが多いため、素材は高得点になりやすい。
+台本は「既に流行しているナラティブを映像化する」ことが多いため、素材の選択肢を広く持つ。
 
 そのため本プロジェクトでは、次を優先する:
 
 - **創造（Creation）**: 解釈/視点/キャラクター/世界観の候補を複数出す（多様性を増やす）
-- **選択（Selection）**: スコア（視聴維持/感情/映像化/分かりやすさ/一貫性）が最も高い案を採る
+- **選択（Selection）**: source grounding、scene coverage、映像化可能性を確認し、ユーザーが採用案を選ぶ
 - **フレームワークは道具**: 英雄の旅などは「当てはめる公式」ではなく、見落とし防止・品質改善の手段
 
 ### 矛盾する記述とハイブリッド（混成）
 
 複数文献に矛盾がある場合は、どちらかを選ぶだけでなく「分離して併記」「演出上の見せ方を変える」なども選択肢になる。
 
-ただし、矛盾する複数ソースの要素を **同一シーン/設定として混成**する（ハイブリッド化する）場合は破綻リスクが高い。
-スコアのために混成が必要なら、確定前に必ずユーザーへ承認を求める（衝突点・混ぜたい要素・スコア理由・リスクと安全策を提示し、Yes/No を取る）。
+ただし、矛盾する複数ソースの要素を **同一シーン/設定として混成**する（ハイブリッド化する）場合は、確定前に必ずユーザーへ明示許可を求める（衝突点・混ぜたい要素・リスクと安全策を提示し、Yes/No を取る）。
 
 ---
 
@@ -779,24 +817,14 @@ engagement_design:
       position_percent: 95
       description: "最初のシーンに視覚的に戻る"
 
-# === 品質スコア ===
-quality_scores:
-  engagement_potential: 0.0-1.0
-  information_accuracy: 0.0-1.0
-  emotional_impact: 0.0-1.0
-  narrative_coherence: 0.0-1.0
-  selection_quality: 0.0-1.0
-  # フレームワークは任意の“道具”。当てはめのスコアで合否を出さない。
-  framework_notes:
-    hero_journey_fit: "high|medium|low|null"
-    notes: "string"
-
-  checklist:
-    strong_opening: true
-    # 物語パターンによっては名前/形が変わる（英雄の旅に限らない）
-    ordeal_present: true
-    transformation_clear: true
-    facts_verified: true
+# === Authoring checks (structural only) ===
+authoring_checks:
+  strong_opening: true
+  ordeal_present: true
+  transformation_clear: true
+  facts_have_source_refs: true
+  scene_ids_unique: true
+  event_order_valid: true
 
 # === ソース追跡 ===
 sources:
@@ -876,14 +904,14 @@ handoff_to_p400_p500_p600_p700:
     must_preserve: ["string"]
     must_not_do: ["string"]
   p500_asset:
-    must_create_or_review: ["string"]
-    review_focus: ["string"]
+    must_create: ["string"]
+    authoring_focus: ["string"]
   p600_scene_implementation:
     must_materialize: ["string"]
-    review_focus: ["string"]
+    authoring_focus: ["string"]
   p700_narration:
     must_preserve: ["string"]
-    review_focus: ["string"]
+    authoring_focus: ["string"]
 
 value_parts:
   - part_id: "midroll_visual_payoff_01"
@@ -975,21 +1003,25 @@ constraints:
 
 既に完成し評価されている物語を映像化する場合、`story_metadata.adaptation_value_contract: required_v1` と `adaptation_source_contract` を必須にする。ここでは新しい筋を発明せず、原作の `core_values[].value_id`、失ってはいけない event / meaning、iconic moment、禁止する価値の歪曲を固定する。完全な key 定義と authoring 例は [既存物語の価値増幅契約](adaptation-value-amplification.md) および `workflow/story-template.yaml` を正本とする。
 
-## Scene acceptance の前倒し（contract-first）
+## Scene authoring contract（contract-first）
 
-scene-set を作る agent は、会話履歴や前回の reviewer transcript を前提にしてはならない。作成前に、stage grounding readset から次の順序で契約を読む。
+scene-set author は会話履歴や前回の出力を前提にせず、stage readset から次の順序で契約を読む。
 
 ```text
-review済み research / story / visual_value
+research / story / visual_value source
   -> scene_set_authoring_contract_v1 を計画
   -> contract を validate / freeze
-  -> sceneごとの contract slice を authoring agent へ投影
+  -> scene ごとの contract slice を authoring agent へ投影
   -> scene draft を出力
   -> deterministic authoring_preflight
-  -> 全 scene pass 後に cut / manifest を materialize
+  -> cut / manifest を materialize
 ```
 
-`scene_set_authoring_contract_v1` は、scene prose の後付け説明ではなく、全 scene の正典イベント所有、beat 順、役割、reveal、時刻・場所の遷移、handoff、source-specific evidence を先に固定する machine-readable artifact である。scene author は契約を変更せず、`event_id`、`beat_id`、`evidence_id`、`role_id`、`character_id`、`handoff_anchor_id`、`transition_cue_id`、`reveal_transition_id` を exact reference として出力する。自由文だけで同じ事実を表した場合、preflight の根拠としては扱わない。
+`scene_set_authoring_contract_v1` は、scene prose の後付け説明ではなく、全 scene のイベント所有、
+beat 順、役割、reveal、時刻・場所の遷移、handoff、source evidence を先に固定する machine-readable
+artifact である。scene author は契約を変更せず、`event_id`、`beat_id`、`evidence_id`、`role_id`、
+`character_id`、`handoff_anchor_id`、`transition_cue_id`、`reveal_transition_id` を exact reference
+として出力する。自由文だけで同じ事実を表した場合、preflight の根拠としては扱わない。
 
 ### 作成前に凍結する項目
 
@@ -1000,9 +1032,10 @@ review済み research / story / visual_value
 - time-of-day / location route と discontinuity に必要な transition cue
 - source artifact digest、pointer、expected ID による grounding readset
 
-scene author の prompt には、その scene の slice、前後 handoff、criterion registry の authoring instruction だけを渡す。全編の自己採点や前回会話の要約を渡して合格扱いにしない。authoring 後の `authoring_preflight` は追加 provider turnを必要としない決定論的チェックであり、canonical event の欠落・重複・順序破壊、reveal rollback、required role closure、handoff 不一致、transition cue 欠落、source evidence 欠落を cut 作成前に停止する。
-
-causal proof の説得力、story-specificity、価値増幅など意味判断を要する criterion は prompt に明示するが、author の自己宣言で合格にしない。最終 contextless reviewer は frozen contract と canonical artifact を読み、同じ criterion ID を独立に再評価する。最終 reviewer が deterministic-owned criterion を見つけた場合は `shift_left_escape` として記録し、reviewerの指摘をそのまま producer repair に渡さず、validator / fixture の欠陥へ戻す。
+scene author の prompt には、その scene の slice、前後 handoff、authoring instructions だけを渡す。
+authoring 後の `authoring_preflight` は追加 provider turnを必要としない決定論的チェックであり、
+canonical event の欠落・重複・順序破壊、reveal rollback、required role closure、handoff 不一致、
+transition cue 欠落、source evidence 欠落を cut 作成前に停止する。
 
 既知の legacy artifact は `scene_set_authoring_contract_v1` marker がなくても読み取り互換経路を持つ。ただし marker がある artifact の部分契約、unsupported version、digest mismatch、未知 ID は fail-close とし、legacy 互換を理由に新契約の欠落を隠してはならない。
 

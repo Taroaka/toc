@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from toc.grounding import resolve_review_policy, review_policy_state_entries, run_stage_grounding
+from toc.grounding import run_stage_grounding
 from toc.harness import append_state_snapshot, now_iso
 from toc.cut_design_logging import scene_design_log_relpath, write_scene_design_placeholder
 
@@ -72,10 +72,13 @@ def main() -> None:
     parser.add_argument("--base", default="output")
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--force", action="store_true")
-    parser.add_argument("--review-policy", choices=["strict", "drafts"], default="strict")
-    parser.add_argument("--story-review", choices=["required", "optional"], default=None)
-    parser.add_argument("--image-review", choices=["required", "optional"], default=None)
-    parser.add_argument("--narration-review", choices=["required", "optional"], default=None)
+    # Kept as hidden compatibility flags for older callers.  Production runs
+    # no longer have a reviewer policy, so these values are intentionally
+    # ignored and never persisted to run state.
+    parser.add_argument("--review-policy", choices=["strict", "drafts"], default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--story-review", choices=["required", "optional"], default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--image-review", choices=["required", "optional"], default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--narration-review", choices=["required", "optional"], default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     topic_raw = args.topic
@@ -83,22 +86,12 @@ def main() -> None:
     ts = args.timestamp or default_timestamp()
     run_dir = Path(args.run_dir) if args.run_dir else (Path(args.base) / f"{topic_slug}_{ts}")
     run_dir.mkdir(parents=True, exist_ok=True)
-    review_policy = resolve_review_policy(
-        preset=args.review_policy,
-        story_review=args.story_review,
-        image_review=args.image_review,
-        narration_review=args.narration_review,
-    )
-
     append_state_snapshot(
         run_dir / "state.txt",
         {
             "topic": topic_raw,
             "status": "INIT",
             "runtime.stage": "toc_run_scaffold",
-            "gate.video_review": "required",
-            "runtime.review_policy": args.review_policy,
-            **review_policy_state_entries(review_policy),
         },
     )
 

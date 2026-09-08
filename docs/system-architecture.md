@@ -1,460 +1,154 @@
 # System Architecture (MVP)
 
-This document captures the architecture decisions for the MVP and the path to
-future cloud deployment. It corresponds to todo item 1 in `todo.txt`.
+This document defines the local-first production architecture for the ToC pipeline.
 
-## Scope and assumptions
+## Scope and decisions
 
-- Orchestration uses LangGraph.
-- MVP is single-user, local-first.
-- Input: story title. Output: artifacts under `output/<topic>_<timestamp>/`.
-- External model providers are optional; mock providers are acceptable for MVP.
-
-## Decision summary
-
-| Area | Decision | Rationale |
-| --- | --- | --- |
-| Deployment mode | Local-only MVP | Fast iteration, zero infra |
-| Execution model | L1 Run Orchestrator + L2 P-Bucket Supervisors + L3 task/review agents | Keeps the run gate-driven while moving long stage context out of the L1 context |
-| Storage | Filesystem object store + PostgreSQL metadata DB | Durable metadata |
-| Job queue | In-process async queue | Simple and sufficient for MVP |
-| State management | Append-only delta-event `state.txt` + derived `state.current.json` (no DB dependency) | Auditable history and bounded current-state reads |
-| Providers | LLM via LangChain; image=Codex built-in image generation (`codex_builtin_image` / gpt-image-2); video=Kling 3.0 (default) / Seedance (alt); TTS=ElevenLabs（Veo is disabled for safety） | Avoid vendor lock-in |
-| API boundary | Codex-primary assistant command (Claude Code slash command compatible) | Keep surface area small |
-| Review policy | Decide at run start and persist `review_mode` in `state.txt` and `create_input.json` | Stage grounding and orchestrators must share one explicit approval contract |
-| Authoring review slots | Maximum-5-round evaluator-improvement loop with 5 critics + 1 aggregator per round | Keep authoring quality gates reproducible inside the owning p-bucket supervisor |
-| p720 narration review | Deterministic arc/cut validation followed by five independent hash-bound app-server semantic critics | Separate reproducible contract failures from whole-story listening judgments |
-| Codex app-server runtime | All server/CLI app-server callers use the shared runtime contract and transport preflight | Prevent DNS/WebSocket/HTTP fallback failures from being mistaken for artifact or semantic QA failures |
+- The MVP runs on one local node and writes run artifacts under
+  `output/<topic>_<timestamp>/`.
+- LangGraph or an equivalent orchestrator may coordinate the stages. The contract is the
+  artifact and state boundary, not a particular graph library.
+- Filesystem storage is the artifact store. PostgreSQL is optional metadata storage.
+- Provider adapters are replaceable: Codex built-in image generation, Kling/Seedance video,
+  ElevenLabs TTS, and an LLM provider are the current defaults.
+- State is an append-only `state.txt` log with derived current and navigation projections.
+- Production is direct authoring → ordinary structural validation → generation. No production
+  critic, evaluator, aggregator, score, or approval certificate is part of the execution path.
 
 ## Component diagram
 
 ```mermaid
 graph TD
-  AC[Assistant Command: Codex primary / Claude compatible] --> ORCH[LangGraph Orchestrator]
-  ORCH --> L1[L1 Run Orchestrator]
-  L1 --> L2[P-Bucket Supervisor p100-p900]
-  L2 --> L3[Task / Review Agents]
-  L3 --> WORKERS[Workers]
-  WORKERS --> PROVIDERS[Image/Video/TTS/LLM Providers]
-  ORCH --> META[Metadata DB (PostgreSQL)]
-  ORCH --> STATE[State File (state.txt)]
-  PROVIDERS --> OBJ[Object Store (filesystem)]
-  OBJ --> ARTIFACTS[Artifacts: research/story/script/video]
+  AC[Assistant command] --> ORCH[Run orchestrator]
+  ORCH --> L1[L1 run controller]
+  L1 --> L2[L2 bucket owner]
+  L2 --> AUTHOR[Stage authors]
+  AUTHOR --> CHECK[Structural validators]
+  CHECK --> PROVIDERS[Image / video / TTS providers]
+  PROVIDERS --> OUTPUT[Run artifacts and media]
+  ORCH --> STATE[Append-only state.txt]
+  ORCH --> META[Optional PostgreSQL metadata]
 ```
-
-## Deployment mode
-
-- MVP: local-only, Codex 主軸の assistant command で起動（Claude Code slash command 互換も維持）。
-- Future: containerized deployment with dev/staging/prod environments.
 
 ## Execution model
 
-- Single-node orchestrator runs the LangGraph, but run authorship is split by p-bucket.
-- L1 Run Orchestrator owns bucket order, stop target, human approval boundaries, and bucket completion validation.
-- L2 P-Bucket Supervisor owns one `p100` bucket at a time and is the single writer for that bucket's canonical artifacts, `state.txt` slot updates, and `p000_index.md` refresh.
-- L3 task/review agents run under the active L2 supervisor and write only isolated reports, scratch outputs, review artifacts, or generated media requested by the supervisor.
-- Long-running tasks executed via in-process worker pool (async + process/thread).
-- Concurrency default: 2 workers; configurable via `config/system.yaml`.
-- Parallelism policy (MVP):
-  - Core flow is sequential and gate-driven.
-  - Production order is fixed as:
-    - `RESEARCH -> STORY -> VISUAL_PLANNING -> SCRIPT -> ASSET -> SCENE_IMPLEMENTATION -> NARRATION -> VIDEO -> RENDER_QA`
-  - L1 never reads the body of bucket output artifacts to decide the next bucket. It checks `logs/orchestration/pXXX.supervisor_result.json`, required artifact existence, and terminal slot state only.
-  - Parallelism is allowed only inside a stage whose upstream gate is already complete.
-    - `ASSET`: recurring still generation can run in parallel only after request-bound image provenance is available.
-    - `SCENE_IMPLEMENTATION`: image generation can fan out per cut after manifest is `production` and per-request image provenance is authoritative.
-    - `VIDEO`: clip generation can fan out after still inputs and duration gates are complete.
-  - Authoring-after review slots use bounded review parallelism:
-    - each round launches 5 independent critic agents against the same artifact/readset
-    - 1 aggregator agent merges critic findings into the round gate result
-    - maximum 5 rounds in `standard`; unresolved findings after round 5 require human review or explicit override. An explicitly preapproved frontend create emits a deterministic preapproval report instead of launching these external reviewer turns, while deterministic failures remain blocking.
-    - p720は実行契約を二層化する。`run-p720-narration-l3.py`の互換`critic_*.md`はdeterministic findingの分類であり、
-      独立agent判定ではない。その後の`run-p720-narration-semantic.py`だけが、凍結済み全編snapshotを別threadの5 criticへ渡す
+The canonical order is:
 
-## Storage strategy
+```text
+RESEARCH → STORY → VISUAL_PLANNING → SCRIPT → ASSET →
+SCENE_IMPLEMENTATION → NARRATION → VIDEO → RENDER → QA
+```
 
-- Object storage (artifacts): filesystem at `output/`.
-- Metadata DB: PostgreSQL (local or managed).
-- Paths are configured in `config/system.yaml`.
+L1 resolves bucket order and stop targets. It checks the L2 result, required artifact paths,
+ordinary structural validation, and terminal slot state. L1 does not interpret prose quality.
 
-## Job queue / executor
+L2 owns one p100 bucket at a time and is the single writer for that bucket's canonical artifacts,
+state updates, and navigation index. Isolated authors may write candidate or temporary files;
+the L2 owner chooses the input to materialize and commits the canonical artifact.
 
-- In-process queue with worker pool.
-- Tasks are stage-scoped (RESEARCH, STORY, SCRIPT, NARRATION, ASSET, SCENE_IMPLEMENTATION, VIDEO, RENDER, QA).
-- Retry logic is handled at the LangGraph edge level (future task).
+Parallel workers are allowed within a stage after its input contract is complete. Asset, image,
+and video fan-out is bounded and every result is bound to its request, item, input hashes,
+destination, and provider output. A retry targets the smallest stale or failed item.
 
-## Codex app-server runtime boundary
+## Source context and validation
 
-- `server/codex_app_server.py` is the single runtime boundary for Codex app-server usage.
-- Callers do not instantiate per-feature app-server behavior directly; they use the shared client factory so `TOC_CODEX_BIN`, `CODEX_HOME`, generated image root, proxy env, model selection, and diagnostics are resolved the same way for frontend create, semantic QA, prompt repair, image generation, and chat.
-- The shared boundary requires Codex CLI `0.144.0` or newer by default and records the detected and required versions in runtime diagnostics. `TOC_CODEX_APP_SERVER_MIN_VERSION` is an explicit compatibility override, not a silent downgrade path.
-- Every app-server thread explicitly defaults to `gpt-5.6-sol`, including frontend chat, semantic reviewers, producer repair, prompt repair, and built-in image generation. `TOC_CODEX_APP_SERVER_MODEL` is the only supported runtime override so behavior does not depend on a developer's global Codex model setting.
-- Frontend create does not run the `toc-immersive-runner` skill through app-server as the main p680 orchestration path. The server process launches `scripts/toc-immersive-frontend-run.py` directly, and that helper uses the shared runtime boundary only at the inner semantic/image operations. This avoids nested app-server sandboxes with different writable homes, generated-image roots, and restart diagnostics.
-- New scene-image requests use `scene_event -> cut_contract -> first_frame_visual_plan -> DrawablePromptIR -> image_api_prompt_v2`. The compiler emits only the fragment groups required by that cut; design keys, event ids, motion briefs, validation metadata, and opaque asset ids remain in manifest/debug traces and are never concatenated into the provider prompt. The provider-facing text is exactly `image_generation.api_prompt_payload.prompt`.
-- Video requests use `story / scene / cut design -> video_prompt_projection_registry_v5 -> video_prompt_ir_v2 -> conditional_video_prompt_compiler_v5 -> video_api_prompt_v1`. The provider-facing motion text is exactly the reviewed `video_generation.api_prompt_payload.prompt`. Exact `review_only_sources` values remain in the digest/reviewer trace without surfacing in provider prose; ordered `video_input_contract.reference_roles` remain bound through compiler, payload, IR, and execution; blocking motion quality issues stop approval. Execution also fails closed when prompt hash, source digest, provider settings, frame/reference bytes, or reference-role bindings drift from the current design.
-- `image_generation_requests.md` is a review projection. `image_generation_request_snapshot.json` (or the asset equivalent) is the versioned execution snapshot and freezes the prompt, prompt hash, compiler/source digest, destination, ordered references, reference hashes, request digest, and request revision. Send paths fail closed on Markdown/snapshot/source drift or unresolved reference hashes; they do not silently rebuild a different prompt.
-- Built-in image generation uses request-bound provenance as the canonical production route. `generation_job_id + item_id + turn_id + prompt_sha256 + reference_sha256s + savedPath + destination` must match before an image is copied to the run, and p500/p600 can use bounded worker parallelism once that provenance is authoritative. `TOC_IMAGE_GEN_PARALLELISM` defaults to 6 for this route. The generated-images fallback can complete before `turn/completed` and is discovered from the shared generated-image directory; running multiple fallback-backed image turns concurrently can assign a finished image to the wrong request. Therefore fallback is not canonical and is available only as explicit legacy/recovery mode with `TOC_IMAGE_GEN_PROVENANCE_POLICY=serial_fallback`, where effective image parallelism is clamped to 1. Parallel semantic review is independent of this image provenance policy. The default per-image deadline is intentionally long (`TOC_IMAGE_GEN_ITEM_TIMEOUT_SECONDS=900` unless overridden) because app-server image turns can legitimately take more than 300 seconds; treating slow normal generation as timeout causes needless retry churn and can obscure provenance failures.
-- Request-bound success additionally requires exactly one distinct app-server `imageGeneration` item id. The imported output is written by validated atomic replace, and an existing file is reused only when its bytes and the complete snapshot/provenance tuple still match. A failed regeneration leaves the previous file in place. Resume preserves prior outputs, regenerates only stale/missing items, and a per-run create/resume lease prevents two jobs from mutating the same run concurrently.
-- Image workers share a cross-process file-backed slot pool (`TOC_IMAGE_GEN_GLOBAL_PARALLELISM`) so separate server/CLI processes honor one workspace-wide ceiling. Legacy generated-images fallback uses a separate single slot. Per-destination locks protect direct CLI generation from duplicate concurrent writes.
-- `image_prompt` semantic QA is materialized and executed as deterministic per-scene shards (cut entries plus the scene composite). Selector coverage must be exact once—zero, missing, duplicate, unexpected, or collection-gap coverage fails closed. Shards run with bounded `TOC_IMAGE_PROMPT_REVIEW_CONCURRENCY`; transport retry is limited to the failed shard, and only that scene's entries become blocked while passed scenes remain usable.
-- `scene_set` semantic QA is executed as deterministic per-scene shards instead of one all-scenes turn. Each shard receives one full compact scene-set projection plus an ordered whole-story index for causal order, reveal ownership, location/daypart continuity, and handoff checks. `TOC_SCENE_SET_REVIEW_CONCURRENCY` defaults to 6; transport retry and the one bounded malformed-output retry are limited to failed shards, so a valid shard is not rerun just because another reviewer response violated the output contract. The canonical aggregate remains bound to the complete stage scope and fails closed on any missing, duplicate, reordered, unexpected, malformed, semantic-failed, or transport-failed entry. A shard also records the canonical generation id, collection/input/scope hashes, and target entry projection hash; provider return and aggregate publication revalidate that generation under a per-run cross-process stage lock, so verdicts from different collection generations cannot be combined.
-- Startup preflight checks the Codex binary version, writable effective `CODEX_HOME`, `chatgpt.com` DNS, and HTTPS reachability for `backend-api/codex/responses`. The local server restart helper additionally runs a short no-op turn, because `thread/start` can pass while the later turn transport still fails.
-- Silent fallback to a temporary `toc-codex-home` is forbidden by default for production server paths. If fallback is intentionally needed, it must be enabled explicitly so diagnostics show `fallbackUsed=true`.
-- Semantic QA / producer repair app-server turns use a no-progress watchdog, not a fixed total work deadline. Codex app-server streams turn notifications while agent work is active, so semantic orchestration treats turn notifications, semantic report writes, producer report writes, and source artifact changes as progress. It keeps waiting while progress is observable, and records `review.semantic.<stage>.watchdog.status=no_progress_timeout` only when progress stops for the configured interval.
-- Transport/runtime setup failure is a runtime block, not a semantic review result. A missing semantic report caused by app-server transport failure records `review.semantic.<stage>.transport.status=failed` and must not invoke the producer repair loop. If transport fails during producer repair before a completed producer report exists, the repair loop records `blocked_transport` instead of semantic failure. If the producer has already written `status: done`, the orchestrator accepts the report and immediately runs the next semantic review.
-- p720 narration semantic review uses five isolated app-server threads over one immutable `narration_text_set_hash` and exact
-  `semantic_review_input_hash`, with roles `retention_hook`,
-  `narrator_voice_persona`, `causal_information_rhythm`, `audio_visual_distance`, and `payoff_ending`. Each response is strict JSON.
-  The second hash also covers critic-visible visual beats, contracts, prompts, and timing. Threads use isolated cwd, scrubbed sensitive
-  environment, tool-disabled config, developer-instruction/data separation, and structured output; any tool-like transcript event fails closed.
-  Disabled runtime, execution or parse failure, incomplete/duplicate critic set, artifact mismatch, missing/hash-mismatched verdict,
-  superseded review id, and a manifest hash race are fail-closed conditions; none is converted to a pass.
-  `execution_failed`は作品内容へのsemantic判定ではなく運用上のblocking verdictであり、再実行前提の
-  `semantic_critic_review.status=changes_requested`としてgateだけを閉じる。
+`workflow/stage-grounding.yaml` describes required documents, templates, and inputs. The stage
+resolver prepares the source/readset; authors read it in the order
+`global_docs → stage_docs → templates → inputs`. Readsets provide authoring context and are not
+quality certificates.
 
-## Frontend create review mode
+Every author validates its output before handing it to the next stage:
 
-Frontend の新規 ToC 作成は、UI/API で選んだ `review_mode` を
-`logs/orchestration/create_input.json`（`toc.create_input.v1`）へ保存し、run 中の
-review policy と resume の入力 identity に束縛する。許可値は `standard|preapproved`、既定値は
-`standard` である。`runtime.review_mode` はこの JSON と一致し、`runtime.review_policy` は
-`standard -> frontend`、`preapproved -> preapproved` と投影する。欠落・不一致・作成後の
-暗黙変更は fail-close とする。
+- YAML/JSON/Markdown shape and required types
+- unique IDs and valid source, selector, path, and handoff references
+- scene/cut/event ordering and manifest consistency
+- request snapshot, prompt/input hashes, provider settings, and reference bindings
+- output existence, file type, decode, duration, and audio/video stream compatibility
 
-- `standard`: external semantic reviewer turn と frontend human review turn を実行する。required
-  gate は `required`、未承認の p680 は `slot.p680.status=awaiting_approval` /
-  `review.image.status=pending` のまま止める。
-- `preapproved`: ユーザーが frontend create で明示した場合だけ有効。`research`, `story`,
-  `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt` の external
-  semantic reviewer turn と frontend human reviewer turn を省略する。各 stage の
-  canonical review pack（`collection` / `scope` / `prompt` / `report`）は作成し、source/input
-  digest に束縛した `deterministic_preapproval` report と provenance state を残す。
-  deterministic schema、grounding、参照整合、request snapshot、provider provenance、生成
-  output の存在・decode・fixed-slot completeness は必ず検証し、blocking diagnostics で
-  fail-close する。
+These checks are ordinary data and media checks. They do not compute a quality score or require
+an external verdict.
 
-preapproved の media generation は、検証前に approved とみなしてはならない。p680 terminal
-validation 後に限り、`slot.p680.status=done`、`review.image.status=approved`、
-`gate.image_review=skipped` を記録する（p670 の semantic image QA slot も `skipped`）。
-foundation review は同じ mode で `review.research.status=approved` /
-`review.story.status=approved`、対応 gate は `skipped` とする。これらの `skipped` は reviewer
-turn の省略を表すだけで、pack/digest、deterministic validator、request-bound provenance、
-generated-output validation の省略を意味しない。
+## Runtime boundary
 
-## Task granularity (MVP)
+`server/codex_app_server.py` is the shared boundary for app-server calls. It resolves the binary,
+writable runtime home, output root, model, network settings, and diagnostics for CLI, server, and
+frontend create. Transport/setup failure remains a runtime error and is never converted into a
+content result. Built-in image output is copied only when its request-bound provenance tuple
+matches the current snapshot.
 
-- Base unit is a stage task aligned to LangGraph nodes:
-  - `RESEARCH` → produces `research.md`
-  - `STORY` → produces `story.md`
-  - `SCRIPT` → produces `script.md` and a production skeleton `video_manifest.md`
-  - `ASSET` → produces reusable recurring still assets
-  - `SCENE_IMPLEMENTATION` → produces the production manifest and scene still outputs
-  - `NARRATION` → produces reviewed TTS audio and confirmed runtime duration
-  - `VIDEO` → produces motion clips
-  - `RENDER` → produces `video.mp4`
-  - `QA` → produces final review outputs
-- Scene-level tasks exist inside `SCRIPT`, `SCENE_IMPLEMENTATION`, and `VIDEO`:
-  - `SCRIPT` subtask: draft one scene and narration beat from the approved story plan.
-  - `SCENE_IMPLEMENTATION` subtask: implement one approved scene/cut into production prompt fields.
-  - `VIDEO` subtask: generate motion clips for an approved scene/cut.
-- Asset-level tasks are split by stage:
-  - `ASSET`: character/object/location reference stills.
-  - `SCENE_IMPLEMENTATION`: cut still generation.
-  - `NARRATION`: TTS generation and duration fit checks.
-  - `VIDEO`: clip generation.
-- Granularity principles:
-  - Keep core flow sequential and gate-driven.
-  - Only split tasks where outputs are independently verifiable.
-  - Retries should target the smallest failing unit (scene or asset), not the whole job.
+The frontend create route invokes the same production helper as the command path. It records the
+source bytes, source hash, topic, experience, target duration, and request identity before
+authoring. It does not create a shortcut artifact or bypass structural and provenance checks.
 
 ## State management
 
-- 状態は `output/<topic>_<timestamp>/state.txt` に **atomic delta event** として追記する。同じkeyの最後の値がcurrent stateになる。
-- `state.current.json` はcanonical event headに束縛したderived materialized viewであり、削除・stale時は`state.txt`から再構築する。`run_status.json`と`p000_index.md`もderived projectionであり第二の正本にしない。
-- state writerはshared store APIに統一し、read-current / merge / append / current-view publishを同じlock内で行う。完全state snapshotの反復追記と、独自writerによる直接appendは禁止する。
-- 最新ブロックが現在状態、過去ブロックをコピーして擬似的にロールバック可能。
-- run 進行は固定の `p100` 〜 `p900` slot contract で管理する。
-  - slot の意味は全 story で共通で、story ごとの差分は `slot.pXXX.status` / `slot.pXXX.requirement` / `slot.pXXX.skip_reason` / `slot.pXXX.note` で表す。
-  - `p000_index.md` はこの固定 contract を run progress の source of truth として要約する。
-- review 要否も run 開始時に固定する。
-  - `runtime.review_mode=standard|preapproved` は `logs/orchestration/create_input.json` の `review_mode` と一致させる。
-  - `runtime.review_policy=frontend|preapproved` は mode から導出する。
-  - `review.policy.story=required|optional|skipped`
-  - `review.policy.image=required|optional|skipped`
-  - `review.policy.narration=required|optional|skipped`
-- `standard`（既定）は external semantic reviewer と frontend human review を通常どおり実行し、required gate を自動承認しない。`preapproved` は frontend create で明示された場合だけ review gate を `skipped` にできるが、deterministic validation を省略する policy ではない。
-- stage grounding は上記 policy を読んで、承認を必須にするかどうかを決める。`skipped` は暗黙 fallback ではなく、create input に束縛された preapproved mode のみで使う。
-- create API の `target_duration_seconds` は省略時 `300`、許容範囲は整数 `300..1200` とする。run 内では `T` と表し、frontend、backend、runner、state、research、story、script、manifest で同じ値を引き継ぐ。
-  - duration planning lower bounds は scene=`ceil(T/40)`、narration=`ceil(T*0.70)` 秒、effective runtime=`T*0.80` とする。cut floor は duration から導かず、各 scene の distinct authored semantic obligation / required event beat から別に導く。
-  - `standard` の research と story は、それぞれ実 Codex app-server semantic review/repair を通し、全 criterion の artifact-local evidence を持つ passed report がある場合だけ次工程へ進む。明示 preapproved create は external turn の代わりに digest-bound `deterministic_preapproval` report を作り、同じ deterministic checks を通す。story review 後は scene 数、scene target 合計、narration target 合計を再検証してから cut を作る。
-- `p740` の audio runtime は、TTS 実行後に ffprobe 等で測った spoken audio と、完全な `silence_contract` を持つ intentional silence の明示尺を同一 audio timeline 上で合計する。
-  - video timeline は scene に `render_units[]` があれば render unit 合計を正本とし、その source cut の video duration は足さない。render unit がなければ cut video duration を使う。
-  - audio timeline と video timeline は並列 layer であり加算しない。pre-render effective duration は完全な両 timeline の短い方とし、`0.8*T` 以上なら合格する。上限は設けない。
-  - 未達または測定不完全なら scene / narration stretch review prompt を生成して停止し、video generation へは進めない。
-- final render は完成 media の ffprobe 実測を `review.final.duration_fit.*` に残し、同じ `0.8*T` lower-bound-only rule を通った場合だけ final QA へ進む。
-- production order は asset/image-first を採用する。
-  - `script` で scene / narration draft を確定したあと、`video_manifest.md` はまず `manifest_phase: skeleton` で materialize する。
-  - その後に `asset -> scene implementation / image -> narration -> video -> render -> qa` の順で進める。
-  - 理由は、asset と scene image を先に確定し、実際の visual に合わせて narration と video を仕上げるため。
-- したがって「script draft までは人承認なしで進める」のような運用差分は、prompt の解釈ではなく run 初期 state で表現する。
-- チャット起点の stage 実行も同じ state / grounding 契約の上で扱う。
-  - `resolve-stage-grounding.py` で contract を解決
-  - `audit-stage-grounding.py` で readset を監査
-  - `logs/grounding/<stage>.readset.json` を「読むべき対象の正本」とする
-  - これにより slash command とチャット実行の前提を揃える
-- authoring 直後の review slot は最大 1 round の evaluator-improvement loop とする。
-  - 1 round は 5 critic agents + 1 aggregator で構成する
-  - critic / aggregator は `state.txt`、`p000_index.md`、canonical artifact を直接編集しない
-  - 担当 L2 P-Bucket Supervisor が aggregator report を読み、採用する修正だけを担当 bucket の canonical artifact に反映する
-  - round 5 後も `changes_requested` の場合は `eval.<stage>.loop.status=changes_requested` で停止し、人間 review / override を待つ
+`output/<run>/state.txt` is append-only. A transaction appends one delta event containing the
+changed keys; the last committed value is current. `state.current.json`, `run_status.json`, and
+`p000_index.md` are derived projections and can be rebuilt from the log. Shared state writers use
+the repository lock/store API.
 
-## Run-Level Supervisor Architecture
+The state records stage and slot status, artifact paths, request revisions, source/input hashes,
+provider provenance, and runtime errors. It does not require a separate production score,
+certificate, or approval artifact to move between stages.
 
-ToC run 全体は、OpenAI Agents SDK の orchestration / handoff の考え方に合わせて、所有権を3階層に分ける。これは SDK への全面移行を意味しない。Codex-native 運用でも、長い文脈を L2 supervisor に閉じ込め、L1 は handoff artifact だけを見る。
+## Fixed p-slot contract
 
-### L1 Run Orchestrator
+The coarse buckets remain p100 through p900. Review-only slots are retired from the active
+contract. The active slots are:
 
-- 入力: user request / stop target / `state.txt` / `p000_index.md` / bucket supervisor result
-- 出力: 次 bucket の task packet / run-level stop or blocked decision
-- 責務:
-  - `p100 -> p200 -> ... -> p900` の順序と coarse stop target を解決する
-  - 各 bucket の L2 supervisor を fresh context で起動し、完了まで待機する
-  - L2 supervisor 起動時に `logs/orchestration/l2_supervisor_progress.md` へ `invoked` event を追記する
-    - helper: `python scripts/record-l2-supervisor-progress.py --run-dir <run_dir> --bucket p600 --event invoked --stop-slot p680`
-  - L2 supervisor が返った後に、同じ helper で `returned|blocked|failed` と result path を追記する
-    - terminal event では `--result logs/orchestration/pXXX.supervisor_result.json` を必ず渡す
-  - bucket 完了時は `logs/orchestration/pXXX.supervisor_result.json`、required artifact existence、terminal slot state だけを検証する
-  - `standard` では human review、frontend handoff、hybridization approval を自動承認しない。`preapproved` の `skipped` gate / `approved` handoff は、frontend create の明示 `create_input.json.review_mode` と後段 deterministic validation がそろった場合だけ記録でき、L1 が推測して付与しない
-  - 本文 artifact（例: `research.md`, `story.md`, `script.md`, `video_manifest.md`）を次 bucket 判定のために読まない
-- 禁止:
-  - L2 の代わりに canonical artifact を統合する
-  - L3 critic / aggregator report を直接読み込んで修正判断する
-  - bucket 内の未記録会話文脈を次 bucket へ渡す
-  - L3 task / review agents の起動履歴を run-level progress memo に膨らませる
-
-### L2 P-Bucket Supervisor
-
-- 入力: L1 task packet / stage readset / upstream artifact paths / bucket stop slot
-- 出力: canonical artifact updates / `state.txt` slot updates / `p000_index.md` refresh / `logs/orchestration/pXXX.supervisor_result.json`
-- 責務:
-  - 担当 bucket 内では single writer として動く
-  - `prepare-stage-context.py` または同等の grounding preflight で readset を確定する
-  - 必要な L3 task/review agents を起動し、isolated outputs を採否判断する
-  - authoring-after review loop の round 管理、修正採否、gate close / human handoff を担当する
-  - bucket 最終 slot まで進んだら supervisor result を書き、L1 へ完了を返す
-- 禁止:
-  - 他 bucket の canonical artifact を編集する
-  - L1 に本文 artifact の精読を要求する
-  - `standard` の approval gate を自動承認する。preapproved の gate state も、明示された create input と検証済み provenance がなければ設定しない
-
-### L3 Task / Review Agents
-
-- 入力: artifact path / readset path /目的 / isolated output path
-- 出力: `scratch/`, `logs/`, review artifacts, generated media, or explicit report only
-- 責務:
-  - research scout、story candidate、visual audit、scene/cut worker、critic、aggregator、grounding auditor、image/video/narration reviewer などを担当する
-  - 親会話の未記録文脈に依存しない
-  - canonical artifact、`state.txt`、`p000_index.md` を直接編集しない。ただし生成メディアの materialization など、L2 が明示した isolated output は書いてよい
-
-### Bucket Handoff Contract
-
-各 bucket supervisor は完了時に次を満たす。
-
-- L1 が `logs/orchestration/l2_supervisor_progress.md` に L2 supervisor 呼び出しを記録済みである
-- `logs/orchestration/pXXX.supervisor_result.json` を書く
-- `status` は `done|blocked|failed`
-- `completed_slots` に担当 bucket の terminal slot を列挙する
-- `required_artifacts` に L1 validator が存在確認すべき artifact を列挙する
-- `state_keys` にその bucket が更新した主要 state key を列挙する
-- `review_outputs` に review loop / human handoff artifact を列挙する
-- `next_bucket` または `blocked_reason` を明示する
-
-L1 validator はこの result と slot state を検証して次 bucket に進む。artifact 本文の品質判断は L2 supervisor と L3 review loop の責務である。
-
-## Fixed P-Slot Contract
-
-変更内容:
-- fixed `p-slot` contract を production order に合わせて再編した。
-- 後半順序は `p500 asset -> p600 scene/image implementation -> p700 narration/audio -> p800 video -> p900 render` に固定する。
-- `p450` を追加し、`video_manifest.md` を production skeleton manifest として先に materialize する。
-
-修正理由:
-- asset と scene image を先に確定し、実際の visual に合わせて narration と video を仕上げる。
-- 尺が target 未満のとき、padding で誤魔化さず narration / video の再設計へ戻れるようにするため。
-
-旧仕様との差分:
-- 旧仕様では `p500 narration/audio -> p600 asset -> p700 scene implementation -> p800 video` だった。
-- 新仕様では asset/image-first に切り替え、narration は video の直前へ移動した。
-
-`visual_value` は p300 visual planning を grounding / state で追跡するための stage key であり、canonical generation stage ではない。canonical p300 done 条件は `docs/data-contracts.md` の "Canonical p300 done 条件" を正本とする。
-
-- `p100` ごとに大工程を固定する。
-- `p110` 以降の細番号も全作品で固定契約として扱う。
-- 作品差分は slot meaning を変えず、`slot.<code>.status` / `slot.<code>.requirement` / `slot.<code>.skip_reason` / `slot.<code>.note` で表す。
-- `p000_index.md` は fixed slot contract に基づく run-local source-of-truth とする。
-- slash / stage target で `p100` / `p300` のような 100 番台の coarse p-number を指定した場合は、stage 開始 slot ではなく、対応 stage の human-review handoff slot まで進める。
-- coarse stage target resolution:
-  - `p100` -> `p130`
-  - `p200` -> `p230`
-  - `p300` -> `p330`
-  - `p400` -> `p450`
-  - `p500` -> `p570`
-  - `p600` -> `p680`
-  - `p700` -> `p750`
-  - `p800` -> `p850`
-  - `p900` -> `p930`
-- 細番号 target（例: `p450`）はその slot を直接指す。
-
-標準 slot:
-
-- `p100`: research
-  - `p110`: grounding
-  - `p120`: authoring
-  - `p130`: evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-  - `research.md` の構造、物語材料、矛盾、下流 readiness を standard では semantic reviewer、preapproved では deterministic preapproval report で検証し、pass しなければ story/cut 作成へ進まない。外部典拠・権利・版の検証はこの契約の対象外。
-- `p200`: story
-  - `p210`: grounding
-  - `p220`: authoring
-  - `p230`: evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-  - `story.md` の因果、人物、対立、scene 化 readiness を standard では semantic reviewer、preapproved では deterministic preapproval report で検証し、pass しなければ cut を materialize しない。
-- `p300`: visual planning
-  - `p310`: visual value authoring (`visual_value.md`)
-  - `p320`: visual planning evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-  - `p330`: p400 / p600 / p700 handoff appendix
-  - done when: see `docs/data-contracts.md` "Canonical p300 done 条件"
-- `p400`: scene/cut design / script / narration text / human changes
-  - `p410`: scene completion gate（grounding + scene-set review + per-scene review）
-  - `p420`: cut blueprint / script authoring
-  - `p430`: evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-  - `p435`: production readiness council（Structure / Duration / Quality / Orchestrator は意見側、Design Owner だけが後段設計書を編集）
-  - `p440`: human changes / narration sync
-  - `p450`: skeleton manifest materialization
-- `p500`: asset
-  - `p510`: asset grounding
-  - `p520`: reusable asset inventory
-  - `p530`: asset plan authoring
-  - `p540`: asset evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-  - `p550`: asset requests
-  - `p560`: asset generation
-  - `p570`: asset continuity check
-- `p600`: scene implementation / image
-  - `p610`: scene implementation grounding
-  - `p620`: production manifest / prompt authoring
-  - `p630`: hard scene evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-  - `p640`: judgment evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-  - `p650`: generation ready
-  - `p660`: image generation
-  - `p670`: image QA / fix loop
-  - `p680`: image human review handoff
-    - standard はここで frontend human review に handoff し、`slot.p680.status=awaiting_approval` / `review.image.status=pending` / `gate.image_review=required` とする。
-    - 明示 `review_mode=preapproved` は external semantic/human reviewer turn を省略し、deterministic output/provenance validation 後に `slot.p680.status=done` / `review.image.status=approved` / `gate.image_review=skipped` とする。
-    - `p680` から `p900` までを一操作で自動継続する UI / endpoint はこの変更の対象外。後続 p700/p800/p900 は既存の個別 gate を維持する。
-- `p700`: narration / audio runtime
-  - `p710`: narration grounding
-  - `p720`: two-layer full-run narration text gate
-    - deterministic: cut-local contract/TTS checks plus run-level plan/span/canonical-order/open-loop validation; result is
-      `narration_workflow.arc_review`
-    - semantic: independent retention/hook, narrator persona, causal/information rhythm, audio-visual distance, payoff/ending critics;
-      result is `narration_workflow.semantic_critic_review`
-    - both results must be `passed` and bound to the current `narration_text_set_hash`; semantic review must also match the exact
-      current `semantic_review_input_hash`; frontend
-      `POST /api/image-gen/narration-review/run` executes them in that order
-  - `p730`: TTS request / generation
-  - `p740`: duration fit gate; a cut/render unit over the 60-second provider clip limit must be split
-  - `p750`: audio QA / human review handoff
-- `p800`: video
-  - `p810`: video grounding
-  - `p820`: motion / video evaluator-improvement review loop (max 5 rounds; 5 critics + 1 aggregator per round)
-  - `p830`: video requests
-  - `p840`: video generation
-  - `p850`: video evaluator-improvement review loop / exclusions (max 5 rounds; 5 critics + 1 aggregator per round)
-- `p900`: render / QA / runtime
-  - `p910`: render inputs
-  - `p920`: final render
-  - `p930`: QA evaluator-improvement review loop / runtime summary (max 5 rounds; 5 critics + 1 aggregator per round)
-
-## Subagent Orchestration Policy
-
-メインエージェントという単一の巨大 context は使わない。run 全体は L1 Run Orchestrator が順序と handoff を管理し、各 `p100` 番台は L2 P-Bucket Supervisor が bucket single writer として担当する。従来 subagent と呼んでいた細かい作業者は L3 Task / Review Agents として L2 配下に置く。
-
-呼び出し条件:
-
-- stage grounding が `ready`、audit が `passed`
-- 入力 artifact が存在し、stage readset に含まれている
-- task が scene / cut / review / evidence のように境界分割できる
-- 出力先が `scratch/`、`logs/`、review artifact、または明示された isolated path
-
-slot ごとの標準分担:
-
-| Slot | L2 supervisor の所有範囲 | L3 task/review agents に任せてよい作業 |
+| Bucket | Active slots | Responsibility |
 | --- | --- | --- |
-| `p100` research | `research.md` への統合、source trace、slot 更新、supervisor result | research scout / evidence collector / research critic |
-| `p200` story | `story.md` 確定、hybridization 承認確認、slot 更新、supervisor result | story candidate / source-vs-creative audit / story critic |
-| `p300` visual planning | `visual_value.md` 統合、story との矛盾確認、p400/p500/p600/p700 handoff 確認 | visual-value draft / visual payoff audit / anchor-reference-risk audit |
-| `p400` script | `script.md` と skeleton manifest の統合、p400 review loops、slot 更新 | scene draft / narration draft / structure-duration-quality council |
-| `p500` asset | asset plan 採用、request 発行、asset generation、canonical asset 更新 | asset brief / coverage review / continuity review / image generation workers |
-| `p600` scene implementation | production manifest 統合、scene requests、scene image generation、image handoff | scene/cut prompt rewrite / image prompt judgment / image QA |
-| `p700` narration | p710-p750 の bucket single writer。deterministic/semantic p720、TTS 実行判断、duration gate、manifest 反映、audio handoff | retention/hook / narrator persona / causal-information rhythm / audio-visual distance / payoff-ending semantic critics, duration stretch review, TTS workers |
-| `p800` video | 採用判定、manifest 更新、除外理由の記録、video handoff | clip generation fan-out / clip review |
-| `p900` render / QA | final report 生成、完了判定、run closeout | QA reviewer / runtime summary review |
+| p100 | p110, p120 | source context and research authoring |
+| p200 | p210, p220 | source context and story authoring |
+| p300 | p310, p330 | visual value authoring and handoff |
+| p400 | p410, p420, p440, p450 | scene/cut authoring, human edits when supplied, skeleton manifest |
+| p500 | p510, p520, p530, p550, p560, p570 | asset context, inventory, plan, requests, generation, ordinary continuity checks |
+| p600 | p610, p620, p650, p660, p670, p680 | image context, prompt authoring, request readiness, generation, ordinary output checks, optional user selection |
+| p700 | p710, p730, p740, p750 | narration authoring, TTS, measured duration, optional listening/selection |
+| p800 | p810, p830, p840 | motion authoring, requests, video generation |
+| p900 | p910, p920 | render inputs and final render/output checks |
 
-Authoring-after review loop の標準分担:
+`p410` and `p420` are authoring slots. The retired p130, p230, p320, p430, p435, p540, p630,
+p640, p720, p820, p850, and p930 values are not generated as work slots. Old state history may
+contain those names; current execution ignores them and does not synthesize a replacement pass.
 
-- critic agents: 5 agents per round。rubric finding と修正候補を isolated report に出す
-- aggregator: 1 agent per round。5 critic reports を統合し、`passed|changes_requested` と unresolved findings を返す
-- L2 supervisor: aggregator report を根拠に担当 bucket の canonical artifact を更新し、次 round 実行または gate close を決める
-- max rounds: 5。standard の round 5 後の unresolved finding は human review / explicit override に回す。frontend create の明示 preapproved mode はこの external reviewer loop を起動せず、同じ pack / digest を使う deterministic preapproval report を残す。ただし deterministic failure や output/provenance failure は override なしに block する
-- p720ではdeterministic report projectionと5つの独立semantic criticを区別する。p750はcurrent arc passだけでなく、
-  current semantic passも要求し、app-server無効・malformed verdict・hash raceをoverrideなしのblocking状態として扱う
+Coarse targets resolve to the last active slot in that bucket:
 
-禁止事項:
+```text
+p100 → p120   p200 → p220   p300 → p330   p400 → p450   p500 → p570
+p600 → p680   p700 → p750   p800 → p840   p900 → p920
+```
 
-- `state.txt` を置き換える、または subagent が直接 final status を確定する
-- hybridization を自動承認する
-- 複数 subagent に `story.md` / `script.md` / `video_manifest.md` を同時編集させる
-- 親会話だけにある未記録情報へ依存する
-- evidence なしの事実追加を canonical artifact に入れる
+## Supervisor handoff
 
-統合手順:
+Each bucket writes `logs/orchestration/pXXX.supervisor_result.json` with:
 
-1. L2 supervisor が L3 output を読む
-2. 担当 bucket の canonical artifact に採用する差分を選ぶ
-3. `state.txt` に prompt / output / review summary を append する
-4. verifier または stage review を通す
-5. finding が残る場合は、修正 task を再度 bounded L3 agent に渡す
-6. bucket 完了時に `logs/orchestration/pXXX.supervisor_result.json` を書く
+- `bucket`, `status`, `completed_slots`, `required_artifacts`, `state_keys`
+- `next_bucket` or `blocked_reason`
+- an optional ordinary `output_inventory`
 
-## Model/providers
+The result confirms ownership, required files, state updates, and structural validation. It does
+not contain critic reports, aggregate verdicts, quality scores, or approval evidence.
 
-- Provider interfaces for image, video, TTS, and LLM.
-- LLM integration uses LangChain.
-- Image: Codex built-in image generation（`codex_builtin_image` / `gpt-image-2`）
-- External image providers are disabled for standard repo workflows
-- Video: Kling 3.0（default。`video_generation.tool: kling_3_0`）
-- Video (omni): Kling 3.0 Omni（`video_generation.tool: kling_3_0_omni`）
-- Video (alt): Seedance（BytePlus ModelArk。`video_generation.tool: seedance`）
-- Note: Google Veo は安全のためこのリポジトリでは無効化している。
-- TTS: ElevenLabs
-- Image provider is fixed to Codex built-in image generation for p500 / p600. Video, TTS, and LLM providers can still be swapped through configuration without changing orchestration logic.
+## Human choices and publishing
 
-## API boundaries / module ownership
+The UI may offer candidate selection, listening, editing, and explicit change requests. These are
+stored as user actions and may change a request revision, which then triggers ordinary structural
+and provenance validation. A user must explicitly authorize source hybridization and publication;
+those decisions are separate from artifact generation and do not stand in for an automated
+quality result.
 
-- MVP: Codex 主軸の assistant command が起点（Claude Code slash command 互換も維持）。
-- CLIやHTTPサーバは対象外（将来拡張）。
-- Proposed internal modules:
-  - `app/orchestrator`: LangGraph topology and run logic
-  - `app/providers`: image/video/tts/llm adapters
-  - `app/storage`: object store + metadata DB access
-  - `app/queue`: in-process queue + worker pool
-  - `app/cli`: CLI entrypoint
+## Module ownership
 
-## Config source of truth
+- `server/`: HTTP routes and runtime boundary
+- `scripts/`: stage preparation, materialization, validation, and rendering helpers
+- `toc/`: reusable contracts and projection/validation code
+- `workflow/`: templates and state/slot contracts
+- `docs/`: canonical design and operations documentation
+- `output/`: run-local artifacts and media
 
-- `config/system.yaml` defines the defaults for the MVP.
-- Environment overrides are expected in later tasks.
+## Configuration
 
-## Open questions
-
-- Which cloud provider to standardize on (AWS/GCP/etc.)?
-- ElevenLabs の voice/model/output_format の標準（日本語品質/速度/コスト）
-- Preferred trade-off: cost vs quality vs latency?
+`config/system.yaml` is the default source for local runtime settings. Environment variables may
+override provider and concurrency values. Secret values are never written to prompts, manifests,
+or source-readset artifacts.

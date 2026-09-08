@@ -1,6 +1,11 @@
 # Minimal story output template (from docs/story-creation.md)
 story_metadata:
   topic: "string"
+  # New story artifacts are authored by the Story Architect / Scene Author
+  # pipeline and must carry a complete research-grounded scene lifecycle.
+  scene_authoring_contract: "story_scene_contract_v1"
+  story_author_model: "gpt-6-astra"
+  scene_author_model: "gpt-6-astra"
   # 既存の評価済み物語を映像化する場合のみ、次のコメントを外す。original_story では key 自体を出力しない。
   # adaptation_value_contract: "required_v1"
   # scene time-of-day 新契約の明示マーカー。Historical time の有無で代用しない。
@@ -51,6 +56,7 @@ outcome_contract:
     - "primary hook と opening が具体的な事実または強い物語状況を持つ"
     - "各 scene が research refs を持ち、創作補完と事実主張を混同しない"
     - "各 scene が purpose / conflict / turn / affect / visualizable_action / grounding_note を持つ"
+    - "最初を除く全 scene が直前の結果を原因として始まる理由を持つ（なぜなら）。時間的な並び（そしてそれから）だけにしない"
     - "各 scene が非空の open string time_of_day を持つ"
     - "各 scene が time_of_day を光源・明るさ・影・色温度へ具体化した visual basis を持つ"
     - "hybridization が必要な場合は approval_status が approved である"
@@ -137,6 +143,8 @@ story_structure:
   theme:
     governing_thought: "string"
 
+# Architect の scene_plan では causal_connection_from_previous に直前の原因→結果→今の行動を記述（最初は null）。
+# Scene Author は冒頭 trigger / start_state / handoff_chain.incoming に反映。根拠のない因果は grounding_note に明示。
 story_decomposition:
   source_material_refs: ["research.story_materials.chronological_events[E1]", "research.source_passages[P1]"]
   beat_strategy: "string"
@@ -181,6 +189,76 @@ script:
       # Mapping back to research for traceability (運用: idが無い場合は短い引用でも可)
       research_refs: ["research.engagement.hooks[0]", "research.story_baseline.beat_sheet[0]"]
       creative_inventions: ["必要時のみ: invented symbol / dialogue / psychology"]
+      # Rich authoring source of truth.  The prose volume is variable; IDs,
+      # lifecycle, and source coverage determine completeness.
+      source_basis:
+        event_ids: ["event_01"]
+        passage_ids: ["passage_01"]
+        fact_ids: []
+        character_ids: ["character_01"]
+        place_ids: ["place_01"]
+        world_rule_ids: []
+        symbol_ids: []
+        variant_ids: []
+        conflict_ids: []
+        confidence: 0.9
+      scene_intent:
+        story_purpose: "このsceneだけが成立させる物語上の責務"
+        dramatic_question: "観客がscene全体で追う具体的な問い"
+        value_shift:
+          from: "開始時の状態"
+          to: "終了時の状態"
+          visible_evidence: ["変化を画面で確認できる証拠"]
+        causal_turn: "次sceneを発生させる不可逆な出来事"
+      start_state:
+        state_id: "scene_01_start"
+        characters: []
+        relationships: []
+        locations: []
+        objects: []
+        active_world_rules: []
+        audience_knowledge: []
+      event_sequence:
+        - beat_id: "scene_01_beat_01"
+          beat_function: "source_event"
+          source_event_ids: ["event_01"]
+          source_refs: ["passage_01"]
+          participants: ["character_01"]
+          location_id: "place_01"
+          trigger: "このbeatが始まる直接原因"
+          what_happens: "誰がどこで何をするか"
+          conflict_or_constraint: "行為を妨げる具体的な力"
+          required_visual_evidence: ["画面で確認できる人物・物・状態"]
+          audience_knowledge_delta: "観客の理解の変化"
+          immediate_consequence: "次beatを発生させる結果"
+      turning_event:
+        beat_id: "scene_01_beat_01"
+        irreversible_change: "後戻りできない具体的変化"
+      end_state:
+        state_id: "scene_01_end"
+        characters: []
+        relationships: []
+        locations: []
+        objects: []
+        active_world_rules: []
+        audience_knowledge: []
+        unresolved_threads: []
+      reveal_contract:
+        state_before: {}
+        transitions: []
+        state_after: {}
+      handoff_chain:
+        incoming:
+          producer_scene_id: null
+          state_id: "scene_01_start"
+        outgoing:
+          consumer_scene_id: "scene_02"
+          state_id: "scene_01_end"
+          required_next_scene_start_conditions: []
+      preservation:
+        must_preserve: ["researchにある出来事・関係・世界規則"]
+        must_not_change: ["承認なしの事実改変"]
+        must_not_show: ["このsceneではまだ起きていない出来事"]
     - scene_id: 2
       time_of_day: "夜"
       phase: "opening|development|ordeal|transformation|ending"

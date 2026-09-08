@@ -71,6 +71,42 @@ def _workspace_scope(cwd: Path) -> tuple[Path, dict[str, object]]:
 
 
 class SemanticReviewWorkspaceSecurityTests(unittest.TestCase):
+    def test_foundation_collection_failure_selectors_resolve_without_widening_scope(self) -> None:
+        for stage in ("story", "research"):
+            for prefix in ("", "logs/review/semantic/"):
+                selector = f"{prefix}{stage}.collection.md:scene_location_route_statuses[scene_03].status"
+                with self.subTest(selector=selector):
+                    self.assertEqual(
+                        image_gen_app._semantic_failure_selector_scope_key(
+                            selector, scope_entry_ids=[f"{stage}:foundation"],
+                        ), f"{stage}:foundation",
+                    )
+        for selector in (
+            "research.collection.md:field",
+            "../story.collection.md:field",
+            "/tmp/story.collection.md:field",
+            "story.collection.md:field..status",
+            "story.scope.json:field",
+        ):
+            with self.subTest(selector=selector):
+                self.assertIsNone(image_gen_app._semantic_failure_selector_scope_key(
+                    selector, scope_entry_ids=["story:foundation"],
+                ))
+        self.assertIsNone(image_gen_app._semantic_failure_selector_scope_key(
+            "story.collection.md:field", scope_entry_ids=["story:foundation", "scene:1"],
+        ))
+        report = "\n".join([
+            "status: failed",
+            "reviewed_entries: [story:foundation]",
+            "blocked_entries: [story:foundation]",
+            "findings: [location sequence requires an authored transition]",
+            "reason_keys: [scene_location_route_incomplete]",
+            "failed_selectors: [story.collection.md:scene_location_route_statuses[scene_03].status]",
+        ])
+        self.assertEqual(image_gen_app._semantic_negative_verdict_contract_errors(
+            report, scope_entry_ids=["story:foundation"],
+        ), ())
+
     def test_scene_scope_resolves_in_scope_nested_field_selectors(self) -> None:
         selectors = (
             "scene30.participants",

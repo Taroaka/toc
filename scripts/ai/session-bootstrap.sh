@@ -26,13 +26,6 @@ if [[ -n "${latest_run}" ]]; then
     echo "== Pending Gates =="
     python scripts/toc-state.py show --run-dir "$latest_run" || true
 
-    echo
-    echo "== Fast Verify =="
-    if [[ -d "$latest_run/scenes" ]]; then
-      python scripts/verify-pipeline.py --run-dir "$latest_run" --flow scene-series --profile fast || true
-    elif [[ -f "$latest_run/video_manifest.md" ]]; then
-      python scripts/verify-pipeline.py --run-dir "$latest_run" --flow immersive --profile fast || true
-    fi
   fi
 else
   echo "No run directories found under output/."

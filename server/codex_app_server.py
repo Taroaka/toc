@@ -52,7 +52,7 @@ _CODEX_HOME_FALLBACK_FILES = {
 _CODEX_HOME_FALLBACK_RELATIVE_FILES = {
     Path("browser") / "config.toml",
 }
-_DEFAULT_CODEX_APP_SERVER_MODEL = "gpt-5.6-sol"
+_DEFAULT_CODEX_APP_SERVER_MODEL = "gpt-6-astra"
 _DEFAULT_CODEX_APP_SERVER_MIN_VERSION = "0.144.0"
 _DEFAULT_CODEX_APP_SERVER_JSONL_LIMIT_BYTES = 32 * 1024 * 1024
 _MIN_CODEX_APP_SERVER_JSONL_LIMIT_BYTES = 1024 * 1024
@@ -707,6 +707,7 @@ class CodexAppServerClient:
             "threadId": thread_id,
             "cwd": str(cwd or self.cwd),
             "input": input_items,
+            "effort": "high",
         }
         if output_schema is not None:
             params["outputSchema"] = json.loads(json.dumps(output_schema))

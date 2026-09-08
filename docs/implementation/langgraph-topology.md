@@ -1,85 +1,111 @@
 # LangGraph Topology（正本）
 
-このドキュメントは `.steering/20260117-langgraph-topology/` で合意した内容を **恒久仕様として昇華**したもの。
+この文書は、ToC stage の状態、遷移、再実行、subgraph を定義する。implementation は
+library に依存せず、下記 artifact/state contract を満たす。
 
-## 目的
+## Top-level state
 
-LangGraph のトポロジ（状態・遷移・ゲート・再試行・サブグラフ）を定義し、以降の実装の正本とする。
+```text
+INIT → RESEARCH → STORY → VISUAL_VALUE → SCRIPT → ASSET
+     → SCENE_IMPLEMENTATION → NARRATION → VIDEO → RENDER → QA
+     → PUBLISH → DONE
+```
 
-## トップレベル状態
+起点は Codex assistant command（Claude Code slash command 互換）。L1 Run Orchestrator が
+bucket order を管理し、L2 P-Bucket Supervisor が canonical artifact と `state.txt` を更新する。
 
-`INIT → RESEARCH → STORY → SCRIPT → VIDEO → QA → DONE`
+## Direct stage topology
 
-## 実行トリガー
+```text
+PrepareSourceContext
+  → AuthorResearch
+  → ValidateResearchStructure
+  → AuthorStory
+  → ValidateStoryStructure
+  → AuthorVisualValue
+  → ValidateVisualValueStructure
+  → AuthorSceneIntentAndEvents(p410)
+  → AuthorCutBlueprints(p420)
+  → ValidateSceneCutStructure
+  → MaterializeSkeletonManifest(p450)
+  → AuthorAssetPlan
+  → GenerateAssets
+  → ValidateAssetFiles
+  → AuthorImagePrompts
+  → GenerateImages
+  → ValidateImageRequestsAndFiles
+  → AuthorNarration
+  → GenerateTTS
+  → MeasureAudioTimeline
+  → AuthorMotionPrompts
+  → GenerateClips
+  → ValidateClips
+  → NormalizeStreams
+  → RenderVideo
+  → ValidateFinalMedia
+```
 
-- 起点は assistant command（Codex 主軸。Claude Code slash command 互換: `/toc-run`）
-- L1 Run Orchestrator が bucket 順序を管理し、担当 L2 P-Bucket Supervisor が `state.txt` を更新する
+Each arrow requires the previous artifact's ordinary structural and provenance checks. The graph
+does not launch a separate content verdict worker or wait for a quality score.
 
-## レビューゲート
+## Stage subgraphs
 
-- ゲート値: `required | optional | skipped`
-- デフォルト（運用方針）:
-  - research_review: `required`
-  - story_review: `optional`
-  - hybridization_review: `required`（矛盾ソースの混成がある場合のみ）
-  - video_review: `required`
-  - authoring 直後の review slot は最大 1 round の evaluator-improvement loop として扱う
-  - 1 round は 5 critic agents + 1 aggregator agent
-  - critic / aggregator は report artifact だけを出力し、canonical artifact と `state.txt` は担当 L2 P-Bucket Supervisor だけが更新する
-  - round 5 後も `changes_requested` なら human review / explicit override へ昇格する
+### RESEARCH
 
-## QA再試行ルール
+Read required sources, write `research.md` with passages, facts, variants, uncertainty, and
+provenance. Check source IDs, file/path identity, and required sections.
 
-`docs/orchestration-and-ops.md` の閾値を採用:
-- `accuracy_score < 0.75` → `RESEARCH`
-- `engagement_score < 0.7` → `STORY`
-- `consistency_score < 0.7` → `VIDEO`
+### STORY
 
-再試行上限（設計値）:
-- 同一ステージの自動再試行は最大2回
-- 超過時は人間レビューへ昇格
+Story Architect writes scene ownership, causal order, event beats, reveal ledger, character/
+relationship/place/world-rule coverage, and source/creative boundary. Scene Authors may write isolated
+slices; L2 integrates one canonical `story.md`. Hybridizing contradictory source variants requires
+an explicit user choice.
 
-## サブグラフ（概要）
+### SCRIPT
 
-### SCRIPT：シーン作成ループ
+`p410` authors scene intent and `scene_event`; `p420` authors cut blueprints and source beat
+assignments; `p440` applies optional user changes; `p450` materializes skeleton
+`video_manifest.md`. Structural validation checks IDs, order, event coverage, first-frame and motion
+boundaries, narration boundaries, and handoff references.
 
-`ScenePlan → DraftScene → EvaluatorImprovementLoop(max_rounds=5, critics=5, aggregator=1) → Accept`
+### ASSET / SCENE_IMPLEMENTATION
 
-- シーンは順序依存のため直列
-- 受理済みシーンのみ `script.md` に統合
-- evaluator-improvement loop の修正適用は担当 `p400` L2 supervisor が bucket single writer として行う
+Asset Author writes inventory/plan and request snapshots. Image Prompt Author compiles
+`scene_event → cut_contract → first_frame_visual_plan → drawable_prompt_ir → image_api_payload`.
+Generators use the saved payload and request-bound provenance. Missing files, decode failures, or hash
+drift stop only the affected request.
 
-### VIDEO：シーン素材生成 + 最終合成
+### NARRATION
 
-素材生成（承認済みシーンごと）:
-- `GenerateImage`
-- `WriteNarration`（ナレーション原稿の確定。`audio.narration.text` と `audio.narration.tts_text` を埋める）
-- `GenerateTTS`
-- `SyncDurationsFromAudio`（実秒→`duration_seconds`/`timestamp` 同期）
-- `GenerateClip`
-- `ValidateAssets`
+Narration Writer projects current script text to TTS text. TTS candidates may be listened to and
+selected by the user. Generation records measured duration, pronunciation settings, and audio
+provenance. Duration/timeline checks run before video requests.
 
-最終合成:
-- `AssembleTimeline → RenderVideo → ValidateVideo`
+### VIDEO / RENDER / QA
 
-## データフロー（入出力）
+Video Prompt Author compiles motion from the current cut contract and bound frames/references.
+Clip generation verifies provider response identity, duration, decode, and hashes. Render normalizes
+streams, builds ordered concat lists, and validates ffprobe output, audio sync, subtitles, and final
+file identity.
 
-- RESEARCH: topic/constraints → `research.md`
-- STORY: `research.md` → `story.md`
-- SCRIPT: `story.md` → `script.md`
-- VIDEO: `script.md` → `assets/*`, `video_manifest.md`, `video.mp4`
-- QA: 主要成果物 → QAスコア/判定
+## Retry and resume
 
-## state（ファイル）
+Retry the smallest failed item. A stale source/request digest invalidates only its downstream
+dependents. Resume appends new state deltas, quarantines stale outputs, and preserves valid files
+whose complete provenance binding still matches. Runtime transport/setup failure remains a runtime
+error and does not become an artifact result.
 
-状態は `output/<topic>_<timestamp>/state.txt` に **追記型**で記録する（key=value）。
+## State
 
-- スキーマ: `workflow/state-schema.txt`
-- 途中停止: 最新ブロックから再開
-- 擬似ロールバック: 過去ブロックをコピーして末尾に追記
+State is `output/<topic>_<timestamp>/state.txt`, append-only key/value deltas. Derived current state,
+run status, and navigation index are rebuilt from this log. The active fixed slots are defined in
+`docs/data-contracts.md`; p410 and p420 are authoring slots.
 
-## 参照
+## References
 
-- `docs/orchestration-and-ops.md`
+- `docs/system-architecture.md`
 - `docs/data-contracts.md`
+- `docs/orchestration-and-ops.md`
 - `workflow/state-schema.txt`
+

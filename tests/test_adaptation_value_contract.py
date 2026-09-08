@@ -29,6 +29,117 @@ from toc.stage_evaluation.script import check_script_single
 from toc.stage_evaluation.manifest import check_manifest_single
 
 
+def _authored_story_for_profile(module, profile: dict, *, topic: str) -> dict:
+    """Build an authored-shaped story fixture for downstream adaptation tests."""
+
+    titles = [str(value).strip() for value in profile.get("scene_titles") or [] if str(value).strip()]
+    events = [str(value).strip() for value in profile.get("events") or [] if str(value).strip()]
+    scene_count = len(events) or len(titles)
+    assert scene_count, "profile fixture must contain semantic story material"
+    target_seconds = int(
+        (profile.get("duration_plan") or {}).get("target_seconds") or 300
+    )
+    scene_base, scene_remainder = divmod(target_seconds, scene_count)
+    narration_total = int(target_seconds * 0.7)
+    narration_base, narration_remainder = divmod(narration_total, scene_count)
+    locations = [
+        str(value).strip()
+        for value in profile.get("scene_locations") or profile.get("places") or []
+        if str(value).strip()
+    ] or ["物語の場所"]
+    event_ids = [
+        str(value).strip()
+        for value in profile.get("research_event_ids") or []
+        if str(value).strip()
+    ]
+    scenes = []
+    for index in range(1, scene_count + 1):
+        scene_id = f"scene_{index:02d}"
+        event = events[index - 1] if index - 1 < len(events) else titles[index - 1]
+        event_id = event_ids[index - 1] if index - 1 < len(event_ids) else f"E{index:02d}"
+        location = locations[min(index - 1, len(locations) - 1)]
+        start_state = "state_story_start" if index == 1 else f"state_after_scene_{index - 1:02d}"
+        end_state = f"state_after_scene_{index:02d}"
+        beat_id = f"{scene_id}_beat_01"
+        scenes.append(
+            {
+                "scene_id": scene_id,
+                "semantic_scene_responsibility_id": scene_id,
+                "canonical_scene_index": index,
+                "title": titles[index - 1] if index - 1 < len(titles) else event,
+                "phase": "opening" if index == 1 else "ending" if index == scene_count else "development",
+                "purpose": event,
+                "conflict": f"{location}の制約が、主人公の選択を遅らせる。",
+                "turn": event,
+                "affect": {"label_hint": "tension", "audience_job": "follow_causality"},
+                "visualizable_action": event,
+                "grounding_note": f"reviewed research event {event_id}",
+                "source_basis": {"event_ids": [event_id]},
+                "research_refs": [
+                    f"research.story_materials.chronological_events[{event_id}]"
+                ],
+                "location": {
+                    "name": location,
+                    "sequence": [location],
+                    "segments": [],
+                },
+                "time_of_day": "昼",
+                "time_of_day_visual_basis": (
+                    f"光源: {location}の自然光。明るさ: 中間調。"
+                    "影: 人物の足元に柔らかく落ちる。色温度: 5200K。"
+                ),
+                "target_duration_seconds": scene_base + (1 if index <= scene_remainder else 0),
+                "narration_target_seconds": narration_base + (1 if index <= narration_remainder else 0),
+                "scene_intent": {
+                    "story_purpose": event,
+                    "dramatic_question": f"{event}は次の原因になるか。",
+                    "value_shift": {"from": start_state, "to": end_state},
+                    "causal_turn": event,
+                },
+                "start_state": {"state_id": start_state},
+                "event_sequence": [
+                    {
+                        "beat_id": beat_id,
+                        "beat_function": "source_event",
+                        "source_event_ids": [event_id],
+                        "what_happens": event,
+                        "immediate_consequence": end_state,
+                        "required_visual_evidence": [event, location],
+                    }
+                ],
+                "turning_event": {
+                    "beat_id": beat_id,
+                    "irreversible_change": event,
+                },
+                "end_state": {"state_id": end_state},
+                "handoff_chain": {
+                    "incoming": {
+                        "producer_scene_id": f"scene_{index - 1:02d}" if index > 1 else "",
+                        "state_id": start_state,
+                    },
+                    "outgoing": {
+                        "consumer_scene_id": f"scene_{index + 1:02d}" if index < scene_count else "",
+                        "state_id": end_state,
+                    },
+                },
+                "preservation": {"must_preserve": [event], "must_not_show": []},
+            }
+        )
+    return {
+        "story_metadata": {
+            "scene_authoring_contract": "story_scene_contract_v1",
+            "topic": topic,
+            "target_duration_seconds": target_seconds,
+            "scene_time_of_day_contract": "required_v1",
+            "scene_time_of_day_visual_basis_contract": "required_v1",
+            "adaptation_value_contract": ADAPTATION_VALUE_MARKER,
+        },
+        "adaptation_source_contract": module._adaptation_source_contract_for_profile(profile),
+        "selection": {"chosen_candidate_id": "test_grounded"},
+        "script": {"scenes": scenes},
+    }
+
+
 def _story() -> dict:
     return {
         "story_metadata": {"adaptation_value_contract": ADAPTATION_VALUE_MARKER},
@@ -516,7 +627,18 @@ class AdaptationValueContractTests(unittest.TestCase):
             )
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
-            story = module._build_story("シンデレラ", run_dir, "2099-01-01T00:00:00+09:00", profile)
+            research = module._build_research(
+                "シンデレラ",
+                "シンデレラ",
+                "2099-01-01T00:00:00+09:00",
+                profile,
+            )
+            profile = module._profile_from_reviewed_research(profile, research)
+            story = _authored_story_for_profile(
+                module,
+                profile,
+                topic="シンデレラ",
+            )
             profile = module._profile_from_reviewed_story(profile, story)
             visual = {
                 "visual_value_metadata": {

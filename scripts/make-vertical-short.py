@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Create a 9:16 vertical short (~60s) from an approved ToC run video (16:9).
+Create a 9:16 vertical short (~60s) from a completed ToC run video (16:9).
 
 This script:
-- Reads approval from output/<topic>_<timestamp>/state.txt (review.video.status=approved)
+- Reads the source video path from output/<topic>_<timestamp>/state.txt when present
 - Uses timestamps from video_manifest.md (```yaml) to cut scene ranges from video.mp4
 - Center-crops to 9:16 and scales to 1080x1920
 - Concatenates segments into a single short mp4
@@ -85,6 +85,12 @@ def _resolve_artifact_path(run_dir: Path, value: str | None) -> Path | None:
 
 
 def require_approved(state: dict[str, str], run_dir: Path) -> None:
+    """Enforce the independent human hybridization decision, if one exists.
+
+    A finished source video does not need a production reviewer certificate in
+    order to be recut.  Hybridization remains an explicit human product
+    decision because it changes the source story itself.
+    """
     hybrid_gate = state.get("gate.hybridization_review", "").strip().lower()
     hybrid_status = state.get("review.hybridization.status", "").strip().lower()
     if hybrid_gate == "required" and hybrid_status != "approved":
@@ -92,15 +98,6 @@ def require_approved(state: dict[str, str], run_dir: Path) -> None:
             f"Hybridization review required but not approved: review.hybridization.status={state.get('review.hybridization.status', '')!r}",
             "Approve it first, e.g.:",
             f"  python scripts/toc-state.py approve-hybridization --run-dir {run_dir} --note \"OK\"",
-        ]
-        raise SystemExit("\n".join(msg))
-
-    status = state.get("review.video.status", "").strip().lower()
-    if status != "approved":
-        msg = [
-            f"Not approved yet: review.video.status={state.get('review.video.status', '')!r}",
-            "Approve it first, e.g.:",
-            f"  python scripts/toc-state.py approve-video --run-dir {run_dir} --note \"OK\"",
         ]
         raise SystemExit("\n".join(msg))
 
@@ -147,7 +144,7 @@ def crop_filter_9x16_center() -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Make a vertical (9:16) short from an approved run video.")
+    parser = argparse.ArgumentParser(description="Make a vertical (9:16) short from a completed run video.")
     parser.add_argument("--run-dir", required=True, help="output/<topic>_<timestamp> directory")
     parser.add_argument("--scene-ids", required=True, help="Comma-separated scene ids (e.g. 10,20,30)")
     parser.add_argument("--out", default=None, help="Output mp4 path (default: <run-dir>/shorts/short01.mp4)")

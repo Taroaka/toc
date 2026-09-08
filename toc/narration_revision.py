@@ -1,9 +1,9 @@
 """Revision-bound narration authoring and TTS candidate lifecycle.
 
-The public narration text, provider-facing TTS text, semantic review, generated
-audio, and human approval are deliberately separate states.  Functions mutate
-the supplied narration mapping so existing manifest readers can keep using the
-flat ``text`` / ``tts_text`` / ``output`` compatibility fields.
+The public narration text, provider-facing TTS text, generated audio, and
+candidate selection are separate states. Functions mutate the supplied
+narration mapping so existing manifest readers can keep using the flat
+``text`` / ``tts_text`` / ``output`` compatibility fields.
 """
 
 from __future__ import annotations
@@ -105,18 +105,22 @@ def ensure_narration_revision(narration: dict[str, Any]) -> dict[str, Any]:
     generation.setdefault("candidate_id", "")
     generation.setdefault("generated_from_tts_hash", "")
     narration["generation"] = generation
+    # ``audio_review`` was the old approval certificate. Keep reading its
+    # selected candidate id for old manifests, but store new selection state
+    # separately so generation never depends on a review verdict.
     audio_review = _dict(narration.get("audio_review"))
-    audio_review.setdefault("status", "pending")
-    audio_review.setdefault("approved_candidate_id", "")
-    audio_review.setdefault("approved_revision", 0)
-    audio_review.setdefault("approved_text_hash", "")
-    audio_review.setdefault("approved_tts_hash", "")
-    audio_review.setdefault("approved_at", "")
-    narration["audio_review"] = audio_review
-    review = _dict(narration.get("review"))
-    review.setdefault("status", "pending")
-    review.setdefault("human_review_ok", False)
-    narration["review"] = review
+    selection = _dict(narration.get("audio_selection"))
+    if not _text(selection.get("candidate_id")):
+        legacy_candidate_id = _text(audio_review.get("approved_candidate_id"))
+        if legacy_candidate_id:
+            selection["candidate_id"] = legacy_candidate_id
+            selection.setdefault("source", "legacy_audio_review")
+    selection.setdefault("status", "selected" if _text(selection.get("candidate_id")) else "unselected")
+    selection.setdefault("revision", int(revision.get("number") or 0))
+    selection.setdefault("text_hash", _text(revision.get("text_hash")))
+    selection.setdefault("tts_hash", _text(revision.get("tts_hash")))
+    selection.setdefault("selected_at", "")
+    narration["audio_selection"] = selection
     narration.setdefault("authoring_status", "missing")
     narration.setdefault("output", "")
     return revision
@@ -154,22 +158,6 @@ def _require_expected_tts_hash(revision: dict[str, Any], expected_tts_hash: str 
         )
 
 
-def _invalidate_reviews(narration: dict[str, Any], *, semantic_changed: bool, tts_changed: bool) -> None:
-    review = _dict(narration.get("review"))
-    review["status"] = "pending"
-    if semantic_changed:
-        review["agent_review_ok"] = None
-        review["agent_review_reason_keys"] = []
-        review["agent_review_reason_messages"] = []
-        review["human_review_ok"] = False
-        review["semantic"] = {"status": "stale", "reviewed_text_hash": ""}
-        review["arc"] = {"status": "stale", "narration_set_hash": ""}
-    if semantic_changed or tts_changed:
-        review["human_review_ok"] = False
-        review["delivery"] = {"status": "stale", "reviewed_tts_hash": ""}
-    narration["review"] = review
-
-
 def _invalidate_audio(narration: dict[str, Any], *, current_tts_hash: str) -> None:
     had_audio = bool(_text(narration.get("output")))
     for candidate in _list(narration.get("candidates")):
@@ -186,35 +174,45 @@ def _invalidate_audio(narration: dict[str, Any], *, current_tts_hash: str) -> No
         "candidate_id": "",
         "generated_from_tts_hash": "",
     }
-    narration["audio_review"] = {
-        "status": "pending",
-        "approved_candidate_id": "",
-        "approved_revision": 0,
-        "approved_text_hash": "",
-        "approved_tts_hash": "",
-        "approved_at": "",
-    }
+    selection = _dict(narration.get("audio_selection"))
+    selection.update(
+        {
+            "status": "unselected",
+            "candidate_id": "",
+            "revision": 0,
+            "text_hash": "",
+            "tts_hash": "",
+            "selected_at": "",
+        }
+    )
+    narration["audio_selection"] = selection
 
 
-def _unlock_audio_approval(narration: dict[str, Any]) -> None:
-    audio_review = _dict(narration.get("audio_review"))
-    approved_id = _text(audio_review.get("approved_candidate_id"))
+def _clear_audio_selection(
+    narration: dict[str, Any], *, reset_generation: bool = True
+) -> None:
+    selection = _dict(narration.get("audio_selection"))
+    approved_id = _text(selection.get("candidate_id"))
     for candidate in _list(narration.get("candidates")):
         if isinstance(candidate, dict) and _text(candidate.get("candidate_id")) == approved_id:
             candidate["status"] = "candidate"
-    narration["output"] = ""
-    narration["status"] = "candidate" if approved_id else "draft"
-    generation = _dict(narration.get("generation"))
-    generation["status"] = "candidate" if approved_id else "missing"
-    narration["generation"] = generation
-    narration["audio_review"] = {
-        "status": "pending",
-        "approved_candidate_id": "",
-        "approved_revision": 0,
-        "approved_text_hash": "",
-        "approved_tts_hash": "",
-        "approved_at": "",
-    }
+    if reset_generation:
+        narration["output"] = ""
+        narration["status"] = "candidate" if approved_id else "draft"
+        generation = _dict(narration.get("generation"))
+        generation["status"] = "candidate" if approved_id else "missing"
+        narration["generation"] = generation
+    selection.update(
+        {
+            "status": "unselected",
+            "candidate_id": "",
+            "revision": 0,
+            "text_hash": "",
+            "tts_hash": "",
+            "selected_at": "",
+        }
+    )
+    narration["audio_selection"] = selection
 
 
 def apply_authoring_update(
@@ -270,10 +268,9 @@ def apply_authoring_update(
     )
     narration["revision"] = revision
     if semantic_changed or tts_changed:
-        _invalidate_reviews(narration, semantic_changed=semantic_changed, tts_changed=tts_changed)
         _invalidate_audio(narration, current_tts_hash=new_tts_hash)
     elif previous_status in {"human_locked", "reviewed", "silent"} and normalized_status == "draft":
-        _unlock_audio_approval(narration)
+        _clear_audio_selection(narration, reset_generation=False)
     return True
 
 
@@ -300,7 +297,7 @@ def prepare_audio_candidate(
     if not candidate_id or not output:
         raise ValueError("candidate_id and output are required")
 
-    preserve_approved_audio = current_audio_is_human_approved(narration)
+    preserve_selected_audio = current_audio_is_ready(narration)
     snapshot = {
         "candidate_id": candidate_id,
         "request_revision": int(revision.get("number") or 0),
@@ -319,19 +316,12 @@ def prepare_audio_candidate(
         "candidate_id": candidate_id,
         "generated_from_tts_hash": snapshot["generated_from_tts_hash"],
     }
-    if preserve_approved_audio:
+    if preserve_selected_audio:
         narration["status"] = "audio_ready"
     else:
         narration["status"] = "generating"
         narration["output"] = ""
-        narration["audio_review"] = {
-            "status": "pending",
-            "approved_candidate_id": "",
-            "approved_revision": 0,
-            "approved_text_hash": "",
-            "approved_tts_hash": "",
-            "approved_at": "",
-        }
+        _clear_audio_selection(narration)
     return snapshot
 
 
@@ -378,7 +368,7 @@ def record_audio_candidate_result(
         if is_current:
             generation["status"] = "failed"
             narration["generation"] = generation
-            narration["status"] = "audio_ready" if current_audio_is_human_approved(narration) else "failed"
+            narration["status"] = "audio_ready" if current_audio_is_ready(narration) else "failed"
         return "failed"
     if not is_current:
         candidate["status"] = "stale"
@@ -391,7 +381,22 @@ def record_audio_candidate_result(
     generation["status"] = "candidate"
     generation["generated_from_tts_hash"] = _text(snapshot.get("generated_from_tts_hash"))
     narration["generation"] = generation
-    narration["status"] = "audio_ready" if current_audio_is_human_approved(narration) else "candidate"
+    if not current_audio_is_ready(narration):
+        selection = _dict(narration.get("audio_selection"))
+        selection.update(
+            {
+                "status": "selected",
+                "candidate_id": candidate_id,
+                "revision": int(revision.get("number") or 0),
+                "text_hash": _text(revision.get("text_hash")),
+                "tts_hash": _text(revision.get("tts_hash")),
+                "selected_at": now,
+                "source": "latest_generated_candidate",
+            }
+        )
+        narration["audio_selection"] = selection
+        narration["output"] = _text(candidate.get("output"))
+    narration["status"] = "audio_ready" if current_audio_is_ready(narration) else "candidate"
     return "candidate"
 
 
@@ -403,14 +408,12 @@ def approve_audio_candidate(
     expected_tts_hash: str | None,
     now: str,
 ) -> dict[str, Any]:
-    """Promote a current candidate only after an explicit human listen/approval."""
+    """Select a current candidate after optional frontend playback."""
 
     revision = ensure_narration_revision(narration)
     _require_expected_revision(revision, expected_revision)
     _require_expected_tts_hash(revision, expected_tts_hash)
     _require_revision_hash_integrity(narration, revision)
-    if _text(narration.get("authoring_status")) not in {"human_locked", "reviewed"}:
-        raise NarrationRevisionConflict("narration text must be human_locked before audio approval")
     candidate_id = _text(candidate_id)
     candidate = _candidate_by_id(narration, candidate_id)
     if candidate is None or candidate.get("status") != "candidate":
@@ -423,28 +426,71 @@ def approve_audio_candidate(
         raise NarrationRevisionConflict("a newer narration candidate exists")
 
     for item in _list(narration.get("candidates")):
-        if isinstance(item, dict) and item is not candidate and item.get("status") == "human_approved":
+        if isinstance(item, dict) and item is not candidate and item.get("status") in {"selected", "human_approved", "approved"}:
             item["status"] = "superseded"
-    candidate["status"] = "human_approved"
+    candidate["status"] = "selected"
     narration["output"] = _text(candidate.get("output"))
     narration["status"] = "audio_ready"
     narration["generation"] = {
-        "status": "human_approved",
+        "status": "selected",
         "candidate_id": candidate_id,
         "generated_from_tts_hash": _text(revision.get("tts_hash")),
     }
-    narration["audio_review"] = {
-        "status": "approved",
-        "approved_candidate_id": candidate_id,
-        "approved_revision": int(revision.get("number") or 0),
-        "approved_text_hash": _text(revision.get("text_hash")),
-        "approved_tts_hash": _text(revision.get("tts_hash")),
-        "approved_at": now,
+    narration["audio_selection"] = {
+        "status": "selected",
+        "candidate_id": candidate_id,
+        "revision": int(revision.get("number") or 0),
+        "text_hash": _text(revision.get("text_hash")),
+        "tts_hash": _text(revision.get("tts_hash")),
+        "selected_at": now,
+        "source": "frontend",
     }
+    # Preserve the old shape for clients that still display it, while making
+    # the value a selection marker rather than a readiness certificate.
+    if "audio_review" in narration:
+        narration["audio_review"] = {
+            **_dict(narration.get("audio_review")),
+            "status": "selected",
+            "approved_candidate_id": candidate_id,
+            "approved_revision": int(revision.get("number") or 0),
+            "approved_text_hash": _text(revision.get("text_hash")),
+            "approved_tts_hash": _text(revision.get("tts_hash")),
+            "approved_at": now,
+        }
     return candidate
 
 
-def current_audio_is_human_approved(narration: dict[str, Any]) -> bool:
+def current_audio_candidate(narration: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the current hash-bound selected/generated audio candidate."""
+
+    revision = _dict(narration.get("revision"))
+    selection = _dict(narration.get("audio_selection"))
+    candidate_id = _text(selection.get("candidate_id"))
+    if not candidate_id:
+        candidate_id = _text(_dict(narration.get("audio_review")).get("approved_candidate_id"))
+    if not candidate_id:
+        candidate_id = _text(_dict(narration.get("generation")).get("candidate_id"))
+    candidate = _candidate_by_id(narration, candidate_id)
+    if candidate is None:
+        return None
+    if _text(candidate.get("status")) in {"failed", "rejected", "stale", "superseded", "generating"}:
+        return None
+    if _text(candidate.get("generated_from_text_hash")) != _text(revision.get("text_hash")):
+        return None
+    if _text(candidate.get("generated_from_tts_hash")) != _text(revision.get("tts_hash")):
+        return None
+    if not _text(candidate.get("output")):
+        return None
+    return candidate
+
+
+def current_audio_is_ready(narration: dict[str, Any]) -> bool:
+    """Return whether the current narration has usable audio or intentional silence.
+
+    This is a deterministic revision/hash predicate. It deliberately ignores
+    legacy agent, human-review, and listen-evidence fields.
+    """
+
     revision = _dict(narration.get("revision"))
     if not _revision_hashes_match_flat_fields(narration, revision):
         return False
@@ -453,37 +499,42 @@ def current_audio_is_human_approved(narration: dict[str, Any]) -> bool:
         return (
             _text(narration.get("authoring_status")) == "silent"
             and silence.get("intentional") is True
-            and silence.get("confirmed_by_human") is True
-            and _text(silence.get("revision_hash")) == _text(revision.get("source_hash"))
+            and (
+                not _text(silence.get("revision_hash"))
+                or _text(silence.get("revision_hash")) == _text(revision.get("source_hash"))
+            )
         )
-    audio_review = _dict(narration.get("audio_review"))
-    candidate_id = _text(audio_review.get("approved_candidate_id"))
-    candidate = _candidate_by_id(narration, candidate_id)
+    candidate = current_audio_candidate(narration)
     return bool(
-        _text(narration.get("authoring_status")) in {"human_locked", "reviewed"}
-        and _text(narration.get("output"))
-        and audio_review.get("status") == "approved"
-        and _text(audio_review.get("approved_text_hash")) == _text(revision.get("text_hash"))
-        and _text(audio_review.get("approved_tts_hash")) == _text(revision.get("tts_hash"))
-        and candidate is not None
-        and candidate.get("status") == "human_approved"
-        and _text(candidate.get("generated_from_text_hash")) == _text(revision.get("text_hash"))
-        and _text(candidate.get("generated_from_tts_hash")) == _text(revision.get("tts_hash"))
-        and _text(candidate.get("output")) == _text(narration.get("output"))
+        candidate is not None
+        and _text(narration.get("output") or candidate.get("output"))
+        and (
+            not _text(narration.get("output"))
+            or _text(candidate.get("output")) == _text(narration.get("output"))
+        )
     )
 
 
+def current_audio_is_human_approved(narration: dict[str, Any]) -> bool:
+    """Backward-compatible alias for the deterministic current-audio check."""
+
+    return current_audio_is_ready(narration)
+
+
 def narration_audio_set_hash(items: list[tuple[str, dict[str, Any]]]) -> str:
-    """Hash the ordered, explicitly approved playback set for p750 approval."""
+    """Hash the ordered, selected playback set for timeline consistency."""
 
     payload: list[dict[str, Any]] = []
     for selector, narration in items:
         revision = _dict(narration.get("revision"))
-        audio_review = _dict(narration.get("audio_review"))
-        candidate = _candidate_by_id(narration, _text(audio_review.get("approved_candidate_id")))
+        selection = _dict(narration.get("audio_selection"))
+        selected_id = _text(selection.get("candidate_id")) or _text(
+            _dict(narration.get("audio_review")).get("approved_candidate_id")
+        )
+        candidate = current_audio_candidate(narration)
         payload.append(
             {
-                "candidate_id": _text(audio_review.get("approved_candidate_id")),
+                "candidate_id": selected_id or _text((candidate or {}).get("candidate_id")),
                 "duration_seconds": candidate.get("duration_seconds") if candidate else None,
                 "output": _text(narration.get("output")),
                 "output_sha256": _text(candidate.get("output_sha256")) if candidate else "",

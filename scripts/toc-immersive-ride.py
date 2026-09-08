@@ -37,29 +37,11 @@ from toc.grounding import (
     grounding_readset_relpath,
     grounding_report_relpath,
     load_grounding_contract,
-    resolve_review_policy,
     resolve_stage_grounding,
-    review_policy_state_entries,
 )
 from toc.harness import new_job_id, sync_run_status
-from toc.review_loop import (
-    REVIEW_LOOP_CRITIC_COUNT,
-    REVIEW_LOOP_SPECS,
-    aggregated_review_relpath,
-    aggregator_prompt_relpath,
-    build_review_input_snapshot,
-    critic_prompt_relpath,
-    critic_relpath,
-    final_review_relpath,
-    loop_state_updates,
-    render_aggregator_prompt,
-    render_critic_prompt,
-    review_input_snapshot_relpath,
-    review_input_snapshot_issues,
-)
 from toc.run_root_binding import bind_run_root
 from toc.state_store import append_state_delta, read_current_state
-from toc.stage_evaluator import check_manifest_single
 from scripts.world_walk_source import (
     PathIdentity,
     directory_identity_nofollow,
@@ -79,14 +61,6 @@ EXPERIENCE_TEMPLATES: dict[str, Path] = {
 }
 SCENE_CONTE_TEMPLATE = Path("workflow/scene-conte-template.md")
 VISUAL_VALUE_TEMPLATE = Path("workflow/visual-value-template.yaml")
-P400_REVIEW_STAGES = (
-    "scene_set",
-    "scene_detail",
-    "cut_blueprint",
-    "script",
-    "production_readiness",
-)
-
 BIG_STAGE_HANDOFF_SLOTS: dict[str, str] = {
     "p100": "p130",
     "p200": "p230",
@@ -161,25 +135,14 @@ SCAFFOLD_AUTHORING_UPDATES: dict[str, dict[str, str]] = {
     "script": {
         "stage.script.status": "pending",
         "artifact.script.status": "scaffold",
-        "review.script.scene_set.status": "pending",
-        "review.script.scene_detail.status": "pending",
-        "review.script.cut.status": "pending",
-        "review.script.production_readiness.status": "pending",
-        "gate.script_scene_review": "optional",
-        "gate.script_cut_review": "optional",
-        "gate.script_production_readiness_review": "optional",
-        "eval.scene_set.loop.status": "pending",
-        "eval.scene_detail.loop.status": "pending",
-        "eval.cut_blueprint.loop.status": "pending",
-        "eval.production_readiness.loop.status": "pending",
         "slot.p410.status": "pending",
-        "slot.p410.note": "scene completion gate; abstract scene-set review must pass before concrete per-scene review and cut authoring",
+        "slot.p410.note": "scene set authoring is pending",
         "slot.p420.status": "pending",
-        "slot.p420.note": "cut blueprint authoring waits until all scenes pass p410 gates",
+        "slot.p420.note": "cut blueprint authoring is pending",
         "slot.p435.status": "pending",
-        "slot.p435.note": "production readiness council; advisory agents report and only the Design Owner applies downstream design changes",
+        "slot.p435.note": "production readiness checks are pending",
         "slot.p450.status": "pending",
-        "slot.p450.note": "review-bound skeleton exists; p450 readiness handoff remains pending before p500",
+        "slot.p450.note": "skeleton manifest handoff remains pending before p500",
     },
     "narration": {
         "stage.narration.status": "pending",
@@ -223,94 +186,6 @@ SCAFFOLD_AUTHORING_UPDATES: dict[str, dict[str, str]] = {
         "slot.p910.note": "scaffold placeholder; render inputs are not frozen",
         "slot.p920.status": "pending",
         "slot.p920.note": "scaffold only; final render has not run",
-    },
-}
-
-REVIEW_HANDOFF_UPDATES: dict[str, dict[str, str]] = {
-    "research": {
-        "stage.research.status": "awaiting_approval",
-        "review.research.status": "pending",
-        "gate.research_review": "required",
-        "slot.p130.status": "pending",
-        "slot.p130.note": "human review handoff; run evaluator-improvement loop before approval when required",
-    },
-    "story": {
-        "stage.story.status": "awaiting_approval",
-        "review.story.status": "pending",
-        "gate.story_review": "required",
-        "slot.p230.status": "pending",
-        "slot.p230.note": "human review handoff; run evaluator-improvement loop before approval when required",
-    },
-    "visual_value": {
-        "stage.visual_value.status": "awaiting_approval",
-        "review.visual_value.status": "pending",
-        "gate.visual_value_review": "required",
-        "slot.p320.status": "pending",
-        "slot.p320.note": "visual planning evaluator-improvement loop prompts are ready for critic review",
-        "slot.p330.status": "pending",
-        "slot.p330.note": "visual planning handoff ready for human review",
-    },
-    "script": {
-        "stage.script.status": "awaiting_approval",
-        "review.script.status": "pending",
-        "review.script.scene_set.status": "pending",
-        "review.script.scene_detail.status": "pending",
-        "review.script.cut.status": "pending",
-        "review.script.production_readiness.status": "pending",
-        "gate.script_review": "required",
-        "gate.script_scene_review": "optional",
-        "gate.script_cut_review": "optional",
-        "gate.script_production_readiness_review": "optional",
-        "slot.p430.status": "pending",
-        "slot.p430.note": "human review handoff; run evaluator-improvement loop before approval when required",
-        "slot.p435.status": "pending",
-        "slot.p435.note": "production readiness council; advisory agents report and only the Design Owner applies downstream design changes",
-        "slot.p450.status": "pending",
-        "slot.p450.note": "review-bound skeleton exists; p450 readiness handoff remains pending before p500",
-    },
-    "narration": {
-        "stage.narration.status": "awaiting_approval",
-        "review.narration.status": "pending",
-        "gate.narration_review": "required",
-        "slot.p750.status": "pending",
-        "slot.p750.note": "audio QA / human review handoff scaffolded; generate audio before final approval when required",
-    },
-    "asset": {
-        "stage.asset.status": "awaiting_approval",
-        "review.asset.status": "pending",
-        "gate.asset_review": "required",
-        "slot.p540.status": "pending",
-        "slot.p540.note": "asset evaluator-improvement loop prompts are ready for critic review",
-        "slot.p570.status": "pending",
-        "slot.p570.note": "asset continuity handoff ready for human review",
-    },
-    "scene_implementation": {
-        "stage.scene_implementation.status": "awaiting_approval",
-        "review.image_prompt.status": "pending",
-        "review.image_prompt.judgment.status": "pending",
-        "gate.image_prompt_review": "required",
-        "slot.p630.status": "pending",
-        "slot.p630.note": "hard scene evaluator-improvement loop prompts are ready for critic review",
-        "slot.p640.status": "pending",
-        "slot.p640.note": "judgment evaluator-improvement loop prompts are ready for critic review",
-        "slot.p680.status": "pending",
-        "slot.p680.note": "image generation handoff ready for human review before narration",
-    },
-    "video_generation": {
-        "stage.video_generation.status": "awaiting_approval",
-        "review.video.status": "pending",
-        "gate.video_review": "required",
-        "slot.p820.status": "pending",
-        "slot.p820.note": "motion/video evaluator-improvement loop prompts are ready for critic review",
-        "slot.p850.status": "pending",
-        "slot.p850.note": "video review/exclusion handoff ready for human review",
-    },
-    "qa": {
-        "stage.qa.status": "awaiting_approval",
-        "review.video.status": "pending",
-        "gate.video_review": "required",
-        "slot.p930.status": "pending",
-        "slot.p930.note": "QA/runtime summary handoff ready for final human review",
     },
 }
 
@@ -1469,14 +1344,31 @@ def maybe_run_stage_grounding(run_dir: Path, stage: str, *, flow: str, fatal: bo
 
 
 def require_fresh_p400_readiness(run_dir: Path) -> None:
+    """Validate the current p400 manifest's structural execution contract.
+
+    The name is kept for callers from older runs.  Readiness is now based on
+    the deterministic manifest evaluator only; no reviewer report or approval
+    state is consulted.
+    """
     _refresh_active_source_receipt(run_dir)
     _assert_safe_run_tree(run_dir)
-    _stage_result, updates = check_manifest_single(run_dir, "standard", "immersive")
+    # Keep the evaluator lazy so early authoring scaffolds do not load the
+    # optional downstream evaluator package.
+    from toc.stage_evaluator import check_manifest_single
+
+    stage_result, updates = check_manifest_single(run_dir, "standard", "immersive")
     _assert_safe_run_tree(run_dir)
-    append_state_block(run_dir / "state.txt", updates)
-    if updates.get("eval.p400_readiness.status") != "approved":
-        reasons = updates.get("eval.p400_readiness.reason_keys") or "unknown"
-        raise SystemExit(f"p400 readiness gate is not approved: {reasons}")
+    if updates:
+        append_state_block(run_dir / "state.txt", updates)
+    failures = [
+        str(check.get("id") or "structural_check")
+        for check in (stage_result.get("checks", []) if isinstance(stage_result, dict) else [])
+        if isinstance(check, dict) and check.get("passed") is False
+    ]
+    if failures:
+        raise SystemExit(
+            "p400 structural validation failed: " + ", ".join(failures)
+        )
 
 
 def ensure_skeleton_manifest(manifest_text: str) -> str:
@@ -1550,176 +1442,6 @@ def target_reaches(stop_slot: str, slot: str) -> bool:
     return slot_number(stop_slot) >= slot_number(slot)
 
 
-def review_handoff_updates(*stage_names: str) -> dict[str, str]:
-    updates: dict[str, str] = {}
-    for stage_name in stage_names:
-        updates.update(REVIEW_HANDOFF_UPDATES[stage_name])
-    return updates
-
-
-def materialize_review_loop_prompts(run_dir: Path, *, stage: str, round_number: int = 1) -> dict[str, str]:
-    if stage not in REVIEW_LOOP_SPECS:
-        known = ", ".join(sorted(REVIEW_LOOP_SPECS))
-        raise ValueError(
-            f"unknown review-loop stage: {stage}; known stages: {known}"
-        )
-    with _using_run_root(run_dir):
-        _assert_safe_run_tree(run_dir)
-        snapshot = build_review_input_snapshot(
-            run_dir=run_dir,
-            stage=stage,
-            round_number=round_number,
-        )
-        _assert_safe_run_tree(run_dir)
-        input_digest = str(snapshot["input_digest"])
-
-        prompt_payloads: dict[Path, str] = {}
-        for critic_number in range(
-            1,
-            REVIEW_LOOP_CRITIC_COUNT + 1,
-        ):
-            relative = critic_prompt_relpath(
-                stage,
-                round_number,
-                critic_number,
-            )
-            prompt_payloads[relative] = (
-                render_critic_prompt(
-                    run_dir=run_dir,
-                    stage=stage,
-                    round_number=round_number,
-                    critic_number=critic_number,
-                    input_digest=input_digest,
-                )
-                + "\n"
-            )
-        aggregate_prompt = aggregator_prompt_relpath(
-            stage,
-            round_number,
-        )
-        prompt_payloads[aggregate_prompt] = (
-            render_aggregator_prompt(
-                run_dir=run_dir,
-                stage=stage,
-                round_number=round_number,
-                input_digest=input_digest,
-            )
-            + "\n"
-        )
-
-        stale_paths = [
-            *(
-                critic_relpath(stage, round_number, critic_number)
-                for critic_number in range(
-                    1,
-                    REVIEW_LOOP_CRITIC_COUNT + 1,
-                )
-            ),
-            aggregated_review_relpath(stage, round_number),
-            review_input_snapshot_relpath(stage, round_number),
-            final_review_relpath(stage),
-        ]
-        active = _ACTIVE_RUN_ROOT.get()
-        assert active is not None
-        current_root = open_directory_nofollow(
-            active.path,
-            expected_identity=active.identity,
-        )
-        try:
-            for relative in stale_paths:
-                _preflight_remove_path(current_root, relative)
-        finally:
-            os.close(current_root)
-        for relative in stale_paths:
-            _secure_remove_path(run_dir, relative)
-
-        for relative, text in prompt_payloads.items():
-            _secure_write_text(
-                run_dir,
-                relative,
-                text,
-                overwrite=True,
-            )
-        snapshot_payload = dict(snapshot)
-        snapshot_payload["prompt_sha256s"] = {
-            relative.as_posix(): hashlib.sha256(
-                text.encode("utf-8")
-            ).hexdigest()
-            for relative, text in prompt_payloads.items()
-        }
-        snapshot_relative = review_input_snapshot_relpath(
-            stage,
-            round_number,
-        )
-        _secure_write_text(
-            run_dir,
-            snapshot_relative,
-            json.dumps(
-                snapshot_payload,
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-            overwrite=True,
-        )
-
-        updates = loop_state_updates(
-            stage=stage,
-            status="running",
-            current_round=round_number,
-        )
-        round_prefix = f"eval.{stage}.loop.round_{round_number:02d}"
-        updates[f"{round_prefix}.started_at"] = now_iso()
-        updates[f"{round_prefix}.aggregated_review"] = (
-            aggregated_review_relpath(stage, round_number).as_posix()
-        )
-        for critic_number in range(
-            1,
-            REVIEW_LOOP_CRITIC_COUNT + 1,
-        ):
-            updates[f"{round_prefix}.critic_{critic_number}"] = (
-                critic_relpath(
-                    stage,
-                    round_number,
-                    critic_number,
-                ).as_posix()
-            )
-            updates[
-                f"{round_prefix}.critic_{critic_number}_prompt"
-            ] = critic_prompt_relpath(
-                stage,
-                round_number,
-                critic_number,
-            ).as_posix()
-        updates[f"{round_prefix}.aggregator_prompt"] = (
-            aggregate_prompt.as_posix()
-        )
-        updates[f"{round_prefix}.input_snapshot"] = (
-            snapshot_relative.as_posix()
-        )
-        updates[f"{round_prefix}.input_digest"] = input_digest
-        append_state_block(run_dir / "state.txt", updates)
-        return updates
-
-
-def merge_review_loop_updates(run_dir: Path, *stage_names: str) -> dict[str, str]:
-    updates: dict[str, str] = {}
-    for stage_name in stage_names:
-        updates.update(materialize_review_loop_prompts(run_dir, stage=stage_name))
-    return updates
-
-
-def p400_review_stages_for_stop(stop_slot: str) -> tuple[str, ...]:
-    stages: list[str] = ["scene_set", "scene_detail"]
-    if target_reaches(stop_slot, "p420"):
-        stages.append("cut_blueprint")
-    if target_reaches(stop_slot, "p430"):
-        stages.append("script")
-    if target_reaches(stop_slot, "p435"):
-        stages.append("production_readiness")
-    return tuple(stages)
-
-
 def previous_stop_slot(state: dict[str, str]) -> str | None:
     raw = str(state.get("runtime.stop_slot") or "").strip().lower()
     return raw if re.fullmatch(r"p\d{3}", raw) else None
@@ -1728,147 +1450,6 @@ def previous_stop_slot(state: dict[str, str]) -> str | None:
 def is_genuine_rewind(state: dict[str, str], stop_slot: str) -> bool:
     previous = previous_stop_slot(state)
     return previous is not None and slot_number(stop_slot) < slot_number(previous)
-
-
-def review_round_number(state: dict[str, str], stage: str) -> int:
-    raw = str(state.get(f"eval.{stage}.loop.current_round") or "").strip()
-    try:
-        round_number = int(raw)
-    except ValueError:
-        return 0
-    return round_number if round_number > 0 else 0
-
-
-def _safe_review_input_snapshot_issues(
-    *,
-    run_dir: Path,
-    stage: str,
-    round_number: int,
-) -> list[str]:
-    _assert_safe_run_tree(run_dir)
-    issues = review_input_snapshot_issues(
-        run_dir=run_dir,
-        stage=stage,
-        round_number=round_number,
-    )
-    _assert_safe_run_tree(run_dir)
-    return issues
-
-
-def p400_review_is_current(run_dir: Path, state: dict[str, str], stage: str) -> bool:
-    round_number = review_round_number(state, stage)
-    if round_number == 0:
-        return False
-    if _safe_review_input_snapshot_issues(
-        run_dir=run_dir,
-        stage=stage,
-        round_number=round_number,
-    ):
-        return False
-    loop_status = str(state.get(f"eval.{stage}.loop.status") or "").strip().lower()
-    if loop_status in {"passed", "approved", "complete", "completed", "done"}:
-        return _secure_is_regular(run_dir, final_review_relpath(stage))
-    return True
-
-
-def p400_review_inputs_changed(run_dir: Path, state: dict[str, str]) -> bool:
-    for stage in P400_REVIEW_STAGES:
-        round_number = review_round_number(state, stage)
-        if round_number == 0:
-            continue
-        if _safe_review_input_snapshot_issues(
-            run_dir=run_dir,
-            stage=stage,
-            round_number=round_number,
-        ):
-            return True
-        loop_status = str(state.get(f"eval.{stage}.loop.status") or "").strip().lower()
-        if loop_status in {"passed", "approved", "complete", "completed", "done"}:
-            if not _secure_is_regular(
-                run_dir,
-                final_review_relpath(stage),
-            ):
-                return True
-    return False
-
-
-def merge_current_or_materialized_p400_reviews(
-    run_dir: Path,
-    *stage_names: str,
-) -> tuple[dict[str, str], tuple[str, ...]]:
-    state = _parse_state(run_dir)
-    updates: dict[str, str] = {}
-    reused: list[str] = []
-    for stage_name in stage_names:
-        if p400_review_is_current(run_dir, state, stage_name):
-            reused.append(stage_name)
-            continue
-        updates.update(materialize_review_loop_prompts(run_dir, stage=stage_name))
-    return updates, tuple(reused)
-
-
-def preserved_p400_state_updates(
-    state: dict[str, str],
-    reused_stages: tuple[str, ...],
-) -> dict[str, str]:
-    reused = set(reused_stages)
-    updates: dict[str, str] = {}
-    review_status_keys = {
-        "scene_set": "review.script.scene_set.status",
-        "scene_detail": "review.script.scene_detail.status",
-        "cut_blueprint": "review.script.cut.status",
-        "script": "review.script.status",
-        "production_readiness": "review.script.production_readiness.status",
-    }
-    for stage in reused:
-        prefix = f"eval.{stage}.loop."
-        updates.update({key: value for key, value in state.items() if key.startswith(prefix)})
-        status_key = review_status_keys[stage]
-        if status_key in state:
-            updates[status_key] = state[status_key]
-
-    if {"scene_set", "scene_detail"}.issubset(reused) and "slot.p410.status" in state:
-        updates["slot.p410.status"] = state["slot.p410.status"]
-    for stage, slot in (
-        ("cut_blueprint", "p420"),
-        ("script", "p430"),
-        ("production_readiness", "p435"),
-    ):
-        if stage in reused and f"slot.{slot}.status" in state:
-            updates[f"slot.{slot}.status"] = state[f"slot.{slot}.status"]
-
-    if reused == set(P400_REVIEW_STAGES):
-        for key in (
-            "stage.script.status",
-            "artifact.script.status",
-            "review.script.status",
-            "gate.script_review",
-            "gate.script_scene_review",
-            "gate.script_cut_review",
-            "gate.script_production_readiness_review",
-            "slot.p450.status",
-            "slot.p450.note",
-            "eval.p400_readiness.status",
-            "eval.p400_readiness.reason_keys",
-        ):
-            if key in state:
-                updates[key] = state[key]
-    return updates
-
-
-def prepare_p400_review_updates(
-    run_dir: Path,
-    stop_slot: str,
-) -> tuple[dict[str, str], dict[str, str]]:
-    review_updates, reused_stages = merge_current_or_materialized_p400_reviews(
-        run_dir,
-        *p400_review_stages_for_stop(stop_slot),
-    )
-    preservation_updates = preserved_p400_state_updates(
-        _parse_state(run_dir),
-        reused_stages,
-    )
-    return review_updates, preservation_updates
 
 
 def finish_scaffold(
@@ -1914,59 +1495,28 @@ def scaffold_authoring_updates(*stage_names: str) -> dict[str, str]:
     return updates
 
 
-def reset_p400_review_handoff(
+def reset_p400_handoff(
     run_dir: Path,
     *,
     experience: str,
     source_run: Path | None,
 ) -> dict[str, str]:
-    stages = ("scene_set", "scene_detail", "cut_blueprint", "script", "production_readiness")
+    """Reset p400 authoring handoff state after a rewind or source change.
+
+    Historical review files are intentionally left untouched.  A new run
+    continues from the current authored inputs and deterministic contracts;
+    no replacement prompt/report or synthetic approval evidence is created.
+    """
     updates = {
         **scaffold_authoring_updates("script"),
-        **review_handoff_updates("script"),
         "immersive.experience": experience,
         "immersive.source_run": source_run.as_posix() if source_run is not None else "",
         "artifact.video_manifest": _artifact_absolute(
             run_dir,
             "video_manifest.md",
         ),
-        "eval.p400_readiness.status": "changes_requested",
-        "eval.p400_readiness.reason_keys": "p400.review_loop_integrity",
         **_refresh_active_source_receipt(run_dir),
     }
-    with _using_run_root(run_dir):
-        stale_paths = [
-            *(
-                Path("logs") / "eval" / stage
-                for stage in stages
-            ),
-            *(final_review_relpath(stage) for stage in stages),
-        ]
-        active = _ACTIVE_RUN_ROOT.get()
-        assert active is not None
-        current_root = open_directory_nofollow(
-            active.path,
-            expected_identity=active.identity,
-        )
-        try:
-            for relative in stale_paths:
-                _preflight_remove_path(current_root, relative)
-        finally:
-            os.close(current_root)
-        for relative in stale_paths:
-            _secure_remove_path(run_dir, relative)
-
-    for stage in stages:
-        updates.update(loop_state_updates(stage=stage, status="pending", current_round=0))
-        round_prefix = f"eval.{stage}.loop.round_01"
-        updates[f"{round_prefix}.started_at"] = ""
-        updates[f"{round_prefix}.aggregated_review"] = ""
-        updates[f"{round_prefix}.aggregator_prompt"] = ""
-        updates[f"{round_prefix}.input_snapshot"] = ""
-        updates[f"{round_prefix}.input_digest"] = ""
-        for critic_number in range(1, REVIEW_LOOP_CRITIC_COUNT + 1):
-            updates[f"{round_prefix}.critic_{critic_number}"] = ""
-            updates[f"{round_prefix}.critic_{critic_number}_prompt"] = ""
     return updates
 
 
@@ -1990,7 +1540,7 @@ def _main_impl() -> None:
         "--stage",
         type=normalize_stage_target,
         default=None,
-        help="Stop target. Coarse p100/100-style targets stop at that stage's human-review handoff slot; fine slots stop exactly.",
+        help="Stop target. Coarse p100/100-style targets stop at that stage's authoring handoff slot; fine slots stop exactly.",
     )
     parser.add_argument(
         "--experience",
@@ -2005,10 +1555,13 @@ def _main_impl() -> None:
         help='Video generation tool in manifest ("kling", "kling-omni", or "seedance"). "veo" is mapped to Kling for safety.',
     )
     parser.add_argument("--force", action="store_true", help="Overwrite existing files.")
-    parser.add_argument("--review-policy", choices=["strict", "drafts"], default="strict")
-    parser.add_argument("--story-review", choices=["required", "optional"], default=None)
-    parser.add_argument("--image-review", choices=["required", "optional"], default=None)
-    parser.add_argument("--narration-review", choices=["required", "optional"], default=None)
+    # Legacy compatibility flags are accepted but ignored.  The production
+    # pipeline no longer selects a reviewer policy or creates synthetic review
+    # evidence for either mode.
+    parser.add_argument("--review-policy", choices=["strict", "drafts"], default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--story-review", choices=["required", "optional"], default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--image-review", choices=["required", "optional"], default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--narration-review", choices=["required", "optional"], default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
     stop_slot = args.stage or "p570"
     legacy_default = args.stage is None
@@ -2074,13 +1627,6 @@ def _main_impl() -> None:
     if source_context is not None:
         _ACTIVE_SOURCE.set(source_context)
     _assert_safe_run_tree(run_dir)
-    review_policy = resolve_review_policy(
-        preset=args.review_policy,
-        story_review=args.story_review,
-        image_review=args.image_review,
-        narration_review=args.narration_review,
-    )
-
     # assets
     for relative_directory in (
         Path("assets/characters"),
@@ -2123,20 +1669,11 @@ def _main_impl() -> None:
         )
     )
     genuine_rewind = state_preexisting and is_genuine_rewind(prior_state, stop_slot)
-    prior_p400_inputs_changed = (
-        state_preexisting
-        and p400_review_inputs_changed(run_dir, prior_state)
-    )
     preserve_existing_authoring_grounding = (
         state_preexisting
         and not args.force
         and not genuine_rewind
-        and not prior_p400_inputs_changed
         and not prior_source_changed
-        and any(
-            review_round_number(prior_state, stage) > 0
-            for stage in P400_REVIEW_STAGES
-        )
     )
     if not state_preexisting:
         append_state_block(
@@ -2146,12 +1683,9 @@ def _main_impl() -> None:
                 "topic": topic_raw,
                 "status": "INIT",
                 "runtime.stage": "immersive_ride_scaffold",
-                "gate.video_review": "required",
                 "immersive.experience": str(experience),
                 **({"immersive.source_run": str(source_run_path)} if source_run_path is not None else {}),
                 **source_receipt_state,
-                "runtime.review_policy": args.review_policy,
-                **review_policy_state_entries(review_policy),
             },
         )
 
@@ -2159,7 +1693,6 @@ def _main_impl() -> None:
     if not preserve_existing_authoring_grounding:
         maybe_run_stage_grounding(run_dir, "research", flow="immersive")
     if not target_reaches(stop_slot, "p210"):
-        review_updates = materialize_review_loop_prompts(run_dir, stage="research")
         finish_scaffold(
             state_path,
             topic_raw,
@@ -2167,8 +1700,6 @@ def _main_impl() -> None:
             stop_slot,
             {
                 **scaffold_authoring_updates("research"),
-                **review_updates,
-                **review_handoff_updates("research"),
                 "artifact.research": _artifact_absolute(
                     run_dir,
                     "research.md",
@@ -2181,7 +1712,6 @@ def _main_impl() -> None:
     if not preserve_existing_authoring_grounding:
         maybe_run_stage_grounding(run_dir, "story", flow="immersive")
     if not target_reaches(stop_slot, "p310"):
-        review_updates = materialize_review_loop_prompts(run_dir, stage="story")
         finish_scaffold(
             state_path,
             topic_raw,
@@ -2189,8 +1719,6 @@ def _main_impl() -> None:
             stop_slot,
             {
                 **scaffold_authoring_updates("research", "story"),
-                **review_updates,
-                **review_handoff_updates("story"),
                 "artifact.research": _artifact_absolute(
                     run_dir,
                     "research.md",
@@ -2213,7 +1741,6 @@ def _main_impl() -> None:
     if not preserve_existing_authoring_grounding:
         maybe_run_stage_grounding(run_dir, "visual_value", flow="immersive")
     if not target_reaches(stop_slot, "p410"):
-        review_updates = materialize_review_loop_prompts(run_dir, stage="visual_value")
         finish_scaffold(
             state_path,
             topic_raw,
@@ -2221,8 +1748,6 @@ def _main_impl() -> None:
             stop_slot,
             {
                 **scaffold_authoring_updates("research", "story", "visual_value"),
-                **review_updates,
-                **review_handoff_updates("visual_value"),
                 "artifact.research": _artifact_absolute(
                     run_dir,
                     "research.md",
@@ -2278,28 +1803,23 @@ def _main_impl() -> None:
     source_receipt_state = _refresh_active_source_receipt(run_dir)
 
     requested_source_run = source_run_path.as_posix() if source_run_path is not None else ""
-    review_context_changed = state_preexisting and (
+    source_context_changed = state_preexisting and (
         str(prior_state.get("immersive.experience") or "") != experience
         or str(prior_state.get("immersive.source_run") or "") != requested_source_run
         or prior_source_changed
-    )
-    review_inputs_changed = (
-        state_preexisting
-        and p400_review_inputs_changed(run_dir, prior_state)
     )
     p400_reset = bool(
         state_preexisting
         and (
             genuine_rewind
-            or review_context_changed
-            or review_inputs_changed
+            or source_context_changed
             or prior_source_changed
         )
     )
     if p400_reset:
         append_state_block(
             state_path,
-            reset_p400_review_handoff(
+            reset_p400_handoff(
                 run_dir,
                 experience=experience,
                 source_run=source_run_path,
@@ -2307,10 +1827,6 @@ def _main_impl() -> None:
         )
 
     if not target_reaches(stop_slot, "p450"):
-        review_updates, p400_preservation_updates = prepare_p400_review_updates(
-            run_dir,
-            stop_slot,
-        )
         finish_scaffold(
             state_path,
             topic_raw,
@@ -2318,8 +1834,6 @@ def _main_impl() -> None:
             stop_slot,
             {
                 **scaffold_authoring_updates("research", "story", "visual_value", "script"),
-                **review_updates,
-                **review_handoff_updates("script"),
                 "artifact.research": _artifact_absolute(
                     run_dir,
                     "research.md",
@@ -2340,7 +1854,6 @@ def _main_impl() -> None:
                     if source_run_path is not None
                     else ""
                 ),
-                **p400_preservation_updates,
             },
         )
         return
@@ -2358,10 +1871,6 @@ def _main_impl() -> None:
         write_text(run_dir / "scene_conte.md", tmpl, force=args.force)
 
     if not target_reaches(stop_slot, "p510"):
-        review_updates, p400_preservation_updates = prepare_p400_review_updates(
-            run_dir,
-            stop_slot,
-        )
         finish_scaffold(
             state_path,
             topic_raw,
@@ -2369,8 +1878,6 @@ def _main_impl() -> None:
             stop_slot,
             {
                 **scaffold_authoring_updates("research", "story", "visual_value", "script"),
-                **review_updates,
-                **review_handoff_updates("script"),
                 "immersive.experience": str(experience),
                 "artifact.research": _artifact_absolute(
                     run_dir,
@@ -2387,7 +1894,6 @@ def _main_impl() -> None:
                     "video_manifest.md",
                 ),
                 "immersive.source_run": requested_source_run,
-                **p400_preservation_updates,
             },
         )
         return
@@ -2408,18 +1914,12 @@ def _main_impl() -> None:
         ),
         **source_receipt_state,
     }
-    p400_review_updates, p400_preservation_updates = prepare_p400_review_updates(
-        run_dir,
-        stop_slot,
-    )
-
     require_fresh_p400_readiness(run_dir)
     maybe_run_stage_grounding(run_dir, "asset", flow="immersive")
     write_text(run_dir / "asset_inventory.md", "# Asset Inventory\n\nTODO\n", force=args.force)
     write_text(run_dir / "asset_plan.md", "# Asset Plan\n\nTODO\n", force=args.force)
     write_text(run_dir / "asset_generation_requests.md", "# Asset Generation Requests\n\nTODO\n", force=args.force)
     write_text(run_dir / "asset_generation_manifest.md", "```yaml\nassets: []\n```\n", force=args.force)
-    asset_review_updates = merge_review_loop_updates(run_dir, "asset")
     asset_artifacts = {
         "artifact.asset_inventory": _artifact_absolute(
             run_dir,
@@ -2446,30 +1946,16 @@ def _main_impl() -> None:
             stop_slot,
             {
                 **scaffold_authoring_updates("research", "story", "visual_value", "script", "asset"),
-                **p400_review_updates,
-                **asset_review_updates,
-                **review_handoff_updates("asset"),
                 **common_artifacts,
                 **asset_artifacts,
-                **p400_preservation_updates,
             },
             legacy_done=legacy_default,
         )
         return
 
     maybe_run_stage_grounding(run_dir, "scene_implementation", flow="immersive")
-    write_text(run_dir / "image_prompt_story_review.md", "# Image Prompt Story Review\n\nTODO\n", force=args.force)
     write_text(run_dir / "image_generation_requests.md", "# Image Generation Requests\n\nTODO\n", force=args.force)
-    scene_review_updates = merge_review_loop_updates(
-        run_dir,
-        "scene_implementation_hard",
-        "scene_implementation_judgment",
-    )
     scene_artifacts = {
-        "artifact.image_prompt_story_review": _artifact_absolute(
-            run_dir,
-            "image_prompt_story_review.md",
-        ),
         "artifact.image_generation_requests": _artifact_absolute(
             run_dir,
             "image_generation_requests.md",
@@ -2483,20 +1969,14 @@ def _main_impl() -> None:
             stop_slot,
             {
                 **scaffold_authoring_updates("research", "story", "visual_value", "script", "asset", "scene_implementation"),
-                **p400_review_updates,
-                **asset_review_updates,
-                **scene_review_updates,
-                **review_handoff_updates("scene_implementation"),
                 **common_artifacts,
                 **asset_artifacts,
                 **scene_artifacts,
-                **p400_preservation_updates,
             },
         )
         return
 
     maybe_run_stage_grounding(run_dir, "narration", flow="immersive")
-    narration_review_updates = materialize_review_loop_prompts(run_dir, stage="narration")
     if not target_reaches(stop_slot, "p810"):
         finish_scaffold(
             state_path,
@@ -2505,21 +1985,14 @@ def _main_impl() -> None:
             stop_slot,
             {
                 **scaffold_authoring_updates("research", "story", "visual_value", "script", "narration", "asset", "scene_implementation"),
-                **p400_review_updates,
-                **narration_review_updates,
-                **asset_review_updates,
-                **scene_review_updates,
-                **review_handoff_updates("narration"),
                 **common_artifacts,
                 **asset_artifacts,
                 **scene_artifacts,
-                **p400_preservation_updates,
             },
         )
         return
 
     write_text(run_dir / "video_generation_requests.md", "# Video Generation Requests\n\nTODO\n", force=args.force)
-    video_review_updates = merge_review_loop_updates(run_dir, "video_generation_motion", "video_generation_review")
     video_artifacts = {
         "artifact.video_generation_requests": _artifact_absolute(
             run_dir,
@@ -2534,24 +2007,16 @@ def _main_impl() -> None:
             stop_slot,
             {
                 **scaffold_authoring_updates("research", "story", "visual_value", "script", "narration", "asset", "scene_implementation", "video_generation"),
-                **p400_review_updates,
-                **narration_review_updates,
-                **asset_review_updates,
-                **scene_review_updates,
-                **video_review_updates,
-                **review_handoff_updates("video_generation"),
                 **common_artifacts,
                 **asset_artifacts,
                 **scene_artifacts,
                 **video_artifacts,
-                **p400_preservation_updates,
             },
         )
         return
 
     write_text(run_dir / "run_report.md", "# Run Report\n\nTODO\n", force=args.force)
     write_text(run_dir / "eval_report.json", "{}\n", force=args.force)
-    qa_review_updates = merge_review_loop_updates(run_dir, "qa")
     finish_scaffold(
         state_path,
         topic_raw,
@@ -2559,13 +2024,6 @@ def _main_impl() -> None:
         stop_slot,
         {
             **scaffold_authoring_updates("research", "story", "visual_value", "script", "narration", "asset", "scene_implementation", "video_generation", "qa"),
-            **p400_review_updates,
-            **narration_review_updates,
-            **asset_review_updates,
-            **scene_review_updates,
-            **video_review_updates,
-            **qa_review_updates,
-            **review_handoff_updates("qa"),
             **common_artifacts,
             **asset_artifacts,
             **scene_artifacts,
@@ -2578,7 +2036,6 @@ def _main_impl() -> None:
                 run_dir,
                 "eval_report.json",
             ),
-            **p400_preservation_updates,
         },
     )
 

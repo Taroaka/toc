@@ -23,6 +23,7 @@ from toc.image_request_snapshot import (
     sha256_file,
     write_request_snapshot_atomic,
 )
+from toc.production_contract import is_retired_review_slot
 from toc.run_root_binding import (
     RunRootBindingError,
     append_run_file_text,
@@ -52,20 +53,18 @@ RUN_STAGE_STATE_KEYS = {
     "p400": ("stage.script.status",),
     "p500": (
         "stage.asset.status",
-        "stage.asset_plan_review.status",
         "stage.asset_generation.status",
     ),
     "p600": (
         "stage.scene_implementation.status",
-        "stage.image_prompt_review.status",
         "stage.image_generation.status",
     ),
     "p700": ("stage.narration.status",),
     "p800": ("stage.video.status", "stage.video_generation.status"),
     "p900": ("stage.render.status", "stage.qa.status"),
 }
-RUN_PROGRESS_BLOCKING_STATES = {"failed", "blocked", "changes_requested", "rejected"}
-RUN_PROGRESS_TERMINAL_STATES = {"done", "passed", "ready", "reviewed", "approved", "skipped"}
+RUN_PROGRESS_BLOCKING_STATES = {"failed", "blocked"}
+RUN_PROGRESS_TERMINAL_STATES = {"done", "passed", "ready", "approved", "skipped"}
 IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
 IMAGE_API_PROMPT_POLICY_PREFIX = "image_api_prompt_v"
 COMPILED_IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v2"
@@ -302,6 +301,10 @@ def _state_slot_statuses(state: dict[str, str]) -> dict[str, str]:
         match = re.fullmatch(r"slot\.(p\d{3})\.status", key)
         if not match:
             continue
+        if is_retired_review_slot(match.group(1)):
+            # Historical review-slot events remain in state.txt but are not
+            # part of the active progress frontier.
+            continue
         normalized = value.strip().lower()
         if normalized:
             statuses[match.group(1)] = normalized
@@ -313,7 +316,7 @@ def _slot_bucket(code: str) -> str:
 
 
 def _summarize_progress_states(statuses: list[str]) -> str:
-    for wanted in ("failed", "blocked", "changes_requested", "rejected"):
+    for wanted in ("failed", "blocked"):
         if wanted in statuses:
             return wanted
     if "in_progress" in statuses:
@@ -438,9 +441,6 @@ def read_run_progress(
         "topic": state.get("topic") or run_dir.name,
         "status": state.get("status") or "",
         "runtimeStage": state.get("runtime.stage") or "",
-        "reviewPolicy": state.get("runtime.review_policy") or "",
-        "reviewMode": state.get("runtime.review_mode") or "standard",
-        "pendingGates": [key.removeprefix("gate.") for key, value in sorted(state.items()) if key.startswith("gate.") and value == "required"],
         "currentStage": current_stage,
         "stages": stages,
         "slots": slots,
@@ -680,39 +680,39 @@ def load_request_items(
         raise ImageRequestSnapshotError("request snapshot item ids do not match request Markdown")
     snapshot_by_id = {item.item_id: item for item in snapshot.items}
     loaded: list[ImageRequestItem] = []
-    for review_item in markdown_items:
-        snapshot_item = snapshot_by_id[review_item.id]
-        if review_item.prompt != snapshot_item.prompt:
+    for request_item in markdown_items:
+        snapshot_item = snapshot_by_id[request_item.id]
+        if request_item.prompt != snapshot_item.prompt:
             raise ImageRequestSnapshotError(
                 f"request Markdown prompt does not match snapshot for {snapshot_item.item_id}"
             )
-        if str(review_item.output or "") != snapshot_item.destination:
+        if str(request_item.output or "") != snapshot_item.destination:
             raise ImageRequestSnapshotError(
                 f"request Markdown destination does not match snapshot for {snapshot_item.item_id}"
             )
-        if list(review_item.references) != [reference.path for reference in snapshot_item.references]:
+        if list(request_item.references) != [reference.path for reference in snapshot_item.references]:
             raise ImageRequestSnapshotError(
                 f"request Markdown references do not match snapshot for {snapshot_item.item_id}"
             )
-        if str(review_item.prompt_policy_version or "") != snapshot_item.prompt_policy_version:
+        if str(request_item.prompt_policy_version or "") != snapshot_item.prompt_policy_version:
             raise ImageRequestSnapshotError(
                 f"request Markdown policy does not match snapshot for {snapshot_item.item_id}"
             )
         loaded.append(
             ImageRequestItem(
-                id=review_item.id,
+                id=request_item.id,
                 kind=kind,
-                asset_type=review_item.asset_type,
-                tool=review_item.tool,
+                asset_type=request_item.asset_type,
+                tool=request_item.tool,
                 output=snapshot_item.destination,
                 prompt=snapshot_item.prompt,
                 references=[reference.path for reference in snapshot_item.references],
                 reference_count=len(snapshot_item.references),
-                execution_lane=review_item.execution_lane,
-                generation_status=review_item.generation_status,
-                existing_image=review_item.existing_image,
+                execution_lane=request_item.execution_lane,
+                generation_status=request_item.generation_status,
+                existing_image=request_item.existing_image,
                 prompt_policy_version=snapshot_item.prompt_policy_version,
-                debug_prompt_source=review_item.debug_prompt_source,
+                debug_prompt_source=request_item.debug_prompt_source,
                 prompt_sha256=snapshot_item.prompt_sha256,
                 reference_sha256s=[reference.sha256 for reference in snapshot_item.references],
                 request_revision=snapshot.request_revision,

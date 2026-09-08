@@ -1,3203 +1,378 @@
 # Data Contracts (MVP)
 
-本書は `todo.txt` の 6) Data contracts を具体化する。
-
-変更内容:
-- production order を asset/image-first へ切り替え、固定 workflow の後半を `asset -> scene_implementation/image -> narration -> video_generation -> render -> qa` に再編した。
-- `video_manifest.md` に `manifest_phase: skeleton|production` を追加した。
-
-修正理由:
-- asset と scene image を先に確定し、実際の visual に合わせて narration と video を仕上げるため。
-
-旧仕様との差分:
-- 旧 contract は narration/audio を asset / image より前に置いていた。
-- 新 contract では `scene_implementation` を公開 stage とし、asset/image-first を前提にする。
+この文書は、ToC の authoring、materialization、generation、render をつなぐ最小の正本契約を定義する。
+制作は `authoring → structural validation → generation` の順で進む。品質を採点する
+agent、critic、aggregator、合格証明、必須の人間承認 artifact は契約に含めない。
 
 ## 0. Core Terms / Glossary
 
-この repo では、物語上の単位、生成実行の単位、設計書の単位を混同しない。
+- `scene`: 物語全体の中で不可逆な変化を起こす劇的単位。`dramatic_question`、
+  `value_shift`、`causal_turn`、画面で読める `visible_evidence`、次 scene への
+  `handoff_chain` を持つ。
+- `cut`: scene を一つの画、短い動き、反応、間、transition、または narration beat として
+  実装する単位。`cut_contract` が cut の正本である。
+- `asset`: 複数 scene/cut で再利用する character、object、location、または still。
+- `manifest`: provider に渡す実行可能な scene/cut/audio/image/video 契約。
+- `structural validation`: schema、型、ID、参照、順序、request binding、ファイル、decode、
+  duration、provenance を確認する処理。これは content quality score を計算しない。
+- `human choice`: candidate 選択、listening、編集、change request、hybridization、公開など、
+  ユーザーが任意に行う操作。保存された choice は新しい request revision になる。
 
-- `scene` / シーン
-  - 物語全体の中で不可逆な変化を起こす劇的単位。単なる場所移動、段落、説明、雰囲気ではない。
-  - 独立した `dramatic_question`、`value_shift`、`causal_turn`、画面で読める `visible_evidence`、次 scene への `handoff_chain` を持つ。
-  - 場所が変わるだけ、説明が増えるだけ、または独立した価値変化がない beat は、scene ではなく cut / transition / narration beat として扱う。
-  - 例: 「亀を助ける」ではなく「浦島が暴力を止める選択をし、村との関係を変える」。
-  - `script.md.scenes[]` と `video_manifest.md.scenes[]` の基本単位。
-- `cut` / カット
-  - scene を映像として実装するための小単位。
-  - 1つの画、短い動き、反応、間、transition、または narration beat を担う。
-  - cut の枠は script / skeleton manifest で作り、production manifest で image / audio / video の実行情報を持つ。
-  - cut は `audio`, `image_generation`, `video_generation`, `cut_contract` などの部品を束ねる統合単位であり、audio そのものとは別概念。旧 reader 用の `scene_contract` は cut-level alias としてのみ残す。
-- `audio` / 音声
-  - cut または scene に属する narration runtime。
-  - `tts_text`, voice, prompt contract, generated audio path, actual duration を持つ。
-  - 概念上は cut の部品だが、stage としては p700 / narration で、asset と scene image の後、video generation の前に確定する。
-- `visual`
-  - cut または scene が画として何を伝えるかを表す設計領域。
-  - `visual_beat`, `cut_contract`, `image_generation`, `still_image_plan`, `reference_usage` などを含む。
-  - visual planning stage では、cut prompt そのものではなく、visual identity / scene visual value / anchor / reference strategy を決める。
-- `asset`
-  - 複数 cut / scene で visual identity を固定するための再利用可能な素材。
-  - character, object, location, reusable still を含む。
-  - 単発 cut の便利画像ではなく、continuity anchor として扱う。
-- `design document` / 設計書
-  - 生成物を直接作るファイルではなく、後続 stage が迷わないための仕様・判断基準・契約。
-  - 例: `visual_value.md`, `asset_plan.md`, `video_manifest.md`, `docs/*`, `workflow/*`。
-  - run artifact の設計書は、その stage の source of truth または handoff として扱う。
-- `manifest`
-  - 実行可能な生成契約。
-  - `video_manifest.md` は scene / cut / audio / image / video / asset reference を materialize し、生成スクリプトが読む正本。
-- `render unit`
-  - 最終 video request / clip list に載る動画単位。
-  - 複数 cut を1つの動画として生成・連結したい場合、scene の `render_units[]` が cut 群を束ねる。
-
-責務の関係:
+標準 production order:
 
 ```text
-Scene
-  Cut
-    audio: narration runtime and actual duration
-    visual: image prompt, still plan, references, visual contract
-    video: motion prompt, duration, generated clip
-  RenderUnit(optional): one generated video unit that can bundle multiple cuts
+research → story → visual_value → script → asset →
+scene_implementation/image → narration/audio → video → render → qa
 ```
 
-標準順序:
+## 1. State schema
 
-- p300 visual planning: cut を作る前に、visual identity / visual value / anchor / reference strategy を決める。
-- p400 script: scene / cut skeleton と `narration_contract` / `narration_draft` を作る。final `text` / `tts_text` は p700 で確定する。
-- p500 asset: cut で使う reusable asset / reference を設計・生成する。
-- p600 scene implementation / image: asset references を使って cut の image 実装を作る。
-- p700 narration: 確定した visual に合わせて cut audio を生成し、実 duration を確定する。
-- p800/p900 video/render: render unit / clip list / final render を作る。
-
-## 1. State schema（ジョブ状態）
-
-`docs/orchestration-and-ops.md` のマニフェストを最小化し、
-**テキスト（key=value）で状態を管理**する。
-
-状態ファイルはプロジェクトフォルダに置く：
-
-```
-output/<topic>_<timestamp>/state.txt
-```
-
-人間向けの run navigation は別に持つ：
-
-```
-output/<topic>_<timestamp>/p000_index.md
-```
-
-更新方式は **append-only delta event** とする。各 transaction block は変更された key と transaction metadata だけを持ち、block 単体を完全 snapshot とみなさない。current state は先頭から全 committed block を順に適用し、同じ key の最後の値を採用した結果である。
+State は `output/<topic>_<timestamp>/state.txt` に append-only delta event として保存する。
+`state.current.json`、`run_status.json`、`p000_index.md` はこの履歴から作る derived view であり、
+第二の正本ではない。
 
 ```text
 # toc.state.delta.v1 {event envelope JSON}
 timestamp=ISO8601
 slot.p410.status=in_progress
-review.semantic.scene_set.status=reviewing
+artifact.script=script.md
 ---
 ```
 
-storage contract:
+storage rules:
 
-- `state.txt` は唯一の canonical state history。履歴を置換、truncate、過去bytesへrestoreしない。
-- 一つの process update に含まれる複数 key は、一つの atomic delta event として commit する。
-- state key taxonomy と value の string contract は従来どおり維持する。storage移行だけを理由に business key を二重化しない。
-- explicit empty string は key clear の有効な値であり、削除と解釈しない。
-- writer は shared state store APIだけを使用し、read-current、merge、append、current-view publishを同じtransaction lock内で行う。
-- 各delta envelopeの`state_hash`は、そのevent適用後のcurrent state全体digest。`event_hash`の入力にも含め、末尾eventだけを読むbounded I/Oで派生view本文をcanonical historyへ暗号学的に束縛する。
-- `state.current.json` は canonical log head の `sequence / event hash / committed bytes / log inode・mtime・ctime / run-root identity / state_hash` に束縛した derived materialized view。current state digestと直近128件のderived event indexを持つが、processは直接編集しない。明示event IDのretry判定はこのindexを権威として使わず、常にcanonical logをstream scanしてexact判定する。
-- `run_status.json` と `p000_index.md` は current view から再生成する表示用derived artifactであり、state mutationの入力正本にしない。
-- current view がmissing / stale / corruptならcanonical logをreplayして再構築する。legacy runの最初のrebuildだけfull history readを許容する。
-- legacy full / partial blockはglobal last-write-winsでreplayし、その後へdelta eventを追加できる。delta開始後にlegacy writerがblockを追加することは禁止する。
-- p500 resumeなどのpseudo rollbackは過去eventを削除せず、downstream keyをneutralizeする一つのnamed delta eventとして記録する。
-- plan tokenはparsed state digestに加えcanonical event headの`sequence / hash`へ束縛する。
-- event commit後にprojectionまたはartifact coordinationが失敗してもcanonical logを巻き戻さず、recovery journal / compensating event / projection rebuildで収束させる。
+- 一つの transaction の変更は一つの atomic delta event にする。
+- 同じ key は最後の committed value が current である。
+- state writer は shared store/lock API を使う。過去 event を削除、置換、truncate しない。
+- derived view が欠落・stale・破損したら canonical log を replay する。
+- resume は downstream state を新しい delta で stale/pending にし、履歴を巻き戻さない。
+- state に source/request/provider hashes、artifact paths、ordinary validation result、runtime
+  error を記録できる。production content score や certificate は要求しない。
+
+最小 state key catalog:
 
 ```text
-timestamp=ISO8601
 job_id=JOB_YYYY-MM-DD_0001
 topic=string
-status=INIT|RESEARCH|STORY|SCRIPT|VIDEO|QA|DONE
-runtime.review_mode=standard|preapproved
-runtime.review_policy=frontend|preapproved
-stage.research.status=pending|in_progress|awaiting_approval|done|failed|skipped
-stage.research.grounding.status=ready|missing_docs|missing_inputs
-stage.research.grounding.report=logs/grounding/research.json
-stage.research.readset.report=logs/grounding/research.readset.json
-stage.research.audit.status=passed|failed
-stage.research.audit.report=logs/grounding/research.audit.json
-stage.research.subagent.prompt=logs/grounding/research.subagent_prompt.md
-stage.research.playbooks.report=logs/grounding/research.playbooks.json
-stage.research.playbooks.selected_count=0
-stage.story.status=pending|in_progress|awaiting_approval|done|failed|skipped
-stage.story.grounding.status=ready|missing_docs|missing_inputs
-stage.story.grounding.report=logs/grounding/story.json
-stage.story.readset.report=logs/grounding/story.readset.json
-stage.story.audit.status=passed|failed
-stage.story.audit.report=logs/grounding/story.audit.json
-stage.story.subagent.prompt=logs/grounding/story.subagent_prompt.md
-stage.story.playbooks.report=logs/grounding/story.playbooks.json
-stage.story.playbooks.selected_count=0
-review.story.status=pending|reviewing|approved|changes_requested
-review.research.status=pending|reviewing|approved|changes_requested
-review.script.status=pending|reviewing|approved|changes_requested
-review.image.status=pending|reviewing|approved|changes_requested
-review.narration.status=pending|reviewing|approved|changes_requested
-review.research.duration_contract.status=passed|failed
-review.story.duration_contract.status=passed|failed
-review.story.subagent.prompt=logs/review/story.subagent_prompt.md
-review.story.subagent.prompt.generated_at=ISO8601
-eval.story.loop.status=pending|running|passed|changes_requested|failed
-eval.story.loop.max_rounds=5
-eval.story.loop.current_round=0
-eval.story.loop.final_report=story_review.md
-eval.story.loop.round_01.critic_1=logs/eval/story/round_01/critic_1.md
-eval.story.loop.round_01.critic_1_prompt=logs/eval/story/round_01/prompts/critic_1.prompt.md
-eval.story.loop.round_01.critic_5=logs/eval/story/round_01/critic_5.md
-eval.story.loop.round_01.critic_5_prompt=logs/eval/story/round_01/prompts/critic_5.prompt.md
-eval.story.loop.round_01.aggregated_review=logs/eval/story/round_01/aggregated_review.md
-stage.script.status=pending|in_progress|awaiting_approval|done|failed|skipped
-stage.script.grounding.status=ready|missing_docs|missing_inputs
-stage.script.grounding.report=logs/grounding/script.json
-stage.script.readset.report=logs/grounding/script.readset.json
-stage.script.audit.status=passed|failed
-stage.script.audit.report=logs/grounding/script.audit.json
-stage.script.subagent.prompt=logs/grounding/script.subagent_prompt.md
-stage.script.playbooks.report=logs/grounding/script.playbooks.json
-stage.script.playbooks.selected_count=0
-eval.scene_set.loop.status=pending|running|passed|changes_requested|failed
-eval.scene_set.loop.max_rounds=5
-eval.scene_set.loop.current_round=0
-eval.scene_set.loop.final_report=scene_set_review.md
-eval.scene_detail.loop.status=pending|running|passed|changes_requested|failed
-eval.scene_detail.loop.max_rounds=5
-eval.scene_detail.loop.current_round=0
-eval.scene_detail.loop.final_report=scene_detail_review.md
-review.script.scene_set.status=pending|approved|changes_requested|skipped
-review.script.scene_detail.status=pending|approved|changes_requested|skipped
-gate.script_scene_review=required|optional|skipped
-eval.cut_blueprint.loop.status=pending|running|passed|changes_requested|failed
-eval.cut_blueprint.loop.max_rounds=5
-eval.cut_blueprint.loop.current_round=0
-eval.cut_blueprint.loop.final_report=cut_blueprint_review.md
-review.script.cut.status=pending|approved|changes_requested|skipped
-gate.script_cut_review=required|optional|skipped
-eval.production_readiness.loop.status=pending|running|passed|changes_requested|failed
-eval.production_readiness.loop.max_rounds=5
-eval.production_readiness.loop.current_round=0
-eval.production_readiness.loop.final_report=production_readiness_review.md
-review.script.production_readiness.status=pending|approved|changes_requested|skipped
-gate.script_production_readiness_review=required|optional|skipped
-eval.p400_readiness.status=approved|changes_requested
-eval.p400_readiness.reason_keys=comma,separated,failed,deterministic,checks
-stage.narration.status=pending|in_progress|awaiting_approval|done|failed|skipped
-stage.narration.grounding.status=ready|missing_docs|missing_inputs
-stage.narration.grounding.report=logs/grounding/narration.json
-stage.narration.readset.report=logs/grounding/narration.readset.json
-stage.narration.audit.status=passed|failed
-stage.narration.audit.report=logs/grounding/narration.audit.json
-stage.narration.subagent.prompt=logs/grounding/narration.subagent_prompt.md
-stage.narration.playbooks.report=logs/grounding/narration.playbooks.json
-stage.narration.playbooks.selected_count=0
-stage.asset.status=pending|in_progress|awaiting_approval|done|failed|skipped
-stage.asset.grounding.status=ready|missing_docs|missing_inputs
-stage.asset.grounding.report=logs/grounding/asset.json
-stage.asset.readset.report=logs/grounding/asset.readset.json
-stage.asset.audit.status=passed|failed
-stage.asset.audit.report=logs/grounding/asset.audit.json
-stage.asset.subagent.prompt=logs/grounding/asset.subagent_prompt.md
-stage.asset.playbooks.report=logs/grounding/asset.playbooks.json
-stage.asset.playbooks.selected_count=0
-stage.scene_implementation.status=pending|in_progress|awaiting_approval|done|failed|skipped
-stage.render.status=pending|in_progress|awaiting_approval|done|failed|skipped
-stage.scene_implementation.grounding.status=ready|missing_docs|missing_inputs
-stage.scene_implementation.grounding.report=logs/grounding/scene_implementation.json
-stage.scene_implementation.readset.report=logs/grounding/scene_implementation.readset.json
-stage.scene_implementation.audit.status=passed|failed
-stage.scene_implementation.audit.report=logs/grounding/scene_implementation.audit.json
-stage.scene_implementation.subagent.prompt=logs/grounding/scene_implementation.subagent_prompt.md
-review.image_prompt.subagent.prompt=logs/review/image_prompt.subagent_prompt.md
-stage.scene_implementation.playbooks.report=logs/grounding/scene_implementation.playbooks.json
-stage.scene_implementation.playbooks.selected_count=0
-stage.video_generation.status=pending|in_progress|awaiting_approval|done|failed|skipped
-stage.video_generation.grounding.status=ready|missing_docs|missing_inputs
-stage.video_generation.grounding.report=logs/grounding/video_generation.json
-stage.video_generation.readset.report=logs/grounding/video_generation.readset.json
-stage.video_generation.audit.status=passed|failed
-stage.video_generation.audit.report=logs/grounding/video_generation.audit.json
-stage.video_generation.subagent.prompt=logs/grounding/video_generation.subagent_prompt.md
-stage.video_generation.playbooks.report=logs/grounding/video_generation.playbooks.json
-stage.video_generation.playbooks.selected_count=0
-gate.research_review=required|optional|skipped
-gate.story_review=required|optional|skipped
-gate.script_review=required|optional|skipped
-gate.image_review=required|optional|skipped
-gate.narration_review=required|optional|skipped
-gate.video_review=required|optional|skipped
-review.policy.story=required|optional|skipped
-review.policy.image=required|optional|skipped
-review.policy.narration=required|optional|skipped
-artifact.research=output/<topic>_<timestamp>/research.md
-artifact.research_review=output/<topic>_<timestamp>/research_review.md
-artifact.story=output/<topic>_<timestamp>/story.md
-artifact.story_review=output/<topic>_<timestamp>/story_review.md
-artifact.visual_value=output/<topic>_<timestamp>/visual_value.md
-artifact.script=output/<topic>_<timestamp>/script.md
-artifact.script_review=output/<topic>_<timestamp>/script_review.md
-artifact.asset_inventory=output/<topic>_<timestamp>/asset_inventory.md
-artifact.asset_plan=output/<topic>_<timestamp>/asset_plan.md
-artifact.manifest_review=output/<topic>_<timestamp>/manifest_review.md
-artifact.video=output/<topic>_<timestamp>/video.mp4
-artifact.video_review_report=output/<topic>_<timestamp>/video_review.md
-artifact.grounding.research=output/<topic>_<timestamp>/logs/grounding/research.json
-artifact.grounding.story=output/<topic>_<timestamp>/logs/grounding/story.json
-artifact.grounding.script=output/<topic>_<timestamp>/logs/grounding/script.json
-artifact.grounding.narration=output/<topic>_<timestamp>/logs/grounding/narration.json
-artifact.grounding.asset=output/<topic>_<timestamp>/logs/grounding/asset.json
-artifact.grounding.scene_implementation=output/<topic>_<timestamp>/logs/grounding/scene_implementation.json
-artifact.grounding.video_generation=output/<topic>_<timestamp>/logs/grounding/video_generation.json
-artifact.grounding.playbooks.research=output/<topic>_<timestamp>/logs/grounding/research.playbooks.json
-artifact.grounding.playbooks.story=output/<topic>_<timestamp>/logs/grounding/story.playbooks.json
-artifact.grounding.playbooks.script=output/<topic>_<timestamp>/logs/grounding/script.playbooks.json
-artifact.grounding.playbooks.narration=output/<topic>_<timestamp>/logs/grounding/narration.playbooks.json
-artifact.grounding.playbooks.asset=output/<topic>_<timestamp>/logs/grounding/asset.playbooks.json
-artifact.grounding.playbooks.scene_implementation=output/<topic>_<timestamp>/logs/grounding/scene_implementation.playbooks.json
-artifact.grounding.playbooks.video_generation=output/<topic>_<timestamp>/logs/grounding/video_generation.playbooks.json
-eval.research.status=approved|changes_requested
-eval.image_prompt.score=0.0-1.0
-eval.image_prompt.findings=0
-eval.image_prompt.unresolved_entries=0
-eval.script.status=approved|changes_requested
-eval.script.findings=0
-eval.manifest.status=approved|changes_requested
-eval.manifest.findings=0
-eval.video.status=approved|changes_requested
-eval.video.findings=0
-eval.narration.score=0.0-1.0
-eval.narration.findings=0
-eval.narration.unresolved_entries=0
----
-```
-
-### Frontend create input contract（`toc.create_input.v1`）
-
-新規 frontend create は、生成を始める前に、受け取った入力を
-`logs/orchestration/create_input.json` として run 内へ保存する。この JSON が
-resume / review policy の正本であり、`topic` や生成済み artifact から入力を推測しては
-ならない。通常の create、scene storyboard create、world walk create のいずれも
-`review_mode` をこの契約へ保存する。
-
-```json
-{
-  "schema_version": "toc.create_input.v1",
-  "topic": "シンデレラ",
-  "source": "シンデレラ",
-  "source_sha256": "<sha256 of source UTF-8 bytes>",
-  "experience": "cinematic_story",
-  "source_run": null,
-  "target_duration_seconds": 300,
-  "review_mode": "standard"
-}
-```
-
-フィールド契約:
-
-- `schema_version`: 常に `toc.create_input.v1`。
-- `topic`: 空でないタイトル。
-- `source`: 実際に materialize へ渡した source の完全な文字列。`source_sha256` はその
-  UTF-8 bytes の SHA-256 と一致しなければならない。
-- `experience`: `cinematic_story|world_walk`。`world_walk` では `source_run` に
-  repo-relative な参照元 run path を持ち、`cinematic_story` では `null` とする。
-- `target_duration_seconds`: 整数 `300..1200`（省略時 `300`）。
-- `review_mode`: `standard|preapproved`（省略時 `standard`）。UI/API の明示入力であり、
-  暗黙の fallback や run 作成後の変更を許可しない。
-
-`review_mode` と review policy の意味は次の通り。
-
-- `standard` は既定値で、外部 semantic reviewer turn と frontend human review を通常どおり
-  実行する。required gate は `required` のまま扱い、L1/L2 が自動承認してはならない。
-- `preapproved` は frontend create でユーザーが明示した場合だけ有効になる。対象の
-  `research`, `story`, `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`,
-  `image_prompt` について外部 semantic reviewer turn と frontend human reviewer turn を
-  省略するが、review 自体を消すわけではない。各 stage の canonical
-  `collection` / `scope` / `prompt` / `report` pack を materialize し、source/input digest に
-  束縛した `deterministic_preapproval` report を `status: passed` として残す。pack、digest、
-  grounding/schema/参照整合、request snapshot、provider provenance、生成ファイルの存在・
-  decode、fixed-slot completeness の deterministic validation は常に実行し、blocking
-  diagnostics があれば fail-close する。
-
-`runtime.review_mode` は `create_input.json.review_mode` と完全一致し、
-`runtime.review_policy` は `standard -> frontend`、`preapproved -> preapproved` と投影する。
-不一致、欠落、読めない create input は preapproved として扱わず停止する。
-
-### Frontend create の p680 review handoff
-
-preapproved は materialization 直後に image review を完了扱いにしない。media generation 前は
-`gate.image_review=skipped` でも `review.image.status=pending` として保持し、asset / scene image
-の request-bound provenance と output validation を済ませる。p680 の terminal validation が
-成功した時だけ、次の状態を記録する。
-
-```text
-runtime.review_mode=preapproved
-runtime.review_policy=preapproved
-gate.research_review=skipped
-gate.story_review=skipped
-gate.image_review=skipped
-review.research.status=approved
-review.story.status=approved
-review.image.status=approved
-slot.p670.status=skipped
-slot.p680.status=done
-```
-
-標準 mode の同じ handoff は `gate.image_review=required`、`review.image.status=pending`、
-`slot.p680.status=awaiting_approval` で停止する。いずれの mode でも p680 は slot/state の
-文字列だけでは成立せず、fresh verify report、immutable request snapshot、request-bound
-provenance、生成画像の存在・decode・fixed-slot completeness を満たす必要がある。
-
-### 1.0 Run-level supervisor handoff
-
-ToC run 全体は `p100` 番台ごとの L2 P-Bucket Supervisor に所有権を渡して進める。L1 Run Orchestrator は bucket 完了時に本文 artifact を読まず、supervisor result と slot state だけを検証する。
-
-L1 は L2 supervisor を起動した時点で、run dir 内の進捗メモに呼び出しを残す。記録対象は L2 P-Bucket Supervisor だけで、L3 task / review agents はここへ記録しない。
-
-```text
-output/<topic>_<timestamp>/logs/orchestration/l2_supervisor_progress.md
-```
-
-Markdown table shape:
-
-```markdown
-| at | bucket | supervisor | event | stop_slot | result | note |
-| --- | --- | --- | --- | --- | --- | --- |
-| 2026-05-20T12:00:00+09:00 | p600 | p600 P-Bucket Supervisor | invoked | p680 | - | frontend handoff path |
-```
-
-- `event`: `invoked|returned|blocked|failed`
-- `bucket`: `p100|p200|...|p900`
-- `result`: 完了後に `logs/orchestration/pXXX.supervisor_result.json` を指す。起動時は `-`
-- L3 の critic / aggregator / scene worker などは isolated artifact にだけ残し、この progress memo には載せない
-- 追記 helper: `python scripts/record-l2-supervisor-progress.py --run-dir <run_dir> --bucket p600 --event invoked --stop-slot p680`
-- `returned|blocked|failed` の terminal event では `--result logs/orchestration/pXXX.supervisor_result.json` を必須にする
-- `scripts/verify-pipeline.py` は stage target に必要な bucket の `invoked` progress、`state.txt` の `returned` terminal state、supervisor result JSON を検証する
-
-各 bucket は完了時に次の artifact を書く。
-
-```text
-output/<topic>_<timestamp>/logs/orchestration/pXXX.supervisor_result.json
-```
-
-JSON shape:
-
-```json
-{
-  "bucket": "p100",
-  "status": "done",
-  "completed_slots": ["p110", "p120", "p130"],
-  "required_artifacts": [
-    {"path": "research.md", "exists": true, "status": "ready"}
-  ],
-  "state_keys": {
-    "stage.research.status": "done",
-    "slot.p120.status": "done",
-    "slot.p130.status": "done"
-  },
-  "review_outputs": [
-    {"slot": "p130", "path": "research_review.md", "status": "passed"}
-  ],
-  "next_bucket": "p200",
-  "blocked_reason": null
-}
-```
-
-Field contract:
-
-- `bucket`: `p100|p200|...|p900`
-- `status`: `done|blocked|failed`
-- `completed_slots`: 担当 bucket 内で terminal state になった slot
-- `required_artifacts`: L1 が存在確認すべき artifact。本文品質判断ではなく存在・状態確認用
-- `state_keys`: L2 supervisor が更新した主要 state key の latest values
-- `review_outputs`: review loop、human handoff、frontend handoff の report artifacts
-- `next_bucket`: 次に起動すべき bucket。stop target 到達時は `null`
-- `blocked_reason`: `blocked|failed` のとき必須
-
-State key pattern:
-
-```text
-artifact.l2_supervisor_progress=logs/orchestration/l2_supervisor_progress.md
-orchestration.<bucket>.supervisor.progress=logs/orchestration/l2_supervisor_progress.md
-orchestration.<bucket>.supervisor.call_status=invoked|returned|blocked|failed
-orchestration.<bucket>.supervisor.invoked_at=ISO8601
-orchestration.<bucket>.supervisor.last_event_at=ISO8601
-orchestration.<bucket>.supervisor.stop_slot=pXXX
-orchestration.<bucket>.supervisor.status=done|blocked|failed
-orchestration.<bucket>.supervisor.result=logs/orchestration/<bucket>.supervisor_result.json
-orchestration.<bucket>.supervisor.finished_at=ISO8601
-```
-
-L1 はこの result と fixed slot state を検証し、次 bucket の L2 supervisor を起動する。`research.md` / `story.md` / `script.md` / `video_manifest.md` などの本文 artifact を次 bucket 判定のために読まない。
-
-### 1.1 Authoring-after evaluator-improvement loop
-
-Authoring の直後に置かれる review slot は **最大 1 round の evaluator-improvement loop** として扱う。
-
-対象 slot:
-
-- `p130`: research authoring 後の review
-- `p230`: story authoring 後の review
-- `p320`: visual planning authoring 後の review
-- `p410b`: abstract scene-set review
-- `p410c`: concrete per-scene review
-- `p430`: script authoring 後の review
-- `p540`: asset plan authoring 後の review
-- `p630` / `p640`: scene implementation authoring 後の hard review / judgment review
-- `p720`: narration text authoring 後の review
-- `p820` / `p850`: motion / video authoring 後の review
-- `p930`: final QA / runtime summary 後の review
-
-各 round の構成:
-
-- critic agent: 5 agents
-  - それぞれ独立に同じ canonical artifact と stage readset を読み、rubric finding を出す
-  - critic は canonical artifact、`state.txt`、`p000_index.md` を直接編集しない
-  - finding は表層的な「不足」「弱い」「不明」だけで終わらせず、`root_cause`（本質原因）、`downstream_impact`（後段への影響）、`fix_direction`（修正方針）、`acceptance_condition`（次回通過条件）を明示する
-  - `p410b` scene_set では、critic を `scene_count_coverage`, `dramatic_structure + reveal_order`, `duration_density`, `visual_production`, `handoff_integrity` に分ける。aggregator は `Scene Count Gate`、`Scene Specificity Gate`、`Reveal Order Gate`、`Handoff Chain Gate` を gate 項目として扱う
-  - `p410c` scene_detail では scene 数 gate を繰り返さず、各 scene の必要性、内部圧力、`value_shift` の可視性、`causal_turn` の可視性、隣接 scene handoff を `Scene Detail Gate` として扱う
-- aggregator: 1 agent
-  - 5 critic outputs を統合し、重複排除、severity、採用すべき修正方針、次 round の pass/fail をまとめる
-  - 採用する blocker には、失敗した check 名だけでなく、その failure を生んだ設計・依存・state・contract 上の原因と、明確な修正方針がある場合の target artifact / section / acceptance condition を書く
-  - `p410b` の aggregator は、次に追加できる scene 候補と、それを scene 追加ではなく cut 増厚へ回す理由、および scene_set gate の全項目が説明されるまで `passed` にしない。`p410c` の aggregator は `Scene Detail Gate` が解決されるまで `passed` にしない
-  - aggregator も canonical artifact を直接編集しない
-- owning L2 P-Bucket Supervisor:
-  - aggregator report から採用する修正を選び、canonical artifact に反映する single writer
-  - 修正後、同じ review slot の次 round を実行する
-
-`p720` の現行実装は、この共通 review-loop の artifact naming と、音声作品固有の意味評価を二層に分ける。
-`scripts/run-p720-narration-l3.py` が出す `critic_*.md` / `aggregated_review.md` は、決定論的 finding を5観点へ
-投影した互換 artifact であり、5回の独立 LLM 判定ではない。独立した意味評価はその後に
-`scripts/run-p720-narration-semantic.py` が別 app-server thread で実行する5 criticを正本とする。
-
-停止条件:
-
-- aggregator が `passed` を返したら loop を終了し、対応 stage を次 slot へ進める
-- aggregator が `changes_requested` を返し、round < 5 なら担当 L2 supervisor が修正して次 round を実行する
-- round 5 後も `changes_requested` なら `eval.<stage>.loop.status=changes_requested` とし、human review / explicit override なしに次工程へ進めない
-
-state key pattern:
-
-```text
-eval.<stage>.loop.status=pending|running|passed|changes_requested|failed
-eval.<stage>.loop.max_rounds=5
-eval.<stage>.loop.current_round=0-5
-eval.<stage>.loop.final_report=<stage>_review.md
-eval.<stage>.loop.round_01.critic_1=logs/eval/<stage>/round_01/critic_1.md
-eval.<stage>.loop.round_01.critic_1_prompt=logs/eval/<stage>/round_01/prompts/critic_1.prompt.md
-eval.<stage>.loop.round_01.critic_5=logs/eval/<stage>/round_01/critic_5.md
-eval.<stage>.loop.round_01.critic_5_prompt=logs/eval/<stage>/round_01/prompts/critic_5.prompt.md
-eval.<stage>.loop.round_01.aggregator_prompt=logs/eval/<stage>/round_01/prompts/aggregator.prompt.md
-eval.<stage>.loop.round_01.aggregated_review=logs/eval/<stage>/round_01/aggregated_review.md
-```
-
-`eval.<stage>.*` summary は loop の最新 round / aggregator 結果から更新する。critic 個別 report は根拠 artifact、aggregator report は gate 判定の正本、canonical artifact の最終差分は担当 L2 supervisor の編集を正本とする。
-
-`video_manifest.md` top-level contract:
-
-```text
-manifest_phase=skeleton|production
-```
-
-- `skeleton`: narration review / TTS / duration gate に必要な最小構造
-- `production`: image / video 実装 field を持つ生成正本
-
-対応テンプレート: `workflow/state-schema.txt`
-
-grounding 契約の正本:
-
-- `workflow/stage-grounding.yaml`
-- `scripts/resolve-stage-grounding.py`
-- `scripts/select-stage-playbooks.py`
-
-Evaluator summary:
-
-- `eval.research.*`
-  - research evaluator の run 単位 summary
-  - `status` は `approved|changes_requested`
-- `eval.script.*`
-  - script evaluator の run 単位 summary
-- `eval.manifest.*`
-  - scene/cut evaluator の run 単位 summary
-- `eval.video.*`
-  - video generation 後の evaluator summary
-- `eval.image_prompt.*`
-  - 画像 prompt evaluator の run 単位 summary
-  - `score` は average overall score
-  - `findings` と `unresolved_entries` は gate 状況の把握用
-  - `rubric.*` に criterion average を持てる
-- `eval.narration.*`
-  - ナレーション evaluator の run 単位 summary
-  - `rubric.tts_readiness` / `story_role_fit` / `anti_redundancy` / `pacing_fit` / `spoken_japanese` を持てる
-
-派生物（machine-facing）:
-
-```
-output/<topic>_<timestamp>/run_status.json
-```
-
-- `state.txt` の flat / nested view
-- artifact inventory
-- pending gate
-- `eval_report.json`（あれば埋め込む）
-
-### 1.0.1 Run navigation index
-
-`p000_index.md` は run 直下の人間向け入口で、少なくとも次を含む。
-
-- current stage
-- next required human review
-- stage table
-- current run inventory
-- file-to-stage mapping
-
-`current_position` は現在の stage / runtime progress を示す。未承認の human review gate が残っている場合も、進行中の stage を上書きせず、`next_required_human_review` と `pending_gates` に分けて表示する。
-
-番号運用は navigation layer だが、slot contract は固定である。
-
-- `100` 番台ごとに大工程を割り当てる
-- `10` 番台刻みは fixed slot contract の一部として扱う
-- `p000_index.md` は fixed slot contract に基づく run progress の source of truth
-- 第1段階では `assets/**`, `logs/**`, `scratch/**` を rename しない
-- narration は
-  - `p400`: narration contract / narration draft / script review / human changes / skeleton manifest materialization
-  - `p700`: TTS 実行 / duration fit gate / audio runtime handoff
-  に分けて扱う
-
-### 1.0.2 Fixed p-slot workflow contract
-
-Canonical p300 requirements live in this section. Other docs may summarize p300, but this section is the source of truth for what `visual_value.md` must contain and what p300 must not produce.
-
-`p100` から `p900` までの slot 意味は、すべての story で共通の固定契約とする。story ごとの差分は slot の意味を変えるのではなく、各 slot の状態と要件で表現する。
-
-各 slot は次の generic keys を持つ。
-
-```text
-slot.pXXX.status=pending|in_progress|awaiting_approval|done|failed|skipped
-slot.pXXX.requirement=required|optional
-slot.pXXX.skip_reason=string
-slot.pXXX.note=string
-slot.pXXX.review_loop.status=pending|running|passed|changes_requested|failed
-slot.pXXX.review_loop.current_round=0-5
-```
-
-固定 slot の意味:
-
-- `p100`: research
-- `p200`: story
-- `p300`: visual planning
-  - `visual_value.md` を正本として、cut 作成前に visual identity / scene visual value / anchor / reference strategy / asset candidates / regeneration risks / downstream handoff を決める
-- `p400`: scene/cut design / script / narration draft / human changes
-- `p500`: asset
-- `p600`: scene implementation / image
-- `p700`: narration / audio runtime
-- `p800`: video
-- `p900`: render / QA / runtime
-
-stage target resolution:
-
-- `p100` / `100` / `research` -> `p130` research review handoff
-- `p200` / `200` / `story` -> `p230` story review handoff
-- `p300` / `300` / `visual_value` -> `p330` visual planning handoff
-- `p400` / `400` -> `p450` script handoff / skeleton manifest materialization
-- `p500` / `500` / `asset` -> `p570` asset continuity / human review handoff
-- `p600` / `600` / `scene_implementation` / `image` -> `p680` image review handoff
-- `p700` / `700` / `narration` -> `p750` audio QA / human review handoff
-- `p800` / `800` / `video_generation` -> `p850` video review / exclusions handoff
-- `p900` / `900` / `render` / `video` -> `p930` final QA / runtime handoff
-
-100 番台の coarse p-number target は stage 開始 slot ではなく、対応 stage の human-review handoff slot まで進める。細番号 target（例: `p450`）はその slot を直接指す。
-
-運用ルール:
-
-- story 固有の差分は `slot.pXXX.status` / `slot.pXXX.requirement` / `slot.pXXX.skip_reason` / `slot.pXXX.note` にのみ載せる
-- slot の意味や順序を story ごとに変更しない
-- `p000_index.md` はこの固定 slot contract を run progress の正本として要約する
-- `p800` は個別 clip / scene compile の生成までを担い、最終結合前に全 scene compile の audio/video stream を正規化できる状態で終える
-- `p900` は最終 render / QA の責務として、scene compile をそのまま `concat -c copy` しない。最終結合前に全 scene compile を同一仕様へ正規化する
-  - video: `1280x720` または run の target size、`24fps`、`yuv420p`
-  - audio: `AAC`, `44100Hz`, `stereo`
-  - 理由: `mono -> stereo` など channel layout が途中で変わると、concat 境界以降でジャミング音・ノイズ化が発生するため
-
-#### Duration-aware story run contract
-
-- create API の request field は `target_duration_seconds`。省略時は `300`、整数 `300..1200` のみを受け付ける。以下、この値を `T` とする。
-- `story.md.story_metadata.time` は物語世界の歴史的時代を表す string とする。古典・既存物語は `〇〇時代` の形式で非空にし、ユーザー創作は `""` を許容する。`story.md.story_metadata.time -> script.md.script_metadata.time -> video_manifest.md.video_metadata.time` の一方向だけで projection し、非空値は asset / scene image provider prompt の時代整合制約と video provider prompt の continuity に含める。空文字では時代用 fragment を生成しない。
-- p600 の candidate request を materialize した時点では `slot.p650.status=pending`、`review.image_prompt.request_freeze.status=draft` とする。image-prompt semantic repair は `video_manifest.md.scenes[].cuts[].image_generation.first_frame_visual_plan` と cut-local dependency/reference を修正し、orchestrator が payload / request Markdown / snapshot を同期再生成する。asset 生成後かつ semantic pack 構築前に全 scene reference を実在 bytes の sha256 へ束縛し、provider-ready request revision を確定する。standard では deterministic hard gate と external semantic report、preapproved では同じ pack / digest から作った `deterministic_preapproval` report が同一 revision で pass した後に freeze する。freeze は snapshot を変更せず、strict validation と state 遷移だけを行う。その場合だけ `request_freeze.status=frozen`、`slot.p650.status=done`、p600 supervisor result `status=done` にできる。
-- terminal p680 は slot/state の文字列だけでは成立しない。asset/image の immutable request snapshot と request-bound provenance が current であり、`verify-pipeline.py --stage-target p680` が exit 0、fresh `eval_report.json.stage_target=p680`、`overall.passed=true`、かつ report に出力された全 stage が pass のときだけ handoff を terminal とする。standard では `p680=awaiting_approval`、`review.image.status=pending`、`gate.image_review=required`、明示 preapproved では `p680=done`、`review.image.status=approved`、`gate.image_review=skipped` とする。provider 実行前の pre-handoff 検証ではこの terminal 条件を要求しない。
-- repair が `video_manifest.md.assets` を変えた場合は `asset_plan.md` と asset request/snapshot を共通 compiler から再 projection し、変更 asset の生成後に scene snapshot の参照 hash を再束縛する。修正後の deterministic story-consistency report も再生成し、修正前 report や旧 asset prompt/source digest を current revision として扱わない。
-- request、`runtime.target_video_seconds`、`research.md.metadata.target_duration_seconds`、`story.md.story_metadata.target_duration_seconds`、`script.md.script_metadata.target_duration_seconds`、`video_manifest.md.video_metadata.target_duration_seconds` は同じ `T` を保持し、後段が独自の固定 300 秒へ戻してはならない。
-- standard の research/story semantic review は cut materialization 前の必須 gate である。各 passed report は scope の全 entry を正確に列挙し、stage 固定の全 criterion について `criterion_id`、`status=passed`、空でない artifact-local `evidence` を `criteria_results_json` に残す。preapproved では external reviewer turn を実行しないが、同じ collection / scope / prompt pack と source/input digest に束縛した `deterministic_preapproval` report を materialize し、同じ criterion と evidence 契約を検証する。review transport failure、criterion 欠落、根拠欠落、failed deterministic check はどちらの mode でも pass とみなさない。
-- semantic repair 後は artifact を再読し、research の `metadata.target_duration_seconds` / `duration_plan` と story の `story_metadata.target_duration_seconds` / scene / narration floors を request target に再照合する。不一致は `review.*.duration_contract.status=failed` として story または cut materialization 前に停止する。
-- planning budget の lower bounds は次で固定する。
-  - scene count: `ceil(T / 40)`
-  - cut coverage: `scene_cut_coverage_plan.event_beat_inventory[]` は全 `scene_event.event_sequence[]` の ordered nonblank `beat_id` を exact に保持する。そのうち `must_be_seen != false` の beat と承認済み coverage obligation について、原因・反応・物証・場所遷移・期限・終了状態のいずれかが異なる可視責務を exactly once 割り当てる。duration の割り算だけで決める cut floor は持たない
-  - narration seconds: `ceil(T * 0.70)`
-  - effective runtime: `T * 0.80`
-- `minimum_cut_count` / `scene_cut_coverage_plan.min_cut_count.selected` は上記の distinct semantic obligations から導く。目標尺だけを理由に obligation や cut を追加せず、尺不足は既存 cut の許容 duration、scene duration 配分、narration / intentional silence、target runtime、provider capability を見直して解決する
-- p740 audio timeline `A` は、各 spoken cut の実測 audio 秒と、`intentional: true` / `confirmed_by_human: true` / non-empty `kind` / non-empty `reason` を持つ silent cut の明示 `video_generation.duration_seconds` の合計である。単なる `tool: silent` は incomplete とする。
-- video timeline `V` は scene ごとに正本を一つ選ぶ。`render_units[]` があれば unit duration 合計、なければ非 deleted cut duration 合計とし、render unit と source cut を二重計上しない。
-- `A` と `V` は並列 layer であり足さない。pre-render effective runtime は `min(A, V)`。全対象の測定が complete かつ `min(A, V) >= 0.8*T` の場合だけ p740 を pass する。上限は設けず、`1.5*T` でも下限を満たせば pass する。
-- `video_metadata.duration_seconds` は sync 後の derived cache であり、p740 actual の自己申告値として信用しない。p740 は manifest と media を再測定する。
-- final video は完成 media 自体を ffprobe し、`review.final.duration_fit.*` に別 layer として記録する。p740 actual と final actual は加算も相互上書きもしない。
-- p680 image handoff から p900 final QA までの one-click 自動継続は、この contract の対象外である。
-
-Canonical p300 done 条件:
-
-- `visual_value.md` が存在する
-- 主要 story scene に `scene_visual_values[]` の coverage がある
-- `asset_bible_candidates` が列挙されている
-- `anchor_cut_candidates` が列挙されている
-- `reference_strategy` がある
-- `regeneration_risks[]` がある
-- `handoff_to_p400_p500_p600_p700` がある
-- 本番 cut prompt、画像生成 request、asset 画像、動画 motion prompt を p300 で作っていない
-
-Canonical p400 scope:
-
-p400 は `story.md` と `visual_value.md` を、後続 stage が実行できる scene/cut 設計へ変換する stage とする。
-ここでの成果物は `script.md` と `video_manifest.md`（`manifest_phase: skeleton`）であり、画像・asset・動画の生成実行はしない。
-
-p400 の内部 slot:
-
-- `p410`: scene completion gate
-  - `p410a`: 各 story scene について、物語上の役割、観客に渡す情報、まだ隠す情報、感情変化、visual value との接続を scene intent card として固定する
-  - semantic QA: 各 scene は、単なる段落や雰囲気ではなく、上流 story のどの意味を受け取り、何を変化させ、次 scene に何を渡すかを説明できる必要がある
-  - 各 scene は次 scene への `handoff_to_next_scene`（最終 scene は `terminal_resolution`）、`story_specificity`、および `coverage_review` を持つ
-  - scene-level の `importance`, `target_duration_seconds`, `estimated_duration_seconds` は optional / advisory な計画注釈とする。欠落だけを blocking finding にせず、値がある場合も cut 数や coverage floor の根拠にしない
-  - `p410b`: 抽象 reviewer が全 scene set を俯瞰し、追加/削除/統合/分割/順序変更/話の接続を評価する内部 review-loop label（CLI stop target ではなく `--slot p410b` で prompt materialize する）
-  - `p410b` は scene 数を圧縮優先で approve しない。承認済み story の主要 beat が独立した `dramatic_question` / `value_shift` / `causal_turn` を持てるなら、まず scene として追加/分割する
-  - `p410b` の stop condition は、これ以上 scene を増やしても既存 scene と同じ問い・同じ価値変化・同じ因果 turn しか持てず、cut 設計を厚くした方が品質が上がると説明できる状態である
-  - `p410c`: 具体 reviewer が scene ごとに必要性、情報量、内部整合、handoff の十分性を評価する内部 review-loop label（CLI stop target ではなく `--slot p410c` で prompt materialize する）
-  - 具体 reviewer は 5-20 分程度の全体目標尺、semantic density、provider capability から必要尺を見積もる。scene-level の importance / target / estimated duration がある場合は advisory input として使えるが、欠落だけを blocking finding にせず、尺だけから cut 責務や cut 数を追加しない。cut 追加は既存 cut と異なる semantic obligation / event beat がある場合に限る
-  - cut duration は選択 provider / model / input mode の capability と可視責務の密度で検査し、duration の割り算を cut-count floor にしない
-  - 具体 reviewer は、その scene で見せるべき内容が cut に全て載っているかを確認する
-  - 次 scene 接続 reviewer は次 scene も読み、現在 scene の最終 cut が次 scene へつながるかを判断する。handoff が既存と異なる distinct semantic obligation の場合だけ cut 追加を要求し、同じ責務なら最終 cut の増厚を要求する
-  - 抽象 review loop は `eval.scene_set.loop.*` / `scene_set_review.md` に記録する
-  - 具体 review loop は `eval.scene_detail.loop.*` / `scene_detail_review.md` に記録する
-  - human review は `gate.script_scene_review` / `review.script.scene_set.status` / `review.script.scene_detail.status` で required|optional|skipped を切り替える
-  - agent 指摘による scene 追加/削除/統合/分割/順序変更、scene intent 修正、transition 補強は担当 `p400` L2 supervisor が自動適用する
-- `p420`: cut blueprints
-  - 各 scene を production 用 cut に分解する
-  - 各 cut は `cut_role`, `duration intent`, `target_beat`, `must_show`, `must_avoid`, `done_when`, `visual_beat`, `narration role`, `asset dependency hint` に加えて、`cut_contract.source_event_contract.primary_event_beat_id` / `source_event_beat_ids` で `scene_event.event_sequence[].beat_id` を参照する。coverage plan 側の assignment 表示が必要な場合も `event_assignment.source_event_contract` の derived 表示にし、top-level authoring field にはしない
-  - semantic QA: 各 cut は scene の意味を映像単位に翻訳する。場所移動、感情転換、証拠提示、reveal、reaction、handoff を件数合わせで混ぜず、1 cut の viewer-facing intent を明確にする
-  - 1 cut は 1 つの物語意図または 1 つの visual beat を担い、複数の感情転換や複数の場所移動を詰め込まない
-  - `review.script.scene_set.status=approved`、`review.script.scene_detail.status=approved`、全 scene の `agent_review.status=passed` が揃うまで cut を作らない
-  - cut authoring は scene 単位の parallel agent に分担してよいが、`script.md` への統合は担当 `p400` L2 supervisor / bucket single writer が行う
-  - p420 cut review は critic_1=`cut_intent_isolation`, critic_2=`scene_event_coverage`, critic_3=`first_frame_motion_readiness`, critic_4=`multimodal_event_boundary_coverage`, critic_5=`duration_density_and_handoff` を標準割当とする。critic_2/4 は `event_beat_reference_integrity`, `source_event_preservation`, `event_context_for_cut_ready`, `no_unapproved_event_invention` を blocking gate として扱う
-  - aggregator は `Cut Blueprint Gate` を持ち、1 cut = 1 intent、`event_beat_inventory[]` と `event_sequence[]` の exact ordered nonblank `beat_id` 一致、`must_be_seen != false` beat の cut assignment、source beat と任意の非空 `beat_function` の一致、未承認 event invention 禁止、first frame と motion の責務分離、multimodal contract、duration / handoff が説明できる場合だけ passed を返す。固定 function 名の集合は要求しない
-  - agent review loop は `eval.cut_blueprint.loop.*` / `cut_blueprint_review.md` に記録する
-  - human review は `gate.script_cut_review` / `review.script.cut.status` で required|optional|skipped を切り替える
-- `p430`: script review handoff
-  - `script.md` を正本として、scene intent / cut blueprint / narration / TTS text / human review criteria を review する
-  - reveal 順序、facts、theme、主人公、承認済み human request を無断で変更していないことを確認する
-- `p435`: production readiness council
-  - p430 合格後、p440 human changes / narration sync の前に `production_readiness_review.md` を作る
-  - Structure Auditor は script の骨格、因果、scene/cut 接続、破綻を評価する
-  - Duration Auditor は cut 数と台本から 5-20 分動画の尺を予測し、provider capability を踏まえて不足を特定する。`target_duration_seconds` と cut duration 合計の比較を p700 へ defer してはいけないが、尺だけを理由に filler scene / cut を発明しない
-  - Quality Auditor は骨格と semantic coverage の弱点から、既存と異なる責務がある場合だけ scene/cut 追加を提案する。責務が同じなら cut 増厚、duration、scene 構成、映像品質の改善を提案する
-  - Orchestrator は各 auditor の意見を統合して Design Owner 向け patch brief を作る
-  - Orchestrator と auditor は意見側であり、後段で使われる設計書を編集しない。この process 内で downstream design artifacts を触れるのは Design Owner だけとする
-- `p450`: skeleton manifest materialization
-  - approved または review-ready な `script.md` から、`video_manifest.md` を `manifest_phase: skeleton` として materialize する
-  - skeleton manifest には scene/cut 構造、cut 正本の `cut_contract`、旧 reader 用 `scene_contract` alias、asset id placeholder、image/audio/video の実行枠を置く
-  - 本番 image prompt、asset 画像、motion prompt の最終文面は p500/p600/p800 に渡し、p400 で確定しない
-
-Canonical p400 done 条件:
-
-- `script.md.scenes[]` が `story.md` の主要 scene を coverage している
-- `eval.p400_readiness.status=approved` である。これがない限り p500 asset stage は grounding で `missing_inputs` になり、開始しない
-- `video_manifest.md.video_metadata.target_duration_seconds` は 300-1200 秒であり、skeleton または promoted production manifest 上の計画尺が target の 80% 以上である。上限超過だけを理由に fail にしない
-- `script.md` と `video_manifest.md` の scene/cut selector が完全一致している
-- `scene_set_review.md` / `scene_detail_review.md` / `cut_blueprint_review.md` / `script_review.md` / `production_readiness_review.md` が required section と passed status を持つ
-- p400 review loop は各 surface で 5 critic report と aggregated review を持ち、p410b aggregate は `Scene Count Gate` / `Scene Specificity Gate` / `Reveal Order Gate` / `Handoff Chain Gate`、p410c aggregate は `Scene Detail Gate`、p420 aggregate は `Cut Blueprint Gate`、p435 は `Design Owner Patch Brief` を持つ。required gate の値が `TODO` / `TBD` / `pending` / `changes_requested` / `failed` / `missing` / `unclear` / `none` / `null` / `n/a` / `なし` / `不明` / `未定` / `不足` のままなら p400 readiness は落ちる
-- 各 scene が `scene_intent` と `scene_event` を持つ。正本順序は `scene_intent = なぜ必要か`、`scene_event = 何が起きるか`、`cut_contract = どう見せるか`
-  - story purpose
-  - audience information
-  - withheld information / reveal constraint
-  - affect transition
-  - visual value source
-  - source grounding / creative boundary
-  - story_specificity: non-compressible beat, scene promotion reason, unique responsibility, actor forces, meaning ladder, concrete handoff, anti-template language
-- `scene_event` は `schema_version: "scene_event_v1"` を持ち、`event_logline`, `start_situation`, `source_story_beat_ids`, `event_sequence[]`, `turning_event`, `end_situation`, `offscreen_context`, `forbidden_event_changes` を必須とする
-- `scene_event.event_sequence[]` は1件以上とし、各 beat が scene 内で一意な非空 `beat_id` と任意の非空 `beat_function` を持つ。`scene_cut_coverage_plan.event_beat_inventory[]` はこの exact ordered authored `beat_id` list を保持し、そのうち `must_be_seen != false` の beat を cut assignment へ投影する。`setup`, `pressure`, `turn`, `payoff`, `threshold`, `custom` は function 候補例にすぎず、固定 ladder や必須集合ではない。独自 function の1 beat scene も有効である。`cut_id`, `camera`, `shot`, `lens`, `framing`, `image_prompt`, `video_prompt`, `motion_prompt` は入れない
-- `story_event_obligations` は互換 projection として残す。新規生成の正本は `scene_event.event_sequence[]`
-- 各 renderable scene が `cuts[]` を持ち、各 cut が正本 `cut_contract` 相当の完了条件を持つ。`scene_contract` は旧 reader 用 alias であり、scene-level 正本ではない
-- 各 cut が narration の役割を持つ。無音 cut の場合は、p700 へ渡せる `silence_contract` の必要性が明示されている
-- asset が必要そうな character / object / location / reusable still は、p500 用の dependency hint として列挙されている
-- `human_change_requests[]` が selector 付きで正規化され、p400 内で採用/保留/承認待ちが追跡できる
-- `video_manifest.md` が `manifest_phase: skeleton` として存在する。後段で `production` へ昇格済みの場合も p400 readiness は維持できるが、p400 gate 自体は skeleton manifest の scene/cut selector が `script.md` と対応していることを見る
-- 本番 image prompt、asset 画像、TTS 実行、動画生成、最終 render を p400 で実行していない
-
-### 1.1 `status` と `stage.*.status` の役割分担
-
-- `status`
-  - 粗い現在地を示す
-  - `RESEARCH` / `STORY` / `SCRIPT` / `VIDEO` / `QA` / `DONE`
-- `stage.<name>.status`
-  - 実務上の完了状況を示す
-  - `state.txt` を見るだけで「調査済み」「ナレーション済み」「render 済み」が読める粒度
-  - `awaiting_approval` は「作業自体は終わったが、ユーザー承認待ちで次工程に進めない」を意味する
-
-canonical generation stage と p-slot stage の扱い:
-
-- canonical production / generation stage は `research`, `story`, `script`, `narration`, `asset`, `scene_implementation`, `video_generation`, `render`, `qa`
-- `visual_value` は p300 visual planning を追跡するための stage key / grounding entry であり、画像・動画・asset を生成する canonical generation stage ではない
-- `--stage p300|300|visual_value` は `p330` visual planning handoff まで進める同義指定として扱う
-
-標準 stage keys:
-
-- `stage.research`
-- `stage.story`
-- `stage.visual_value`
-- `stage.script`
-- `stage.narration`
-- `stage.asset`
-- `stage.scene_implementation`
-- `stage.video_generation`
-- `stage.render`
-- `stage.qa`
-
-各 stage は少なくとも次の key を持てる:
-
-```text
-stage.<name>.status=pending|in_progress|awaiting_approval|done|failed|skipped
+status=INIT|RESEARCH|STORY|SCRIPT|ASSET|IMAGE|NARRATION|VIDEO|RENDER|QA|DONE
+stage.<name>.status=pending|in_progress|done|failed|skipped|awaiting_user_choice
 stage.<name>.started_at=ISO8601
 stage.<name>.finished_at=ISO8601
 stage.<name>.grounding.status=ready|missing_docs|missing_inputs
 stage.<name>.grounding.report=logs/grounding/<stage>.json
 stage.<name>.readset.report=logs/grounding/<stage>.readset.json
-stage.<name>.audit.status=passed|failed
-stage.<name>.audit.report=logs/grounding/<stage>.audit.json
-stage.<name>.subagent.prompt=logs/grounding/<stage>.subagent_prompt.md
-review.image_prompt.subagent.prompt=logs/review/image_prompt.subagent_prompt.md
-slot.pXXX.status=pending|in_progress|done|skipped|blocked|awaiting_approval|failed
+stage.<name>.source_digest=sha256:<hex>
+stage.<name>.artifact_digest=sha256:<hex>
+slot.pXXX.status=pending|in_progress|done|failed|skipped|blocked|awaiting_user_choice
 slot.pXXX.requirement=required|optional
 slot.pXXX.skip_reason=string
 slot.pXXX.note=string
+request.<item_id>.revision=string
+request.<item_id>.digest=sha256:<hex>
+request.<item_id>.status=materialized|submitted|generated|stale|failed
+output.<item_id>.path=run-relative/path
+output.<item_id>.sha256=sha256:<hex>
+output.<item_id>.provenance_status=matched|mismatched|missing
+human_choice.<id>.status=selected|edited|deferred
+human_choice.<id>.actor=string
+human_choice.<id>.at=ISO8601
+publication.status=pending|authorized|published|failed
 ```
 
-asset stage を分ける場合は次を追加する。
+## 2. Create input
 
-- `stage.asset_plan_review`
-- `stage.asset_generation`
+Frontend and CLI create save the exact source and request identity before authoring. Resume uses
+this input instead of inferring from generated artifacts.
 
-承認待ちが標準発生する stage:
+```json
+{
+  "schema_version": "toc.create_input.v1",
+  "topic": "string",
+  "source": "exact source text",
+  "source_sha256": "sha256:<utf8 source hash>",
+  "experience": "cinematic_story",
+  "source_run": null,
+  "target_duration_seconds": 300
+}
+```
 
-- `stage.script`
-- `stage.asset_generation`
-- `stage.narration`
-- `stage.scene_implementation`
+`topic` and `source` are non-empty strings. `source_sha256` hashes the exact UTF-8 bytes.
+`experience` is `cinematic_story|world_walk`; a `world_walk` source references a repo-relative
+existing run. `target_duration_seconds` is an integer from 300 through 1200, defaulting to 300.
+Unknown fields are preserved in a raw input record but never used as a hidden generation policy.
 
-この 4 つが `awaiting_approval` の間は、**次のフローに進んではならない**。
-
-対応 gate / review:
-
-- `stage.script` → `gate.script_review` / `review.script.*`
-- `stage.asset_generation` → `gate.asset_review` / `review.asset.*`
-- `stage.scene_implementation` → `gate.image_review` / `review.image.*`
-- `stage.narration` → `gate.narration_review` / `review.narration.*`
-
-grounding ルール:
-
-- stage は開始前に `scripts/resolve-stage-grounding.py` を実行して required docs / templates / inputs を解決する
-- 直後に `scripts/audit-stage-grounding.py` を実行して readset / audit を確定する
-- `stage.<name>.grounding.status=ready` と `stage.<name>.audit.status=passed` を確認できない限り、当該 stage は開始しない
-- artifact が存在しても grounding report が欠けていれば verifier / evaluator は fail にできる
-- `requires_approved_input` は `workflow/stage-grounding.yaml` を正本とする。`review.policy.*=optional` は明示的な draft policy、`review.policy.*=skipped` は `create_input.json.review_mode=preapproved` に束縛された frontend create のみを表す。後者でも deterministic grounding / schema / digest / provenance checks は skip できない。
-
-### 1.2 読み方
-
-例えば最新 block が次なら、`state.txt` だけで状況が分かる。
+## 3. Artifact paths
 
 ```text
-status=VIDEO
-stage.research.status=done
-stage.story.status=done
-stage.script.status=awaiting_approval
-review.script.status=pending
-gate.script_review=required
-```
-
-この場合は:
-
-- 調査は終わった
-- 物語は終わった
-- 台本作成は終わった
-- ただしユーザー承認待ち
-- まだナレーションや render に進めない
-
----
-
-## 2. Artifact paths（成果物パス）
-
-標準パス:
-
-```
 output/<topic>_<timestamp>/
   research.md
   story.md
   visual_value.md
   script.md
-  video.mp4
   video_manifest.md
+  asset_inventory.md
+  asset_plan.md
   assets/
+  audio/
+  video.mp4
+  state.txt
+  p000_index.md
+  logs/grounding/
+  logs/orchestration/
 ```
 
-scene-series（Q&A動画を複数本）:
-
-```
-output/<topic>_<timestamp>/
-  series_plan.md
-  scenes/sceneXX/
-    evidence.md
-    script.md
-    video_manifest.md
-    assets/
-    video.mp4
-```
-
----
-
-## 3. Output templates（最小テンプレ）
-
-以下のテンプレートをMVPの出力契約とする。
-
-- `workflow/research-template.yaml`
-- `workflow/research-template.production.yaml`（情報量を最大化したい場合の推奨スキーマ）
-- `workflow/story-template.yaml`
-- `workflow/visual-value-template.yaml`
-- `workflow/script-template.yaml`
-- `workflow/asset-plan-template.yaml`
-- `workflow/scene-outline-template.yaml`（story → 画像/動画生成の橋渡し。未知トピックでモデル記憶に依存しないための asset brief）
-- `workflow/stage-grounding.yaml`（stage ごとの必須参照契約）
-
-各テンプレートは `docs/information-gathering.md` / `docs/story-creation.md` /
-`docs/script-creation.md` のスキーマから最小フィールドのみ抽出。
-
-評価仕様の正本:
-
-- `workflow/evaluation_criteria.md`
-- `workflow/evals/golden-topics.yaml`
-
----
-
-## 4. Immersive `video_manifest.md`（assets bible）
-
-`/toc-immersive-ride` と `/toc-world-walk` は `output/<topic>_<timestamp>/video_manifest.md` を正本として、
-画像/動画/TTS を一括生成する。
-
-`/toc-world-walk` は `video_metadata.experience: "world_walk"` と
-`video_metadata.source_run` / `video_metadata.source_assets` を持ち、既存 run の asset を参照して
-観察者 POV の散歩動画を作る。
-
-この manifest の契約は、最終的に `scripts/generate-assets-from-manifest.py` が読み取り、各 provider に投げる前提。
-
-### 4.0 Historical era と scene time-of-day
-
-- `story.md.story_metadata.time` は物語世界全体の**歴史的時代**を表す string である。古典・既存物語は `〇〇時代` の形式で非空にし、ユーザー創作では `""` を許容する
-- `story.md.script.scenes[].time_of_day` は各 scene の**一日の時間帯**を表す open string である。`朝` / `昼` / `夕方` / `夜` は例であり、`夜明け前` / `真夜中` / `薄暮` なども許容する。新規 artifact では各 scene に非空値を必須とする
-- 新契約の明示 marker は `story_metadata.scene_time_of_day_contract -> script_metadata.scene_time_of_day_contract -> video_metadata.scene_time_of_day_contract` の一方向 projection で、値は exact `required_v1` とする。対応 metadata にこの marker がある artifact だけ全 scene の非空 gate を有効化する。歴史的時代の `time` key は marker に使わず、marker がない legacy artifact では scene `time_of_day` の missing / empty を読み込み互換として許容する
-- projection は `story.md.script.scenes[].time_of_day -> script.md.scenes[].time_of_day -> video_manifest.md.scenes[].time_of_day` の一方向とする。`visual_world.setting.time_of_day` などに別の authoring 正本を作らない。derived artifact に複写する場合も `scene.time_of_day` からの read-only projection とする
-- 新規 artifact は `scene_time_of_day_visual_basis_contract: required_v1` を metadata 間で exact projection し、各 scene の `time_of_day_visual_basis` を同一値で story → script → manifest へ渡す。この field は `time_of_day` から導く review evidence で、光源・空/窓外の明るさ・影・色温度をすべて含む。provider prompt の独立 authoring sourceにはせず、画像・動画・ナレーション各 projection registry で `review_only` / `none` を明示分類する
-- 複数場所 scene は story の `location.mode: sequence` / `location.sequence[]` / `location.segments[]` を正本とする。`segments[]` は sequence の各場所を重複なく一度ずつ覆い、各 item に `location / responsibility / primary_subject / visible_action / required_visual_evidence / required_roles / motion_brief / motion_end_state` を必須とする。任意の `visible_character_state` は `posture / gaze / expression / hands / feet` を持ち、still prompt の人物状態へだけ投影する。script / manifest の `location_mode` / `location_sequence[]` / `location_segments[]` へ順序と値を保って projection する。scene authoring / narration review は全経路を見てよいが、cut image / video prompt は primary event beat に対応する一つの departure segment / location を dependency とする。cross-location の destination は、exact authorization を満たす arrival boundary としてだけ追加できる
-- cut materialization は `primary event beat の where == location reference == spatial background == provider prompt 内の departure route location` を fail-closed で検証する。cross-location では exact destination が `scene.location_sequence[]` と current obligation の allowlist の双方にあり、end/start state と reveal が exact match する arrival boundary だけを併記できる。未配置 segment、未許可の別場所文言、場所参照との不一致があれば画像・動画 requestを作らない
-- `story_metadata.time` は衣装、髪型、建築、生活道具、素材、技術水準へ効かせる。`scene.time_of_day` は空の明るさ、自然光と人工光、影、色温度へ効かせる。両者を相互に推測・代用しない
-- cut image compiler は非空の scene 値を `drawable_prompt_ir.dependencies.time_of_day` と `time_of_day` group に exact binding する。legacy の missing / empty 値では同 group を生成せず、後段で placeholder を捏造しない
-- video prompt compiler は非空の `video_metadata.time` / `scene.time_of_day` を `video_prompt_ir.dependencies` に exact binding し、動画中に時代や時間帯を描き直す指示ではなく `continuity` fragment として維持する。time-lapse、衣装替え、建築変更、日の出・日没を metadata だけから発明しない
-- 時代または時間帯そのものが変わる cut は metadata の暗黙変換で表現せず、canonical event / motion / end-state 設計へ明示する
-- reusable character / object / location asset prompt に scene 固有の `time_of_day` を自動付与しない。時間帯別 asset が必要な場合は、意図した reusable variant として別途宣言する
-
-#### 4.0.1 Location function / cut-obligation overrides
-
-`location_segments[]` は場所単位の scene 設計であり、provider prompt そのものではない。同じ segment が複数の authored event beat を担う場合、任意の空 map を持てる。map の `<function>` key は `scene_event.event_sequence[]` にある任意の非空 `beat_function` と一致させる。`setup` / `pressure` / `turn` / `payoff` / `threshold` / `custom` は候補例であり、固定 key 集合ではない。
-
-```yaml
-location_segments:
-  - location: "<このsegmentの一場所>"
-    primary_subject: "<segment既定の主体>"
-    primary_subject_by_function: {}
-    beat_overrides: {}
-```
-
-- `primary_subject_by_function.<function>` は、その function の primary subject だけを segment 既定値から切り替える
-- `beat_overrides.<function>` は function に対応する一つの canonical event beat を具体化する。`location / primary_subject / visible_action / visible_reaction / required_visual_evidence / required_roles / visible_character_state / first_frame_character_asset_overrides / first_frame_excluded_object_ids / motion_brief / motion_end_state / motion_attention_target` を必要なものだけ持つ。`location` は exact `scene.location_sequence[]` 内に限る
-- `beat_overrides.<function>.obligation_overrides.<obligation_id>` は、その beat へ割り当てられた一つの cut 責務だけを上書きする。key は次に限定する
-  - `location`（exact `scene.location_sequence[]` 内の一場所）
-  - `primary_subject`
-  - `visible_action` / `visible_reaction`
-  - `required_visual_evidence[]` / `required_roles[]`
-  - `visible_character_state`（`posture / gaze / expression / hands / feet`）
-  - `first_frame_character_asset_overrides`（`{<character identity>: <same-identity character asset id>}`）
-  - `first_frame_excluded_object_ids: [<known object asset id>, ...]`
-  - `motion_brief` / `motion_end_state` / `motion_attention_target`
-  - `environment_motion` / `emotional_change`
-  - `retain_carried_character_subjects: boolean`
-  - `allowed_new_reveal_elements: [string, ...]`
-  - `allowed_reveal_info_ids: [string, ...]`
-  - `use_next_cut_first_frame_as_last_frame: boolean`
-
-`motion_attention_target` は upstream cut authoring の判断補助である。現行 video registry / compiler はこの field を独立 projection source / trace / provider fragment にしない。cut contract に保持された値は normalized design source の一部として `source_digest` を変え得るが、prompt fragment の採用根拠にはしない。provider や video projection review に必要な対象指向は登録済み canonical field へ具体化する。
-
-projection precedence は `obligation_overrides.<obligation_id> -> beat_overrides.<function> -> primary_subject_by_function.<function> / segment既定値 -> scene既定値`。map の不在または `{}` は継承を表し、未指定 field を空値で消さない。cut-local `location` はこの precedence で開始画像の担当場所を選べるが、exact `scene.location_sequence[]` 外の値は拒否する。`retain_carried_character_subjects` の既定は `true` である。`false` は前 cut から自動的に carry された character subject / reference を当該 cut で保持しない指定であり、同じ cut の `required_roles`、明示 evidence、canonical event の人物を削除しない。
-
-`allowed_new_reveal_elements`、`allowed_reveal_info_ids`、`use_next_cut_first_frame_as_last_frame` は **exact `obligation_id` の entry にだけ許可する**。segment root / `beat_overrides.<function>` root の共有値として sibling obligation へ伝播させない。
-
-- `allowed_new_reveal_elements[]` は開始画像にないが当該 cut の主動作で因果的に現れてよい具体的な画面要素。非空・一意、最大8件とし、各値が exact obligation の `motion_brief` または `motion_end_state` に文字列として接地し、`must_not_add[]` と交差しないことを compile 前後で検証する
-- `allowed_reveal_info_ids[]` は canonical scene / event の reveal inventory に存在する ID だけを受け付け、当該 cut の `source_event_contract.allowed_reveal_info_ids` / narration allowed info へ投影する。同じ cut の forbidden reveal からだけ除外し、provider prompt 本文へ ID を出さない
-- `use_next_cut_first_frame_as_last_frame: true` は次 cut が存在し、current `motion_end_state` と許可済み reveal が next `first_frame_contract` の開始状態に exact match するときだけ有効。同一場所はその一致を必須とし、cross-location はさらに exact destination が `scene.location_sequence[]` と current obligation の `allowed_new_reveal_elements[]` の双方に同じ文字列で存在する場合だけ許可する。materializer は current `video_generation.last_frame` を next cut の first-frame imageへ束縛し、next image の approval / bytes / hash を provider-request identity に含める
-- 境界指定だけでは reveal を許可しない。開始画像から新要素が現れる場合は `allowed_new_reveal_elements`、物語情報を解禁する場合は `allowed_reveal_info_ids` も同じ exact obligation に必要である
-
-投影境界は次の通り。
-
-1. segment と function から canonical event beat を確定する
-2. beat に cut obligation を割り当て、exact obligation override を解決する
-3. image 側は `primary_subject / visible_action / visible_reaction / required_visual_evidence / required_roles / visible_character_state` から一枚の `first_frame_visual_plan` を作る。future motion は still prompt 本文へ出さない
-4. video 側は承認済み first frame を開始状態とし、`motion_brief / motion_end_state / environment_motion / emotional_change` を対応する motion fragment へ投影する。`motion_attention_target` 自体は独立 projection source / traceにせず、provider に必要な対象指向を `motion_brief` 等の登録済み canonical field に具体化する
-5. provider prompt へは解決後の描画・motion 文だけを送り、`primary_subject_by_function`、`beat_overrides`、`obligation_overrides`、function / obligation ID、未選択候補を出さない
-
-video compiler は非空の `allowed_new_reveal_elements` を positive `constraints` fragment に「主動作によって新しく現れてよいもの」として出し、それ以外の新規人物・重要物・建築・revealを禁止する。`negative_prompt_mode: separate` では、この正の allowlist 文と許可要素名を separate `negative_prompt` から除外し、「承認済み要素以外」の禁止だけを残す。`inline` mode では保存 `negative_prompt` は空で、同じ allowlist / prohibition を positive prompt の constraints 内に保持する。
-
-cut-local override は exact `scene.location_sequence[]` 内で departure `location` を選べる。解決後の cut event location、location reference、first-frame background、provider prompt 内の departure route location は同じ一場所でなければならない。cross-location は上記の exact authorization を満たす arrival boundary destination だけを例外とする。sequence 外の場所、連続 motion 中への未許可の別場所混入、actor inversion、抽象 placeholder、`または` 等の未解決 alternative は fail closed にする。
-
-### 4.1 `assets`（bible）
-
-- `assets.character_bible[]`（人物の参照画像 + 不変条件 + optional な体格契約）
-- `assets.character_bible[].appearance_continuity.costume_state` / `forbidden_costume_states[]`（optional。人物entry自体が状態別assetである場合）
-- `assets.character_bible[].reference_variants[]`（optional）
-  - `variant_id`
-  - `reference_images: [string, ...]`
-  - `fixed_prompts: [string, ...]`（optional）
-  - `appearance_continuity.costume_state: string`（optional。描画する現在の衣装状態）
-  - `appearance_continuity.forbidden_costume_states: [string, ...]`（optional。近接する別 variant の先取り・逆戻り防止）
-- `assets.character_bible[].review_aliases[]`（optional。story/script review で使う別名）
-- `assets.character_bible[].physical_scale.height_cm|body_length_cm|shell_length_cm|shoulder_height_cm`（optional）
-- `assets.character_bible[].physical_scale.silhouette_notes[]`（optional）
-- `assets.character_bible[].relative_scale_rules[]`（optional。複数キャラ scene の相対サイズ固定）
-- `assets.style_guide`（スタイル/禁止/参照）
-- `assets.object_bible[]`（主役級アイテム/舞台装置の参照画像 + 不変条件）
-  - `assets.object_bible[].reference_variants[]`（optional, character と同型）
-  - `assets.object_bible[].review_aliases[]`（optional。story/script review で使う別名）
-  - 詳細仕様（正本）: `docs/implementation/asset-bibles.md`
-
-### 4.2 `scenes[].image_generation` / `scenes[].cuts[].image_generation`
-
-- production cut image の送信正本は `api_prompt_payload.prompt`（正本: `docs/implementation/image-prompting.md`）
-- `api_prompt_payload.policy_version` は `image_api_prompt_v2`、`compiler_version` は `conditional_drawable_prompt_compiler_v3` とする
-- `first_frame_visual_plan` は derived design、`api_prompt_payload.drawable_prompt_ir` は条件付き抽出結果であり、provider へは送らない
-- `prompt` は `image_api_prompt_v1` 互換の read-only field。v2 failure 時の暗黙 fallback に使わない
-- 言語: provider-facing `api_prompt_payload.prompt` は原則 **日本語**
-- `character_ids: []` は常に明示（B-roll は `[]`）
-- `character_variant_ids: []` は optional。複数 state/time variant がある場合だけ、scene/cut ごとに使う variant を明示する
-- `object_ids: []` は常に明示（setpiece/アイテムが無い scene でも `[]`）
-- `object_variant_ids: []` は optional。複数 variant がある object/setpiece を scene/cut ごとに切り替えるときに使う
-- 新規の静止画生成は必須ではない。連続性アンカーを作る scene/cut、または同じ場所/物体/人物状態を複数scene/cutで再利用したい場合に優先する
-- 既存の参照画像や直前の anchor frame を再利用できる場合は、同じ構図の再生成を避けてよい
-
-### 4.2.1 `scenes[].video_generation` / `scenes[].cuts[].video_generation`
-
-- canonical story / scene / cut design と provider prompt を分離する。詳細正本は [`docs/implementation/video-prompting.md`](implementation/video-prompting.md)
-- provider へ送る motion text は materialize 済み `video_generation.api_prompt_payload.prompt`
-- `api_prompt_payload.policy_version` は `video_api_prompt_v1`、`compiler_version` は `conditional_video_prompt_compiler_v5`、`projection_registry_version` は `video_prompt_projection_registry_v5`
-- `video_prompt_ir` と `projection_review_contract` は review / trace 用であり、provider prompt 本文へ出さない
-- `projection_review_contract.review_only_sources[]` は `must_not_surface` source の `source_key` と exact `value` を reviewer / `source_digest` に保持する。daypart visual basis、scene route / segments、cut responsibility、event / reveal 境界、image / narration prose、reference path を provider prompt 本文へ転載しない。caller `review_only_dependencies` は string trim と空 descendant 除去後に非空なら exact normalized mapping を `projection_review_contract.review_only_dependencies` に返し、provider / IR fragment には出さない
-- compiler は `quality_issues[]` を `api_prompt_payload` と `video_prompt_ir` に同値で保存する。`blocking: true` の issue が一件でもある target は canonical motion field を修正して再 compile するまで approval / provider execution へ進めない
-- `prompt_authoring_source` は frontend / legacy 自由文の compatibility input。canonical `cut_contract` に同じ group の値がある場合は canonical 値を優先する
-- `motion_prompt` は legacy 入力として読めるが、新規 artifact では `api_prompt_payload.prompt` の read-only compatibility projection とし、compiled payload がある場合の送信正本にしない
-- first frame は開始境界、last frame は到達境界である。last frame を別 shot として挿入せず、一つの連続運動で到達する
-- authoring identity（canonical design + fallback source）、compiler identity（version + `source_digest`）、persisted provider-request identity（prompt / negative prompt / `provider_request_binding`）を分離する。`motion_prompt` から authoring identity へ逆投影しない
-- frontend/server、CLI、scene storyboard は同じ compiler output を target に保存してから生成する。未 materialize または current design / settings と不一致の payload は stale として拒否する
-- materialize-only は target を `pending` にする。standard では frontend/server approval workflow の明示的な `approve_for_generation` 以外、CLI の materialize / 通常実行を含む経路は未承認 target を自動承認しない。preapproved は `create_input.json.review_mode=preapproved` という明示 create policy に限る例外だが、media generation 前の `review.image.status=pending` と p680 の deterministic output/provenance validation は維持する。
-
-### 4.3 `scenes[].cuts[]`（optional, recommended）
-
-シーンを複数 cut で表現する場合、required distinct semantic obligation と `event_beat_inventory[]` のうち `must_be_seen != false` の event beat だけを exactly once 被覆する semantically derived count で `scenes[]` の各要素に `cuts[]` を持たせる。inventory 自体は全 authored beat を exact ordered mirror するが、`must_be_seen: false` beat に cut assignment は要求しない。固定の 3〜5 cut にはしない。
-生成スクリプトは `cuts[]` を展開して画像/動画を生成する（cutごとに `image_generation` / `video_generation` を持つ）。
-
-### 4.4 Stage evaluator contracts
-
-- `research.md.evaluation_contract`
-  - `target_questions`
-  - `must_cover`
-  - `must_resolve_conflicts`
-  - `done_when`
-- `script.md.evaluation_contract`
-  - `target_arc`
-  - `must_cover`
-  - `must_avoid`
-  - `done_when`
-  - `reveal_constraints`
-
-### 4.5 `script.md` と `video_manifest.md` の正本境界
-
-境界は次で固定する。
-
-- `script.md`
-  - 物語と映像意図の正本
-  - `scene_intent`, `cut_contract` の元になる cut blueprint、reveal、`narration_contract`、任意の `narration_draft`、human review 指示を持つ
-- `video_manifest.md`
-  - image/video/audio generation の実装正本
-  - `cut_contract`, 旧 reader 用 `scene_contract` alias, `image_generation`, `still_assets[]`, `reference_usage[]`, `video_generation` を持つ
-  - human review の理由本文は持たず、`applied_request_ids[]` と `implementation_trace` で trace を持つ
-  - optional `render_units[]` を持てる
-    - `render_units[]` は最終 render 用の動画クリップ単位
-    - `scene_storyboard` では `render_units[]` を p800 用の derived execution overlay として p680 で materialize してよい。pre-p800 の review / semantic currentness は canonical YAML projection から direct `scenes[].render_units` だけを除外し、それ以外の manifest field は unknown field を含めて hash に拘束する。materializer は authored cut ID / duration を変更せず、書き込み前後で projection 不変を検証し、失敗時は manifest を rollback する
-    - `unit_id`, `source_cut_ids[]`, optional unit-level `cut_contract`, `video_generation` を持つ
-    - scene に `render_units[]` がある場合、最終 render の動画正本は cut ではなく render unit 側を使う
-    - `source_cut_ids[]` は canonical cut 順の非空 list。active cut は scene 内で exactly once 被覆し、重複・欠落・deleted cut 参照を許さない
-    - unit duration は source cut duration の合計と一致させる。承認対象の provider / model / input mode capability 上限を超える場合は unit を分割する。共通の 60 秒上限を仮定しない
-    - 1 cut unit は source contract を exact 継承する。explicit unit contract は field を省略でき、空値は no-op として扱う。非空の指定値は対応する source value と一致しなければならない（非空 allowlist は normalized member set で比較する）。異なる値を拒否し、出力は常に source contract そのものとする
-    - 複数 cut unit の effective contract は先頭の first-frame 境界、末尾の end-state、全 source cut の continuity / prohibition を合成し、explicit unit contract を同 group の優先値として重ねる。ただし explicit `allowed_new_reveal_elements` は source cut 順に stable dedupe した reveal union と normalized member set が exact 一致しなければならず、出力順は stable source order に正規化する。source union が非空なら explicit allowlist を必須とし、欠落も superset による新 reveal の発明も拒否する。source union が空なら absent または空だけを許可する
-    - 複数 cut の個別 action は連結しない。unit 全体の一つの primary motion は unit-level contract / authoring source に明示する
-
-```yaml
-render_units:
-  - unit_id: 1
-    source_cut_ids: [1, 2]  # canonical cut order
-    cut_contract:           # optional。1-cutではvalidation-only、multi-cutのreveal allowlistはsource unionとのexact equalityを必須とする
-      motion_contract:
-        motion_brief: "<unit全体を代表する一つの主動作>"
-    video_generation:
-      tool: "kling_3_0"
-      duration_seconds: "<cut1 duration + cut2 duration>"
-      first_frame: "<first source cut approved start frame>"
-      last_frame: "<approved unit arrival frame>"
-      references: []
-      prompt_authoring_source: "<unit-level fallback>"
-      api_prompt_payload:
-        policy_version: "video_api_prompt_v1"
-        compiler_version: "conditional_video_prompt_compiler_v5"
-        projection_registry_version: "video_prompt_projection_registry_v5"
-        provider: "kling_3_0"
-        mode: "first_last_frame"
-        provider_policy:
-          one_clip_one_intent: true
-          max_camera_instructions: 2
-          single_continuous_shot: true
-          first_last_frame_boundary: true
-          multimodal_reference: false
-          negative_prompt_mode: "separate"
-        provider_request_binding:
-          duration_seconds: "<cut1 duration + cut2 duration>"
-          quality: "1080p"
-          aspect_ratio: "16:9"
-          first_frame: "<first source cut approved start frame>"
-          last_frame: "<approved unit arrival frame>"
-          references: []
-          execution_options:
-            backend: "kling"
-            model: "kling-3.0"
-            reference_content_sha256:
-              "<first source cut approved start frame>": "<sha256-of-reference-bytes>"
-              "<approved unit arrival frame>": "<sha256-of-reference-bytes>"
-        source_digest: "<ordered source_cut_ids/source contractsも含む>"
-        prompt: "<exact compiled unit prompt>"
-        negative_prompt: "<exact compiled unit negative prompt>"
-        sha256: "<sha256-of-exact-prompt>"
-        quality_issues: []
-        included_fragments: &render_unit_video_prompt_fragments
-          - {group: start_state, text: "<compiled unit start state>"}
-          - {group: primary_motion, text: "<compiled unit primary motion>"}
-          - {group: end_state, text: "<compiled unit end state>"}
-          - {group: continuity, text: "<compiled unit continuity>"}
-          - {group: constraints, text: "<compiled unit constraints>"}
-        omitted_groups: [camera_motion, environment_motion, emotional_change]
-        projection_review_contract:
-          registry_version: "video_prompt_projection_registry_v5"
-          group_order: [start_state, primary_motion, camera_motion, environment_motion, emotional_change, end_state, continuity, constraints]
-          groups: {}
-          active_rules: []
-          inactive_rules: []
-          excluded: []
-          review_only_sources: []
-          # exact normalized review metadata only。provider / IR fragment へ複写しない
-          review_only_dependencies:
-            render_unit_source_cut_ids: ["1", "2"]
-            render_unit_source_cut_contracts:
-              - motion_contract:
-                  motion_brief: "<source cut 1 exact motion>"
-                  end_state: "<source cut 1 exact end state>"
-              - motion_contract:
-                  motion_brief: "<source cut 2 exact motion>"
-                  end_state: "<source cut 2 exact end state>"
-          shadowed_sources:
-            - source_key: "compiler_normalized.authoring_source.primary_motion"
-              target_group: "primary_motion"
-              reason: "higher_priority_design_source_present"
-          provider: "kling_3_0"
-          mode: "first_last_frame"
-          authoring_source_normalization:
-            applied: true
-            groups: {primary_motion: ["<normalized unit fallback candidate>"]}
-        video_prompt_ir:
-          schema_version: "video_prompt_ir_v2"
-          provider: "kling_3_0"
-          mode: "first_last_frame"
-          dependencies:
-            story_time: ""
-            time_of_day: "<scene.time_of_day>"
-            has_first_frame: true
-            has_last_frame: true
-            has_references: false
-            duration_seconds: "<cut1 duration + cut2 duration>"
-            reference_roles: []
-            required_groups: [start_state, primary_motion, end_state, continuity, constraints]
-          included_fragments: *render_unit_video_prompt_fragments
-          omitted_groups: [camera_motion, environment_motion, emotional_change]
-          quality_issues: []
-```
-
-generator の読み順:
-
-- image generation
-  1. `video_manifest.md`
-  2. derived `first_frame_visual_plan`
-  3. `drawable_prompt_ir`
-  4. `api_prompt_payload`
-  5. immutable request snapshot
-  6. narration は authoring の補助参照に留め、provider payload には入れない
-- video generation
-  1. `video_manifest.md` の canonical `cut_contract`、first / last frame、provider settings
-  2. `script.md` の story / reveal 境界（必要時の review context）
-  3. video projection registry / compiler
-  4. materialized `video_generation.api_prompt_payload`
-  5. `video_generation_requests.md` の exact prompt review projection
-  6. provider 実行は保存済み payload を読み、narration は補助参照に留める
-
-制約:
-
-- `audio.narration.tts_text` は TTS 専用字段
-- `tts_text` を image/video generation の主ソースにしてはならない
-- `approved_image_notes[]` / `approved_video_notes[]` / `human_change_requests[]` は `script.md` に保持し、生成前に `video_manifest.md` へ materialize する
-- materialize された `image_generation_requests.md` は human review projection として `source_requests` metadata と exact `api_prompt` fence を含んでよい。production v2 の実行正本は `image_generation_request_snapshot.json` とする
-- `video_generation_requests.md` は exact compiled prompt、policy / compiler version、source digest、prompt hash、provider settings を表示する review artifact とする。runtime は Markdown を再解釈して provider prompt を再構成しない
-- `video_generation_requests.md` は positive prompt を `video_prompt` fence、negative prompt を `negative_prompt` fence に exact 保存し、`negative_prompt_sha256` と target section 全体の `request_section_sha256` を approval に束縛する
-- provider 実行前に保存済み payload の `prompt` / `negative_prompt` / `sha256` / `source_digest` / `provider_request_binding` と current canonical design の再 compile 結果、tool / duration / quality / aspect ratio / first / last / ordered references / reference content hash / model / execution options を照合する。不一致または payload 不在は再 materialize まで停止する
-- per-item approval identity は `status=approved`、`request_section_sha256`、`prompt_sha256`、`source_digest`。`prompt_sha256` は exact `api_prompt_payload.prompt` の hash であり、`api_prompt_payload.sha256` と一致させる。`approved_by` / `approved_at` は audit metadata であり、identity binding の代用にしない
-- story cut の `video_generation` 採否は human review 正本に従う
-  - `delete_scene` / `delete_cut` で消されていない cut は既定で `video_generation` を持つ
-  - `still_image_plan.mode` は image planning 用であり、動画 cut の削除理由には使わない
-  - ただし scene に `render_units[]` がある場合、非 deleted cut はどれか 1 つの render unit にちょうど 1 回だけ含まれることを正とする
-  - `video_generation_requests.md` は render unit selector を出力してよい
-
-### 4.6 `asset_inventory.md` / `asset_plan.md`（asset stage 正本）
-
-画像生成の stage 1 では、`video_manifest.md` の前段として p520 の `asset_inventory.md` と p530 の `asset_plan.md` を持てる。
-
-- 目的
-  - この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still を網羅し、reusable asset として設計・review・承認する
-- 入力
-  - `script.md`
-  - `story.md`
-  - 必要なら `video_manifest.md.assets.*`
-- 出力
-  - `asset_inventory.md`
-  - `asset_plan.md`
-  - `assets/characters/*`
-  - `assets/objects/*`
-  - `assets/locations/*`
-  - reusable `assets/scenes/*`
-
-p500 slot contract:
-
-- `p510`: asset grounding。`script.md` / `story.md` / `video_manifest.md` / asset stage docs / template の readset と audit を確定する。
-- `p520`: reusable asset inventory。この物語の登場人物、物語固有のアイテム、使われる場所、舞台装置、再利用 still の候補を `asset_inventory.md` に漏れなく洗い出す。
-- `p530`: asset plan authoring。inventory を `asset_plan.md` に構造化し、各 asset の目的、固定 detail、参照入力、output、review focus を明示する。
-- `p530` semantic QA: asset id / asset_type / story_purpose / visual_spec / prompt は同じ意味を指す。人物 asset が場所画像になったり、location asset が人物ポートレートになったり、scene に不要な小道具を常時参照したりする設計は fail とする。
-- `p540`: asset review / fix loop。standard は review agent が漏れ・矛盾・参照誤用・lane 誤りを確認する cycle を最大 1 round 回す。preapproved create は external reviewer turn を省略し、同じ pack / digest に対する deterministic checks を実行する。
-- `p550`: asset requests。`asset_plan.md` から `asset_generation_requests.md` / `asset_generation_manifest.md` を materialize し、prompt / references / output / status を凍結する。
-- `p560`: asset generation。request に従って reusable asset image を生成し、manifest と実ファイルを対応させる。
-- `p570`: asset continuity check。生成 asset が p600 の continuity anchor として使えるか、approval / `existing_outputs[]` / status を確認する。
-- `p570`: 生成済み asset の主対象が asset category と story purpose に一致するかは、standard では deterministic output validator と frontend human review、preapproved create では deterministic output validator と terminal validation で確認する。`asset_output` semantic review stage は持たない。
-
-p500 resume contract:
-
-- frontend create 済み run の前半を Codex で修正して再実行する場合、新しい run を作らず同じ run directory を使える。
-- resume は `state.txt` の履歴を書き換える rollback ではない。p500 以降の旧成果物を `logs/resume/p500/<checkpoint>/artifacts/` へ退避し、後続 state を新しい append-only snapshot で `pending` / `stale` にする pseudo rollback である。
-- `research.md`、`story.md`、`visual_value.md`、`script.md`、`video_manifest.md` と p400 以前の review/grounding artifact は保持する。
-- frontend create の `video_manifest.md` は p450 時点で production execution 枠を含むため、`manifest_phase: production` だけを理由に p600 artifact として退避しない。旧 request snapshot、semantic report、実在 media、生成/review state を無効化して再 materialize する。
-- 新規 frontend create は、受け取った exact source bytes とその sha256、topic、experience、source run、target duration、明示した `review_mode` を `logs/orchestration/create_input.json`（`toc.create_input.v1`）へ保存する。`review_mode` は `standard|preapproved` のみで、既定は `standard`。この artifact がある run の resume はそれを正本とし、CLI/API から競合する source または review mode を与えた場合は停止する。artifact 自体の存在、filesystem type、bytes は dry-run/apply token に含める。artifact がない legacy run は、topic や research から source / review mode を推測せず、非空の明示 `--source` を必須とする。
-- reset 前に current `script.md` / `video_manifest.md` から review artifact を除く deterministic `eval.p400_readiness.status=approved` を再計算する。Codex fix で旧 review digest が stale になることは許容するが、reset 後に p400 review artifact を再 materialize し、request/provider 実行前に review integrity を含む完全な p400 readiness を通す。
-- reset は `.locks/create_resume.lock` を frontend create/resume および single/bulk image generation と共有し、同一 run の並行 mutation を禁止する。disk 上の bulk job が `queued|running` の場合も reset しない。
-- apply 前の dry-run、退避 checkpoint、upstream digest、移動対象一覧を必須とする。apply は dry-run の `checkpoint_id` と plan digest token に一致しなければ fail closed とする。unknown artifact は自動退避しない。
-- p650 完了後の image-only resume は、current request に束縛された scene output だけを再生成する厳密な scene-only plan に限る。asset/reference repair、unknown action、空/unsafe/unbound target、malformed plan は image-only で削除せず、asset/reference repair は canonical p500 dry-run/exact-token/apply へ戻す。route は API 選択時と run lease 取得後の双方で再判定する。
-- `world_walk` の resume は source manifest に列挙された source asset を復元・照合し、fresh create と同じ reference contract を asset plan/request へ投影する。参照は最大4件、`execution_lane: standard`、`bootstrap_allowed: false` とし、観察者 POV の固定 prompt contract を維持する。
-- reset 後は p510 から semantic QA と request freeze を再実行する。過去の `passed` report や frozen snapshot を再利用してはならない。
-- slot は実処理より先に完了扱いにしない。asset request の provider submission が返った後にだけ `p550=done` / `p560=done` とし、asset continuity gate が通れば `p570=done`、frontend 確認が必要なら `p570=awaiting_approval` とする。`--materialize-only` は provider を呼ばないため `p560` / `p570` を `pending` のまま保持し、materialized p650 validator もこの2 slot の未実行を明示的に許容する。
-
-`asset_inventory.md` の最低限:
-
-- `asset_inventory.source_artifacts[]`
-- `asset_inventory.coverage_scope.characters[]`
-- `asset_inventory.coverage_scope.story_specific_items[]`
-- `asset_inventory.coverage_scope.locations[]`
-- `asset_inventory.coverage_scope.setpieces[]`
-- `asset_inventory.coverage_scope.reusable_stills[]`
-- `asset_inventory.items[]`
-
-最低限の top-level:
-
-- `asset_plan_metadata`
-- `review_contract`
-- `assets.characters[]`
-- `assets.objects[]`
-- `assets.locations[]`
-- `assets.reusable_stills[]`
-
-各 asset entry の必須 field:
-
-- `asset_id`
-- `asset_type`
-- `source_script_selectors[]`
-- `story_purpose`
-- `visual_spec`
-- `generation_plan`
-- `creation_status`
-- `existing_outputs[]`
-- `review`
-
-`generation_plan` の追加 field:
-
-- `execution_lane: standard|bootstrap_builtin`
-- `tool: codex_builtin_image`（request materialization 時の標準画像 provider）
-- `bootstrap_allowed: true|false`
-- `bootstrap_reason: no_reference_seed|other`
-
-asset stage の character variant ルール:
-
-- character reference は、原則として全身が見える front / side / back の 3 面図を作る
-- `generation_plan.required_views[]` には少なくとも `front`, `side`, `back` を入れる
-- 同一人物の variant は、必ず main の `character_reference` を基準参照にする
-- `generation_plan.reference_inputs[]` には main reference の front / side / back などを入れる
-- `generation_plan.derived_from_asset_id` で、どの main asset から派生するかを明示する
-- 例: `urashima_old` は `urashima` から派生し、別人として新規設計しない
-
-bootstrap lane ルール:
-
-- 画像 provider は参照あり/なしを問わず `codex_builtin_image` に固定する
-- `reference_inputs[]` が空で、かつ `bootstrap_allowed=true` の asset だけ `execution_lane=bootstrap_builtin` にできる
-- `reference_inputs[]` が 1 件以上ある asset は常に `execution_lane=standard`
-- `derived_from_asset_id` がある asset は常に `execution_lane=standard`
-- `bootstrap_builtin` という lane 名は互換のため維持するが、repo 全体では「no-reference built-in image lane」を意味する
-- したがって asset stage だけでなく、cut image stage の materialized request でも `reference_count == 0` なら `execution_lane=bootstrap_builtin` を使う
-- bootstrap 生成物は、standard では human review の `review.status=approved` になるまで canonical 扱いにしない。明示 preapproved create では external human reviewer turn を省略できるが、deterministic output / provenance validation が p680 terminal 条件を満たすまで canonical 扱いにしない
-- review または preapproved の terminal validation 後は、そのまま canonical asset として `existing_outputs[]` に記録してよい
-
-asset stage の location / still variant ルール:
-
-- 同じ場所の昼夜差分、現在/未来差分、状態違いは、main の `location_anchor` または `reusable_still` を基準に派生させる
-- `generation_plan.reference_inputs[]` には main anchor を入れる
-- `generation_plan.derived_from_asset_id` で、どの base location / still から派生するかを明示する
-- 例: `scene15_cut03_night_anchor` は `scene15_cut03_day_anchor` から派生する
-- 例: `future beach` が `present beach` の時間差分である場合は、同一ロケーションの base anchor から派生させる
-
-`source_script_selectors[]` と `generation_plan.reference_inputs[]` は意味が違う:
-
-- `source_script_selectors[]`
-  - その asset が物語上どこで使われるか
-  - 生成時の参照画像を意味しない
-- `generation_plan.reference_inputs[]`
-  - 生成時に本当に参照する既存 visual source
-  - 同一人物 variant、同一場所の状態差分、same-camera 派生のときだけ使う
-- つまり、scene/cut で使われるからといって、その scene still を location asset の `reference_inputs[]` に入れてよいわけではない
-
-location の例外ルール:
-
-- 同じ建物の中でも、物語上は別エリアとして扱う場所は `derived_from_asset_id` で派生させなくてよい
-- 例: 竜宮城の宴会エリアと、その手前の foyer は別 `location_anchor` にしてよい
-- 独立した location anchor は `reference_inputs: []` を基本にする
-- 例: `clock_museum` は終盤の独立空間であり、浜辺や別ロケーションの参照を不要とする
-- ただし、別エリアから主エリアが見える、遠景にだけ映る、背景としてだけ存在する場合は `reference_usage[]` で参照関係を残す
-- この場合の典型は `mode: background_glimpse` または `mode: foreground_anchor`
-- つまり `derived_from` は「同じ場所の状態差分」、`reference_usage` は「別の場所から見える/一部だけ参照する」の表現に使い分ける
-
-運用:
-
-- asset stage document は standard では human review を通してから asset 生成へ進む。明示 `review_mode=preapproved` では external reviewer turn を省略できるが、asset plan pack / digest と deterministic validation を先に通す
-- character asset は全身が見える front / side / back の 3 面図 multi-view 運用を維持する
-- object / location / setpiece / reusable still は単体 still を基本にする
-- asset を作る主目的は、複数 cut で使う visual identity を固定し、同一 cut 内の関連 asset 派生も含めて continuity を守ること
-- したがって asset contract は reuse と continuity を優先し、単発 cut 専用画像を増やすためには使わない
-- 例外的に既存 scene still を asset へ昇格することはあるが、それは移行中 run の互換措置であり、標準フローではない
-- provider 実行前に review projection と immutable snapshot を materialize する
-  - asset stage: `artifact.asset_generation_requests`
-  - cut image stage review projection: `artifact.image_generation_requests`（通常 `image_generation_requests.md`）
-  - cut image stage execution snapshot: `image_generation_request_snapshot.json`
-  - video stage: `artifact.video_generation_requests`
-- Markdown request file は selector ごとの final prompt / references / output を記録する人レビュー用 projection である。production v2 runtime が Markdown を再解釈して prompt を組み立ててはならない
-- snapshot は exact prompt、prompt hash、reference path と content hash、destination、prompt policy / compiler version、source digest、request revision を凍結する実行正本である
-- Markdown の `api_prompt` fence と snapshot の prompt/hash/reference/output が一致しない場合は stale request として停止し、再 materialize する
-  - scene に `render_units[]` がある場合、video request file は cut ではなく render unit selector を出し、review metadata として `source_cuts` を併記してよい
-- asset request file の prompt 本文は image API に渡る凍結文であり、制作管理メタを使わず、具体的に見える人物・場所・道具・行為を書く
-  - NG: `物語「シンデレラ」の scene10 のための背景画像。`
-  - NG: `scene30_cut01 で使う魔法の変身 scene。`
-  - NG: `この画像は物語「シンデレラ」の一場面を視覚化する。`
-  - OK: `灰の台所。石床、大きな暖炉、薄い灰、朝の青灰色の光、奥へ続く暗い廊下が見える、人物なしの実写映画風 location anchor。`
-  - OK: `若い王子の全身キャラクター参照。深紺と銀の宮廷衣装、落ち着いた目線、同じ人物として再利用できる顔・髪型・立ち姿。`
-- asset request file では、review 用 metadata として少なくとも次を見えるようにする
-  - `asset_id`
-  - `asset_type`
-  - `execution_lane`
-  - `reference_count`
-  - `output`（canonical output path）
-  - `review.status`
-- image request file は review 用に image prompt を持つ全 scene/cut を載せる
-  - `still_mode`
-  - `generation_status: missing|created|recreate`
-  - `plan_source`
-  - `execution_lane`
-  - `reference_count`
-- story から落とした cut は `cut_status: deleted` と `deletion_reason` を残して監査痕跡にする
-  - deleted cut は request / image generation / video generation / audio generation / final concat から除外する
-  - 除外対象は `generation_exclusion_report.md` と `*_generation_exclusions.md` に記録する
-  - `scripts/build-clip-lists.py` は scene に `render_units[]` がある場合、`video_clips.txt` を render unit 単位で、`video_narration_list.txt` を `source_cut_ids[]` の順で作る
-- review projection / snapshot には prompt 以外の判断材料も十分に残す
-  - explicit `references`
-  - `character_ids` / `object_ids` / `location_ids` から解決される asset reference
-  - つまり request review 時点で「何を参照して作るか」が人間に見えている状態を正とする
-- `plan` は AI/実装側の設計用文書、Markdown request は人間が最終確認する projection、JSON snapshot は機械実行の凍結正本として役割を分ける
-- 人レビューの既定対象は Markdown request 側とし、plan / IR は必要時だけ参照する。承認後の実行は対応する snapshot revision に束縛する
-- image/video request は stateful な前提を置かない
-- 他 cut / 他 scene との関係性は、原則として `references` に入った画像を通してのみ担保する
-- request 本文では「参照画像の誰/場所/小道具が、この場面でどう見えるか」を明記する
-- `後続する scene` / `前の prompt を引き継ぐ` のような、画像参照を伴わない continuity 指示は request では使わない
-- request 本文では `cut` のような運用メタ語を使わない
-- request 本文では `物語「<topic>」の sceneXX` のような制作メタ情報を使わず、人物 / 場所 / 道具 / 行為を具体語で書く
-- 作品文脈が必要な場合も、`物語「<topic>」` だけに頼らず、例: `シンデレラの灰の台所`、`王宮の階段に残された片方のガラスの靴` のように画面化できる名詞句へ落とす
-- cut stage は既存どおり `video_manifest.md` を使う
-- `script.md.human_review_criteria.narration[]`
-  - 人間レビュー時の固定観点
-- `script.md.script_metadata.ending_mode`（optional）
-  - `happy|bittersweet|tragic|cautionary|ambiguous`
-  - p700 authoring後のscript→manifest syncで `video_manifest.md.video_metadata.ending_mode` へexact one-way projectionする
-  - p700 authoring promptとp720 semantic reviewは、このruntime projectionを同じkey sourceとして読む
-- `script.md.scenes[].narration_distance_policy`（optional）
-  - `stay_close|contextual|meaning_first`
-- `script.md.scenes[].narrative_value_goal`（optional）
-  - `mode: immersion|meaning|mixed`
-  - `leave_viewer_with: [string, ...]`
-- `script.md.script_metadata.elevenlabs`
-  - `provider`, `model_id`, `voice_name`, `voice_id`, `prompt_contract_version`, `default_stability_profile`, `text_policy`
-  - 再現 baseline は `provider: elevenlabs`, `model_id: eleven_v3`, `voice_name: Shohei - Warm, Clear and Husky`, `voice_id: 8FuuqoKHuM48hIEwni5e`
-- `script.md.scenes[].cuts[].elevenlabs_prompt`
-  - `spoken_context`, `voice_tags`, `spoken_body`, `stability_profile`
-- `script.md.scenes[].cuts[].tts_text`
-  - 旧 authoring 経路の final string。新規 p400 cinematic contract では draft 扱いにし、p700 で actual cut/image/duration に合わせて final `audio.narration.tts_text` を確定する
-  - 通常はひらがな寄せ + `[]` audio tag を許容する
-  - 音声品質を優先する cut では、漢字かな交じりの自然な日本語を許可する
-  - 締め / 教訓 narration の再現 baseline は `spoken_context: ""`, `voice_tags: ["low", "measured"]`, `stability_profile: "natural"`
-  - 採用例は `tts_text: "[low][measured] 知らない世界には、強い引力があります。"`
-- `script.md.scenes[].cuts[].human_review`
-  - `status`
-  - `notes`
-  - `change_requests`
-  - `approved_narration`
-  - `approved_tts_text`
-- `video_manifest.md.scenes[].cuts[].cut_contract`
-  - `target_beat`
-  - `must_show`
-  - `must_avoid`
-  - `done_when`
-  - 旧 reader が必要な場合のみ同内容を `scene_contract` alias に複写する
-- `video_manifest.md.quality_check.review_contract`
-  - `target_outcome`
-  - `must_have_artifacts`
-  - `must_avoid`
-  - `done_when`
-
-### 4.5 Stage evaluator rubric families
-
-- research
-  - `source_grounding`
-  - `coverage`
-  - `conflict_readiness`
-  - `structure_readiness`
-  - `story_material_readiness`
-- script
-  - `arc_coverage`
-  - `scene_specificity`
-  - `reference_grounding`
-  - `anti_todo`
-  - `production_readiness`
-- manifest(scene/cut)
-  - `beat_clarity`
-  - `visual_specificity`
-  - `continuity_readiness`
-  - `narration_alignment`
-  - `production_readiness`
-- video
-  - `render_integrity`
-  - `asset_completeness`
-  - `review_readiness`
-  - `audio_packaging`
-  - `publish_readiness`
-
----
-
-## 5. `image_generation.review` contract
-
-画像生成前 gate の review 状態は `video_manifest.md` の各 renderable image node に直接保持する。派生の `prompt_collection` は正本ではない。
-
-### 5.0 Semantic QA contract
-
-semantic QA は生成前の設計 artifact に対する横断契約であり、schema / file existence / count の代替ではない。各設計 stage は、上流 artifact の意味が下流 artifact に正しく翻訳されていることを説明できる状態で handoff する。
-
-運用分担:
-
-- 構造、存在、schema、参照 path、count、必須 field は関数 verifier が判定する
-- subject / location / object / timeline / reveal order / cut function などの意味判定は、standard では contextless semantic review agent が判定する。preapproved では同じ意味契約を deterministic preapproval report と deterministic diagnostics で検証する
-- verifier は canonical semantic report artifact を読み、未実行、pending、placeholder、zero-entry、failed を hard gate として fail にする。preapproved の `status: passed` report は、canonical pack / scope / prompt と source/input digest が current で、`report.source=deterministic_preapproval` の場合だけこの条件を満たす
-- frontend create flow の standard mode では、生成前設計 stage の external semantic review report が `status: passed` になることを必須にする。`research` と `story` は pre-cut gate であり、どちらかが未実行、transport failure、または非 passed なら scene/cut materialization を開始しない。p680 までの create ではさらに `scene_set`, `scene_detail`, `cut_blueprint`, `asset_plan`, `image_prompt` を省略しない。明示的な `create_input.json.review_mode=preapproved` ではこれらの external reviewer turn と frontend human reviewer turn だけを省略し、各 stage の pack / digest / deterministic report は必ず作る
-- `research` / `story` semantic review は artifact 内の構造、時系列、人物、対立、矛盾、scene 化 readiness を判定する。この変更では外部典拠、原典版、翻訳、権利状態、URL の真正性を検証対象にしない
-- 生成済み output stage の `asset_output`, `scene_image`, `video_clip`, `render` は canonical semantic review stage ではない。standard では実画像・動画・最終 render の良否を deterministic output validator と frontend human review / final QA が判定する。preapproved create では external human reviewer turn を省略するが、deterministic output validator / final QA を必須とする
-- standard の semantic review が `passed` でない場合、改善点をその stage の production-side agent に渡して canonical artifact を修正し、同じ contextless semantic review agent が再レビューする。これは画像生成だけの例外処理ではなく、下記の canonical semantic review stages すべてに適用する。修正中は process slot を次工程へ進めず、`review.semantic.<stage>.loop.status=repairing` と `review.semantic.<stage>.repair.status=in_progress` で semantic QA 修正中であることを state に残す。再レビューが `passed` になった時だけ次工程へ進み、最大試行回数でも通らない場合は当該 semantic QA slot を `failed` にする。preapproved は reviewer/producer repair turn の代わりに deterministic diagnostics を実行し、blocking diagnostics があれば fail-close する。deterministic check を人間 override や暗黙 fallback で通過扱いにしてはならない
-- semantic QA / producer repair の timeout は固定の総作業時間制限ではなく no-progress watchdog とする。Codex app-server の turn notification、semantic report、producer report、修正対象 artifact のいずれかが更新されている間は改善中として待つ。観測可能な進捗が止まった場合だけ `review.semantic.<stage>.watchdog.status=no_progress_timeout` とし、これは意味判定 failure ではなく transport/runtime block として扱う
-- `scene_set` / `scene_detail` の per-scene shard review で transport timeout が起きた場合、semantic failure / producer repair には入れず、該当 shard だけを再実行する。`scene_set` は `TOC_SCENE_SET_TRANSPORT_RETRY_ATTEMPTS`、`scene_detail` は `TOC_SCENE_DETAIL_TRANSPORT_RETRY_ATTEMPTS` を使い、既定はいずれも 3 回。pass 済み shard は同一 review attempt 内で再実行しない。terminal verdict 欠落や digest / reviewed_entries 不一致などの output-contract failure も、`scene_set` では該当 shard だけを1回再実行し、stage 全件の外側 retry は重ねない。`scene_set` の各 shard は対象 scene の compact projection と全 scene の ordered compact context を読み、因果順、reveal ownership、location route、participants / role coverage、daypart continuity、handoff を局所 entry と全体順序の両方から判定する。canonical collection の heading は scope entry と exactly once かつ同順で一致し、各 section は exactly one JSON fence、fence 外は空白のみ、duplicate key のない JSON object、`payload.id` は heading と同じ string を満たさなければ provider 起動前に `semantic_review_selector_coverage_invalid` で fail-close する。collection 欠落・読込不能も failed aggregate と `coverage.status=invalid` を残す。canonical scope は `review_generation_id`, `review_generation_collection_sha256`, `entry_projection_sha256s` を持ち、shard scope は同じ generation id、canonical collection/input/scope hash、対象 entry projection hash を束縛する。provider 前後と canonical aggregate 公開前後で一致を再検証し、同一 run/stage の publication は cross-process lock で直列化する。並列上限 `TOC_SCENE_SET_REVIEW_CONCURRENCY` の既定は 6。retry で復帰した shard は `review.semantic.<stage>.shards.<scene>.transport.status=recovered` にする。使い切った `scene_detail` shard が scene に局所化できる場合は、その scene に属する `image_generation_requests.md` item だけを `blocked` / synthetic failed candidate として frontend に表示し、他 scene の画像生成は続行する。`scene_detail`, `cut_blueprint`, `image_prompt` の semantic `failed_selectors` / `blocked_entries` が scene/cut image item に局所化できる場合も同じく該当 image item だけを blocked にし、他 scene の画像生成は続行する。局所化できない transport failure は `runtime.stage=semantic_review_blocked_transport` で画像生成前に停止し、局所化できない semantic failure は `review.semantic.<stage>.localization.status=not_localized` と理由を state / app_server log に残す
-- 局所継続の正本は state の allow flag 単体ではなく、`logs/review/semantic/partial_media_projection.json`（`toc.partial_media_projection.v1`）と `partial_media_generation_receipt.json`（`toc.partial_media_generation_receipt.v2`）の組である。projection は current scene request revision / snapshot hash、current semantic scope / report hash、stage ごとの selector 対応、blocked / survivor item、synthetic failed candidate を digest に束縛する。receipt は同じ projection digest / request revision に加えて、実際に provider へ送った `provider_submitted_item_ids`、current provenance を再利用して provider へ送らなかった `reused_item_ids`、検証済み output を持つ `generated_item_ids`、current request を満たした全 survivor の `satisfied_item_ids`、送らなかった blocked item を別々の真値集合として束縛する。submitted と reused は互いに素で、その和集合、generated、satisfied はいずれも current survivor と完全一致しなければならない。verifier は両 artifact を current source から再導出して state の4集合も含め完全一致を確認し、blocked destination に regular file、symlink、broken symlink、FIFO、socket、directory のいずれかが残る場合、survivor output / provenance が欠ける場合、全 item が blocked の場合は fail-close にする。p680 terminal gate 自体には semantic / output failure の例外リストを設けず、valid projection / receipt を評価した全 emitted check / stage と overall が pass の場合だけ合格とする
-- `image_prompt` semantic review は scene ごとの shard（その scene の cut entries + scene composite）で実行する。standard は reviewer turn を実行し、preapproved は同じ pack / scope / digest を deterministic に検証する。canonical scope の全 selector は exactly once で shard に割り当てる。zero / missing / duplicate / unexpected selector、collection section の欠落、reviewer の `reviewed_entries` 不一致は `semantic_review_selector_coverage_invalid` として fail-closed にする。並列上限は `TOC_IMAGE_PROMPT_REVIEW_CONCURRENCY`、transport retry は失敗 shard のみを対象にし、`review.semantic.image_prompt.shards.<scene>.*` に局所状態を保存する。
-
-Canonical semantic review stages:
-
-- `research`
-- `story`
-- `scene_set`
-- `scene_detail`
-- `cut_blueprint`
-- `asset_plan`
-- `image_prompt`
-- `narration`
-- `video_motion`
-
-Canonical semantic review artifacts:
-
-- `logs/review/semantic/<stage>.collection.md`
-- `logs/review/semantic/<stage>.scope.json`
-- `logs/review/semantic/<stage>.prompt.md`
-- `logs/review/semantic/<stage>.report.md`
-- state keys: `review.semantic.<stage>.collection`, `review.semantic.<stage>.scope`, `review.semantic.<stage>.prompt`, `review.semantic.<stage>.report`, `review.semantic.<stage>.status`, `review.semantic.<stage>.entry_count`, `review.semantic.<stage>.error_count`
-- repair-loop artifacts: `logs/review/semantic/<stage>.repair_round_<NN>.prompt.md`, `logs/review/semantic/<stage>.repair_round_<NN>.producer_report.md`
-- repair-loop state keys: `review.semantic.<stage>.loop.status`, `review.semantic.<stage>.loop.attempt`, `review.semantic.<stage>.loop.max_attempts`, `review.semantic.<stage>.repair.status`, `review.semantic.<stage>.repair.round`, `review.semantic.<stage>.repair.prompt`, `review.semantic.<stage>.repair.report`
-- watchdog state keys: `review.semantic.<stage>.watchdog.status`, `review.semantic.<stage>.watchdog.operation`, `review.semantic.<stage>.watchdog.no_progress_timeout_seconds`, `review.semantic.<stage>.watchdog.last_progress_at`, `review.semantic.<stage>.watchdog.completed_at`
-
-Legacy-compatible p640 image prompt aliases remain available for existing tooling:
-
-- `logs/review/image_prompt.review_collection.md`
-- `logs/review/image_prompt.review_scope.json`
-- `logs/review/image_prompt.judgment_prompt.md`
-- `logs/review/image_prompt.judgment.md`
-- state keys: `review.image_prompt.judgment.collection`, `review.image_prompt.judgment.scope`, `review.image_prompt.judgment.prompt`, `review.image_prompt.judgment.report`, `review.image_prompt.judgment.status`, `review.image_prompt.judgment.entry_count`
-
-Pack / runner commands:
-
-- `python scripts/build-semantic-review-pack.py --run-dir <run_dir> --stage <stage>`
-- `python scripts/run-semantic-review.py --run-dir <run_dir> --stage <stage>`
-
-`scripts/run-semantic-review.py` は既定で repair loop を有効にする。最大試行回数の既定は `scene_set` が 3 回、その他の stage が 2 回で、`--max-attempts` または有効な `TOC_SEMANTIC_REVIEW_MAX_ATTEMPTS` を明示した場合はその値を優先する。不正な環境変数値は stage 別の既定へ戻す。検証用途では `--no-repair-loop` も使える。
-`--timeout-seconds` と `--repair-timeout-seconds` は総作業時間の上限ではなく、semantic report、repair report、source artifact、app-server activity marker が更新されない場合の no-progress watchdog として扱う。改善中の artifact 更新や app-server 通知が観測されている間は semantic loop を継続し、無進捗の場合だけ `review.semantic.<stage>.watchdog.status=no_progress_timeout` を state に残して停止する。
-
-実装者の責務:
-
-- `story.md` の scene は、物語上の役割、因果、感情変化、見せるべき情報を持つ
-- `script.md` の scene / cut は、1 cut が担う意味、必ず見せるもの、避けるもの、完了条件を持つ
-- `asset_inventory.md` / `asset_plan.md` は、物語で使われる人物、物語固有アイテム、場所、舞台装置を意味単位で網羅し、asset 種別と prompt が一致する
-- `video_manifest.md` の scene/cut は、参照する character/object/location id が cut の意味に合っている。round-robin や件数合わせで場所・小道具・人物を割り当てない
-- 画像生成 request は、参照画像の path だけでなく、その参照が何の意味を固定するかを prompt / contract で読める
-- 生成済み画像、動画、音声、最終 render は、standard では frontend human review / final QA と deterministic validator、preapproved create では frontend human reviewer turn を省略した deterministic validator / final QA で確認してから次 stage に渡す。preapproved でも output の存在・decode・provenance・completeness を省略しない
-
-レビュワーの責務:
-
-- artifact が存在するかだけでなく、成果物として意味が通るかを見る
-- scene/cut の設計段階で、因果、場所、人物、主役アイテム、reveal 順序、情報量、handoff が成立しているかを見る
-- asset / scene 画像、動画、最終 render はフロントで実物を見て、上流の意味契約を満たしているかを人間が判定する
-- scene 画像では、参照 asset が正しいだけでなく、cut の場所・時点・小道具・人物状態が正しいかを見る
-- video / narration では、motion や語りが上流の cut function を説明だけで代替していないかを見る
-
-Canonical semantic reason keys:
-
-- `semantic_scene_role_mismatch`
-- `semantic_cut_function_mismatch`
-- `semantic_asset_category_mismatch`
-- `semantic_subject_mismatch`
-- `semantic_location_mismatch`
-- `semantic_object_mismatch`
-- `semantic_reference_mismatch`
-- `semantic_timeline_mismatch`
-- `semantic_reveal_order_mismatch`
-- `semantic_narration_mismatch`
-- `semantic_motion_mismatch`
-
-各 `scenes[].image_generation.review` または `scenes[].cuts[].image_generation.review` は、少なくとも次の review field を持つ。
-
-```yaml
-contract:
-  target_focus: "character|relationship|setpiece|blocking|environment"
-  must_include: []
-  must_avoid: []
-  done_when: []
-agent_review_ok: true|false
-agent_review_reason_keys: []
-rubric_scores: {}
-overall_score: 0.0-1.0
-human_review_ok: true|false
-human_review_reason: ""
-human_review:
-  status: "pending|approved|changes_requested"
-  notes: ""
-  change_requests: []
-```
-
-補足:
-
-- 現行表記として `agent_review_reason_codes` を使っていてもよいが、意味は `agent_review_reason_keys` と同じに保つ
-- `agent_review_reason_summary` は任意の補助説明であり、reason key の代替にはしない
-
-Semantics:
-
-- `agent_review_ok`
-  - subagent がその manifest node を story/script/reference 契約に照らして再生成可能と判断した結果
-  - 不足がある間は `false`
-- `agent_review_reason_keys`
-  - `agent_review_ok: false` の理由 key
-  - false のときは空にしない
-  - fix 後に subagent が `true` に戻したら空配列でよい
-- `rubric_scores`
-  - criterion score
-  - canonical 軸は `story_alignment` / `subject_specificity` / `prompt_craft` / `continuity_readiness` / `production_readiness`
-- `overall_score`
-  - rubric score の加重合計
-  - 単独では gate にせず、criterion 単位の弱点把握に使う
-- `human_review_ok`
-  - 人間が finding を理解したうえで例外許容した記録
-  - subagent finding 自体の解消を意味しない
-- `human_review_reason`
-  - 人間 override の理由
-  - `human_review_ok: true` のときは必須
-- `human_review`
-  - 通常の human feedback loop の記録
-  - `human_review_ok` とは別物
-  - `change_requests[]` を持つ場合、個別要求の正本はこちらに置く
-
-Canonical reason key:
-
-- `source_anchor_missing_from_prompt`
-- `missing_character_id`
-- `missing_object_id`
-- `prompt_only_local_mismatch`
-- `prompt_missing_expected_character_anchor`
-- `prompt_missing_expected_object_anchor`
-- `prompt_subject_drift`
-- `semantic_subject_mismatch`
-- `semantic_location_mismatch`
-- `semantic_object_mismatch`
-- `semantic_reference_mismatch`
-- `semantic_timeline_mismatch`
-- `blocking_drift`
-- `missing_required_prompt_block`
-- `prompt_not_self_contained`
-- `prompt_contains_nonvisual_metadata`
-- `prompt_contains_first_frame_metadata`
-- `prompt_leaks_motion_brief`
-- `non_japanese_prompt_term`
-- `prompt_mentions_character_but_character_ids_empty`
-- `image_contract_missing`
-- `image_contract_must_include_unmet`
-- `image_contract_must_avoid_violated`
-- `image_contract_target_focus_unmet`
-- `image_prompt_story_alignment_weak`
-- `image_prompt_subject_specificity_weak`
-- `image_prompt_prompt_craft_weak`
-- `image_prompt_continuity_weak`
-- `image_prompt_not_first_frame_ready`
-- `image_prompt_first_frame_readiness_weak`
-- `image_prompt_production_readiness_weak`
-
-Lifecycle:
-
-1. subagent が不足を検出した node を `agent_review_ok: false` にする
-2. subagent が `agent_review_reason_keys` を残す
-3. fix を source manifest に反映する
-4. subagent が再 review し、解消済み node を `agent_review_ok: true` に戻す
-5. なお未解消 finding を人間判断で許容する場合だけ `human_review_ok: true` と `human_review_reason` を記録する
-
-Hard/soft split:
-
-- 関数 review の hard gate は、missing contract / missing ids / required prompt block 欠落 / reveal 破り / self-contained 違反のような構造的問題を中心に扱う
-- `must_avoid` の素朴な文字列一致、`target_focus` の語一致、`production_readiness` の弱さは warning として残してよい
-- これらの warning を別コンテキストで評価したい場合は `scripts/build-subagent-image-review-prompt.py` で `logs/review/image_prompt.subagent_prompt.md` を生成し、contextless subagent に judgment review を依頼する
-
-Optional `human_review.change_requests[]` item:
-
-```yaml
-- request_id: "hr-001"
-  status: "open|accepted|rejected|deferred|resolved"
-  category: "story_alignment|reveal|subject_specificity|continuity|craft|other"
-  requested_change: ""
-  rationale: ""
-  proposed_patch: ""
-  requested_at: "ISO8601"
-  resolved_at: ""
-  resolution_notes: ""
-```
-
-Image contract:
-
-- `target_focus`
-  - その cut で evaluator が最優先で読む軸
-  - `character|relationship|setpiece|blocking|environment`
-- `must_include`
-  - prompt に必ず含める anchor
-- `must_avoid`
-  - prompt に入れてはいけない drift source
-- `done_when`
-  - 生成前に満たしたい具体条件
-
-Production v2 prompt groups:
-
-- 常時: `style`, `current_moment`, `constraints`
-- metadata 条件付き: `story_time`, `time_of_day`
-- dependency 条件付き: `references`, `characters`, `objects`, `location`
-- explicit drawable value 条件付き: `primary_subject`, `composition`, `light_material`, `current_state_delta`
-
-Prompt projection registry:
-
-- schema/version: `prompt_projection_registry_v2`
-- code source of truth: `toc/image_prompt_projection_registry.py`
-- 各ruleは `source_keys`, `relevance: required|conditional|none`, `target_group`（`none`以外）、`transform`, `deterministic_checks`, `semantic_checks` を持つ
-- `none` ruleは `exclusion_reason` を持ち、例として `cut_contract.motion_contract.motion_brief` はp800専用のためstill promptへ投影しない
-- semantic image prompt entryは `prompt_projection_review_contract` にregistry version、不変原則、active/inactive/excluded rules、expected required groups、`include|omit|add|replace` operationsを持つ
-- 新しい設計keyを追加する変更はprompt relevanceを必ず分類し、`required|conditional`ならprojection/review/test、`none`なら除外理由を同時に追加する
-
-standard の subagent review と preapproved の deterministic preapproval report は、`drawable_prompt_ir.dependencies.required_groups` をその entry の必須 criterion とする。required group の欠落、不要 group の混入、空 fragment、`included_fragments[].text` と `api_prompt_payload.prompt` の不一致を failure とする。`missing_required_prompt_block` は `image_api_prompt_v1` の legacy criterion とし、v2 に固定6ブロックを要求しない。
-
-registryでactiveとなったgroupは、正本source value、IR dependency、raw `required_groups`、exactly oneの非空fragment、provider promptのtraceを持つ。値bindingを持つgroupはfragmentとprovider promptにも正本値がexactに現れなければならず、dependencyだけ一致する状態をpassにしない。
-
-自己申告された `required_groups` だけで completeness を判定しない。`video_manifest.md.video_metadata.time` が非空なら exact `dependencies.story_time` と `story_time` fragment、同一 `video_manifest.md.scenes[].time_of_day` が非空なら exact `dependencies.time_of_day` と `time_of_day` fragment を独立に必須とする。
-
----
-
-## 6. p700 Audio Story / revision-aware narration contract
-
-### 6.1 Authoring source of truth
-
-ナレーションの言語正本は `script.md` とする。p700 authoringはcut別文面から始めず、全編を次の順で設計する。
-
-```yaml
-audio_story_plan:
-  schema_version: audio_story_plan_v1
-  authoring_provenance: "audio_story_director|derived_legacy_cut_projection"
-  authoring_status: "draft|authored|approved|changes_requested"
-  audience_promise: ""
-  narrator_bible:
-    relationship_to_story: "witness|companion|historian|limited_observer|omniscient"
-    knowledge_boundary: []
-    emotional_permission: []
-    forbidden_attitudes: []
-  open_loops:
-    - loop_id: "loop_01"
-      viewer_question: ""
-      why_it_matters: ""
-      opened_at: "scene1_cut1"
-      payoff_at: "scene8_cut2"
-      payoff_type: "answer|reframe|partial|intentional_unresolved"
-  scene_arcs:
-    - scene_id: "1"
-      attention_state: "orient|build|hot|recovery|release"
-      audience_state_before: ""
-      audience_state_after: ""
-      semantic_load: "low|medium|high"
-      incoming_causal_question: ""
-      outgoing_causal_pressure: ""
-  silence_budget:
-    purpose: ""
-    protected_moments: []
-  continuous_full_draft: "cut境界なしで通読できる全編spoken draft"
-
-narration_spans:
-  - span_id: "ns_001"
-    source_cut_ids: ["scene1_cut1"]
-    story_job: "first_question|causal_bridge|payoff|reaction|aftertaste"
-    opened_loop_ids: ["loop_01"]
-    closed_loop_ids: []
-    text: "公開用原稿"
-    tts_text: "provider用最終文字列"
-    audio_visual_relation: "orientation_overlap|causal_alignment|complement|counterpoint|voice_silence"
-    prosody:
-      pace: "ease|steady|press|hold|release"
-      pause_function: "parse|anticipate|absorb|reaction|handoff|none"
-    tts_generation_group_id: "voice_run_01"
-```
-
-- Audio Story Directorが全編reviewとcut projection照合を完了した正規稿だけ`authoring_provenance: audio_story_director` / `authoring_status: authored|approved`にする
-- cut原稿からのlegacy fallbackは`authoring_provenance: derived_legacy_cut_projection` / `authoring_status: changes_requested`とし、Audio Story Directorのreview完了までp720を通さない
-- 各voiced spanの`text` / `tts_text`は`source_cut_ids`順のnon-empty cut原稿を改行連結した値にし、`continuous_full_draft`はvoiced spanの`text`をspan順に改行連結した値にする
-- voiced cutは原則ちょうど1つのvoiced spanからanchorされ、未知selector、重複`span_id`、同一cut文面の完全重複を残さない
-- 各sceneは`scene_arcs[]`を持ち、最後のspanは`payoff|reaction|aftertaste`のいずれかを担う
-- `open_loops[].loop_id`は一意とし、span側の`opened_loop_ids` / `closed_loop_ids`は宣言済みIDだけを参照する。
-  `opened_at` / `payoff_at`は既知cutで、実際にopen/closeするspanのsource cutに属し、未解決を除きcanonical順でopenがpayoffより前に来る
-- `narration_spans[]`は文章・演技単位であり複数cutをまたいでよい。cut側には`audio.narration.span_refs[]`を派生同期する
-- `tts_generation_group_id`は連続したdelivery意図だけでなく、providerへ渡す前後文脈のruntime groupである。同一groupの
-  voiced cutをcanonical cut順に並べ、各cutの直前/直後の`tts_text`をElevenLabs `previous_text` / `next_text`へ渡す
-- provider outputとhuman approvalは引き続きcut-addressableに保つ。group全体を1fileに結合するfieldではない
-- 1つのvoiced cutを複数のgroupへ所属させない。`voice_silence` spanとsilent cutは前後文脈memberに数えない
-- 公開`text`とprovider用`tts_text`を分離し、`script.md`から`video_manifest.md`へ一方向同期する
-- frontendでcut文面を明示保存した場合は、そのcutをanchorするspanの公開/TTS文面と
-  `audio_story_plan.continuous_full_draft`もcanonical cut順から再構成し、full-run正本をcut projectionと乖離させない
-- p700 prepare/refresh/mergeは後段と同じactive inventoryを使い、deleted/reference/character-asset nodeを全編planとscratchへ入れない
-- dotted numericの`scene_id` / `cut_id`を整数化せず、`scene10_cut1.1`のようなcanonical selectorをmergeとarc reviewまで保持する
-- script/manifest/stateのCLI同期は同一transactionで、いずれかの書き込み失敗時は全成果物を開始前のbyte列へrollbackする
-
-### 6.2 p720 deterministic arc + semantic critic binding
-
-revision-aware runでは、p720 runnerがplan、spans、canonical cut順、各cutのauthoring status/tool/公開文面/TTS文面/span参照を
-一組として検査する。結果の正本はrun-level `narration_workflow.arc_review`であり、cut-local reviewの寄せ集めでは代替しない。
-この決定論的検査に加えて、同じ凍結済み全編snapshotを5つの独立したapp-server criticへ渡す。
-`p720`のpassには両方がcurrentであることが必要である。
-
-```yaml
-narration_workflow:
-  schema_version: narration_run_workflow_v1
-  arc_review:
-    status: "pending|passed|changes_requested"
-    narration_text_set_hash: "sha256:..."
-    findings: []
-    report: "narration_text_review.md"
-    reviewed_at: "ISO8601"
-  semantic_critic_review:
-    schema_version: "narration_semantic_critic_aggregate_v1"
-    status: "pending|passed|changes_requested"
-    narration_text_set_hash: "sha256:..."
-    semantic_review_input_hash: "sha256:..."
-    reviewed_at: "ISO8601"
-    critics: []
-    findings: []
-    report: "logs/eval/narration/semantic_critics/<stamp>_review.md"
-    json: "logs/eval/narration/semantic_critics/<stamp>_review.json"
-  final_audio_review:
-    status: "pending|approved|stale"
-    approved_audio_set_hash: ""
-    approved_timeline_hash: ""
-    approved_at: ""
-    approved_by: "frontend_human"
-    note: ""
-    listen_evidence:
-      mode: "sequential_full_run"
-      audio_set_hash: "sha256:..."
-      item_ids: ["scene1_cut1"]
-      timeline: []
-      completed_at: "ISO8601"
-    listen_evidence_hash: "sha256:..."
-```
-
-決定論的検査と意味検査の責務を混ぜない。
-
-- `scripts/run-p720-narration-l3.py`
-  - placeholder、TTS表記、句読点、contract必須field、局所的なvisual重複、canonical cut/span/open-loop整合を再現可能なruleで検査する
-  - cut-local `audio.narration.review` と run-level `narration_workflow.arc_review` を更新する
-  - `logs/eval/narration/round_01/critic_*.md` はdeterministic findingの観点別projectionであり、独立agent verdictではない
-- `scripts/run-p720-narration-semantic.py`
-  - `retention_hook`、`narrator_voice_persona`、`causal_information_rhythm`、`audio_visual_distance`、`payoff_ending`を、同じhash-bound full-run packに対する独立app-server threadで評価する
-  - 各criticはstrict JSONだけを返し、集約結果を`narration_workflow.semantic_critic_review`へ保存する
-  - report/jsonのlatest projectionは`logs/eval/narration/semantic_critics/latest.md|json`に置く
-
-`semantic_critic_review.critics[]`は5役それぞれの`schema_version`、`critic_id`、
-`narration_text_set_hash`、`semantic_review_input_hash`、`status: passed|changes_requested|execution_failed`、
-`summary`、`findings[]`を保持する。
-各findingは`code`、`severity: blocking|warning`、`message`、`evidence[]`、`suggestion`を持つ。
-aggregateの`findings[]`はこれを`critic_id` / `critic_label`付きで平坦化したUI用projectionであり、5件すべてが
-`passed`のときだけtop-level statusを`passed`にする。
-
-CLIは次の順で実行する。
-
-```bash
-python scripts/run-p720-narration-l3.py --run-dir output/<run> --fail-on-findings
-python scripts/run-p720-narration-semantic.py --run-dir output/<run> --fail-on-findings
-```
-
-- p750には`arc_review.status: passed`と`semantic_critic_review.status: passed`の両方が必要で、両方の
-  `narration_text_set_hash`がcurrent set hashと一致し、semantic側の`semantic_review_input_hash`も現在のexact
-  critic-visible packと一致しなければならない
-- plan、span、cut文面、TTS文面、tool、span参照の変更後は、以前の`passed`をcurrentとみなさずp720を再実行する
-- frontendのcandidate previewはp720/p730修正loop中にも行えるが、current arc bindingの代替にはならない
-- frontendは`POST /api/image-gen/narration-review/run`で決定論的runnerを先に実行し、その成功snapshotに対して5つの
-  semantic criticを実行する。arc/cut findingとsemantic findingを同じresponseで返すため、外部CLIだけを暗黙の完走条件にしない
-- app-server無効化、critic実行失敗、欠落またはmalformed JSON、critic/hash不一致はblocking findingへ変換してfail closedとする。
-  これは作品内容の不合格ではなく`execution_failed`という運用上のverdictで、再実行までaggregate gateを閉じる。
-  review中にmanifestのtext set hashが変わった場合は結果を書き戻さず`stale`/HTTP 409として、current snapshotで再実行する
-- semantic aggregateは5つの固定critic idをexactly once要求し、各response、flattened findings、JSON/Markdown artifactの
-  一致をp720保存時とp750 currentness確認時の両方で検証する。visual/prompt/contract/timingだけの変更でもinput hashをstaleにする
-- criticはisolated cwd、sensitive env scrub、tool無効config、structured output、instruction/data分離で実行し、
-  transcriptにtool/command/file eventがあれば有効な`passed` JSONがあっても`execution_failed`とする
-- p750前の通し試聴はapproved cut audio、offset、cut末の間、intentional silenceをcanonical順に最後まで再生する。
-  `listen_evidence.audio_set_hash`とtimelineが承認request/current manifestに一致しない場合はp750を拒否する
-
-### 6.3 `audio.narration.review` contract
-
-各cutのp720 review状態は`video_manifest.md`のrenderable narration nodeに保持する。legacy audio-only経路では
-音声生成前gate、revision-aware frontend経路ではcandidate preview後も含めたp750/video handoff gateとして使う。
-
-各 narration node は review の前提として `audio.narration.contract` を持てる。`text` / `tts_text` には `TODO` / `TBD` / `REPLACE_ME` / 制作メモを入れない。未記入は空文字と `authoring_status` で表す。
-
-```yaml
-audio:
-  narration:
-    authoring_status: "missing|draft|human_locked|reviewed|silent"
-    missing_reason: "p700_narration_not_written_yet"
-    text: ""
-    tts_text: ""
-    contract:
-      schema_version: "narration_contract_v2"
-      story_role:
-        narrative_position: "opening|middle|ending"
-        # authored cut に由来する任意の非空 key。以下は作品固有の例。
-        cut_function: "decision"
-        voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
-        audience_state_before: ""
-        audience_state_after: ""
-        must_cover: []
-        must_not_reveal: []
-        done_when: []
-      visual_distance:
-        distance_policy: "stay_close|contextual|meaning_first|silent"
-        visible_facts_in_frame: []
-        narration_should_add: []
-        must_not_caption_visible_action: true
-        visual_overlap_allowed: false
-        visual_overlap_reason: ""
-      rhythm_and_timing:
-        target_speech_seconds: 0
-        min_speech_seconds: 0
-        max_speech_seconds: 0
-        start_timing: "immediate|after_visual_read|mid_cut|late_cut|none"
-        end_timing: "before_cut_end|on_cut_end|after_visual_resolution|none"
-        pause_intent: []
-        audio_visual_sync_point: ""
-      tts_readiness:
-        normalization_policy: "kanji_public_hiragana_tts|mixed|dictionary_first"
-        pronunciation_targets: []
-        max_sentence_chars: 42
-        tts_text_must_differ_from_text_when_needed: true
-      # compatibility aliases for older readers; new authoring should fill story_role first.
-      role: "setup"
-      target_function: "derive_from_story_role_voice_function"
-      must_cover:
-        - "derive_from_story_role_must_cover"
-      must_avoid:
-        - "映像のキャプション化"
-      done_when:
-        - "derive_from_story_role_done_when"
-```
-
-Required core fields for new p700 authoring are `schema_version`, `story_role.narrative_position`, `story_role.cut_function`, `story_role.voice_function`, `visual_distance.distance_policy`, `visual_distance.narration_should_add`, and `tts_readiness.pronunciation_targets`.
-
-Revision-aware frontend authoring adds the following metadata without changing the legacy string fields.
-
-```yaml
-audio:
-  narration:
-    text: "公開用原稿"
-    tts_text: "provider用最終文字列"
-    revision:
-      schema_version: narration_revision_v1
-      number: 1
-      text_revision: 1
-      tts_revision: 1
-      text_hash: "sha256:..."
-      tts_hash: "sha256:..."
-      source_hash: "sha256:..."
-      source: frontend|agent
-      updated_at: "ISO8601"
-    source_binding:
-      script_selector: "scene1_cut1"
-      contract_hash: "sha256:..."
-      visual_grounding_hash: "sha256:..."
-      semantic_revision: 1
-      semantic_hash: "sha256:..."
-      tts_revision: 1
-      tts_request_hash: "sha256:..."
-      synced_at: "ISO8601"
-    generation:
-      status: missing|generating|candidate|stale|failed|human_approved
-      candidate_id: ""
-      generated_from_tts_hash: "sha256:..."
-    candidates:
-      - candidate_id: "immutable id"
-        request_revision: 1
-        request_digest: "sha256:..."
-        generated_from_text_hash: "sha256:..."
-        generated_from_tts_hash: "sha256:..."
-        output: "assets/audio/.../candidates/<id>.mp3"
-        output_sha256: "sha256:..."
-        duration_seconds: 0
-        provider_request:
-          voice_id: ""
-          model_id: ""
-          voice_settings: {}
-          output_format: ""
-          language_code: "ja"
-          pronunciation_dictionary_locators: []
-          pronunciation_alias_source: ""
-          pronunciation_alias_sha256: "sha256:..."
-          effective_delivery_hash: "sha256:..."
-          tts_generation_group_id: "voice_run_01"
-          previous_text: "同一groupの直前cutのprovider用文字列"
-          next_text: "同一groupの直後cutのprovider用文字列"
-          tts_continuity_hash: "sha256:..."
-        status: generating|candidate|stale|failed|superseded|human_approved
-    audio_review:
-      status: pending|approved
-      approved_candidate_id: ""
-      approved_revision: 0
-      approved_text_hash: ""
-      approved_tts_hash: ""
-      approved_at: ""
-```
-
-- `output`はhuman-approved candidateだけを指す。candidate生成時には更新しない
-- `human_review_ok`はagent findingの例外許容専用で、audio approvalへ流用しない
-- text/tool/TTS変更後、以前のcandidate fileは削除せずstale化する
-- TTS完了時はcandidate id、request revision、current tts hashを再照合し、古い完了結果をcurrentへ昇格しない
-- 保存、無音確定、候補生成、候補承認は`expected_revision`必須のcompare-and-swapとする。候補生成/承認は
-  `expected_tts_hash`も要求し、古いfrontend stateからの更新を暗黙mergeしない
-- provider実行はlock外で行ってよいが、先にcandidateとeffective delivery snapshotをmanifestへ固定する。完了時に
-  revision/hashが変わっていればfileを`stale`として残し、current stateを更新しない
-- `tts_continuity_hash`はgroup id、`previous_text`、`next_text`を束ねる。隣接group memberのTTS文面変更でも
-  current contextが変わるため、影響する既存candidate/approvalをstale化して再生成する
-- candidate承認時とp750 readiness時に`output_sha256`と実fileを再照合する
-- `source_binding.contract_hash` / `visual_grounding_hash`がcurrent cut/image groundingと違う場合は、同じ文面でも
-  旧candidateを使わず、正本へ再保存・再reviewしてbindingを更新する
-
-### 6.4 p750 audio set / timeline approval
-
-p750 requestは一覧取得時のcurrent audio setと、視聴時に確定したtimelineをcompare-and-swapする。
-
-```yaml
-request:
-  expected_audio_set_hash: "sha256:..."
-  timeline:
-    - item_id: "scene1_cut1"
-      video_duration_seconds: 8
-      narration_offset_seconds: 0.5
-```
-
-- `expected_audio_set_hash`は全manifest cutをcanonical順に並べ、current source hash、candidate id、output path/content hash、
-  実測duration、tool、statusから計算する。一覧/各mutation responseの`audioSetHash`を承認requestへ渡す
-- timelineは全cutをちょうど1回ずつcanonical順に含む。欠落、重複、順序違いは拒否する
-- `video_duration_seconds`は仮の計画尺から短縮できるが、spoken cutでは
-  `ceil(approved audio duration + narration_offset_seconds)`以上にする
-- currentなdeterministic arc passとsemantic critic pass、全cutのcurrent individual approvalまたはhuman-confirmed silence、
-  p740 pass、audio set hash一致が揃った時だけ
-  `final_audio_review.status: approved`にする
-- 承認時のaudio set hashとtimeline hashの両方がcurrentの場合だけp750をcurrentとする。文面、TTS、delivery、候補、file、
-  cut順、duration、offsetの変更はp750をstaleにする
-- revision-aware renderは全cut・同順・同duration・同offsetを再要求し、spoken cutにはapproved `output`以外のpathを許可しない。
-  silent cutの無音fileはserverがapproved durationからmaterializeする
-- revision-aware CLIはcurrent p750なしでTTS/renderへ進まず、`runtime.stage=narration_frontend_handoff`として停止する。
-  manifestから直接audioを生成するCLI経路はlegacy narrationのみとする。current p750後は
-  `scripts/freeze-approved-render-inputs.py`がapproved offset、cut末の余白、intentional silenceを各cut音声へmaterializeしてから
-  concat listを作る。raw approved MP3をそのまま連結してp750 timelineを失ってはならない
-
-### 6.5 Migration rule
-
-- v2 fields are the design source of truth for new authoring.
-- Until all p720 / semantic / stage evaluators are v2-aware, legacy aliases are also required before p720:
-  - `role`
-  - `target_function`
-  - `must_cover`
-  - `must_avoid`
-  - `done_when`
-- These aliases are derived projections from v2 fields, not a second source of truth.
-- A manifest that only fills v2 fields but leaves legacy aliases missing or empty is not p720-ready in the current runtime.
-- Template authors should keep the aliases visible so older readers fail predictably instead of silently ignoring the contract.
-
-各 `scenes[].audio.narration.review` または `scenes[].cuts[].audio.narration.review` は、少なくとも次の review field を持つ。
-
-```yaml
-agent_review_ok: true|false
-agent_review_reason_keys: []
-agent_review_reason_messages: []
-human_review_ok: true|false
-human_review_reason: ""
-rubric_scores: {}
-overall_score: 0.0-1.0
-pronunciation_review:
-  candidates: []
-  unresolved: []
-narration_arc_review:
-  agent_review_ok: true|false
-  reason_keys: []
-  rubric_scores: {}
-human_review:
-  status: "pending|approved|changes_requested"
-  notes: ""
-  change_requests: []
-```
-
-Semantics:
-
-- `agent_review_ok`
-  - narration text / tts_text が gate を満たしているかを subagent が判定した結果
-  - 未修正の finding がある間は `false`
-- `agent_review_reason_keys`
-  - `agent_review_ok: false` の理由 key
-  - false のときは空にしない
-  - fix 後に subagent が `true` に戻したら空配列でよい
-- `agent_review_reason_messages`
-  - false 理由の短い説明
-- `human_review_ok`
-  - 人間が finding を理解したうえで例外許容した記録
-  - subagent finding 自体の解消を意味しない
-- `human_review_reason`
-  - 人間 override の理由
-  - `human_review_ok: true` のときは必須
-- `human_review`
-  - 通常の human review loop の記録
-  - narration 文面の source of truth は `script.md` だが、manifest 側にも同期された review 状態を持てる
-  - `change_requests[]` は override ではなく修正要求の本文
-- `rubric_scores`
-  - criterion ごとの score
-- `overall_score`
-  - weighted overall score
-- `pronunciation_review`
-  - p720 で見つけた固有名詞・人名・地名・専門語の読み替え候補
-  - `unresolved` が残る場合は p730 前に `tts_text` のかな寄せ、`config/tts-pronunciation-aliases.tsv`、または official pronunciation dictionary locator のどれで処理するかを決める
-- `narration_arc_review`
-  - cut / scene 局所の voice continuity / emotional curve / information flow / repetition findingを保持する
-  - revision-aware runの全編blocking判定はrun-level `narration_workflow.arc_review`が正本であり、このnode fieldだけでpassにしない
-
-Canonical reason key:
-
-- `narration_authoring_status_missing`
-- `narration_authoring_status_inconsistent`
-- `narration_placeholder_detected`
-- `narration_contract_missing`
-- `narration_contract_must_cover_unmet`
-- `narration_contract_must_avoid_violated`
-- `narration_contract_target_function_unmet`
-- `narration_visual_distance_policy_missing`
-- `narration_visual_distance_violation`
-- `narration_arc_discontinuity`
-- `narration_handoff_missing`
-- `narrator_voice_drift`
-- `emotional_curve_flat`
-- `emotional_jump_unearned`
-- `information_overload_sequence`
-- `repeated_sentence_pattern`
-- `repeated_abstract_wording_across_cuts`
-- `opening_overexplains`
-- `middle_lacks_causal_pressure`
-- `ending_aftertaste_underpowered`
-- `narration_empty`
-- `narration_tts_text_missing`
-- `narration_contains_meta_marker`
-- `tts_unfriendly_literal`
-- `needs_text_normalization`
-- `sentence_too_long_for_tts`
-- `missing_pause_punctuation`
-- `pronunciation_candidates_unresolved`
-- `visual_direction_leaked_into_narration`
-- `narration_story_role_mismatch`
-- `narration_too_visual_redundant`
-- `narration_pacing_mismatch`
-- `narration_spoken_japanese_weak`
-
-p720 deterministic report projection:
-
-- `TTS readiness and pronunciation payload`
-- `Narration contract and story role`
-- `Visual redundancy and leakage`
-- `Pacing and spoken timing`
-- `Spoken Japanese and thin wording`
-
-これらはdeterministic findingを互換`critic_*.md`へ分類したものであり、独立semantic agentではない。
-
-p720 independent semantic critics:
-
-- `retention_hook`: 冒頭の約束、注意の更新、open loopの進展、回復区間
-- `narrator_voice_persona`: narrator bible、知識境界、人格・文体・呼吸の連続性
-- `causal_information_rhythm`: 因果順、reveal順、聴覚で処理できる情報密度、scene handoff
-- `audio_visual_distance`: 映像の字幕化、音声先取り、映像に委ねる沈黙、追加価値
-- `payoff_ending`: audience promise/open loopの回収、reaction、aftertaste、意図的未解決の妥当性
-
-Current runner behavior:
-
-- `scripts/run-p720-narration-l3.py` はdeterministic findingを5つの互換critic reportとaggregatorへmaterializeする
-- `audio_story_plan` / `narration_spans`が存在するか、いずれかのnodeが`narration_revision_v1`ならfull-run arc validationを実行する
-- full-run resultは`narration_workflow.arc_review.status`、`narration_text_set_hash`、`findings`、`report`へ書き戻す。
-  missing/changes_requested/hash mismatchはrevision-aware p750のblocking conditionである
-- `scripts/run-p720-narration-semantic.py` は5 criticを別threadで実行し、strict JSON aggregateを
-  `narration_workflow.semantic_critic_review`と`logs/eval/narration/semantic_critics/`へ書き戻す
-- semantic aggregateのmissing/changes_requested/hash mismatchもrevision-aware p750のblocking conditionである
-- `pronunciation_review`の候補artifactは段階的導入を許容するが、unresolved pronunciation finding自体はp720で解消または明示overrideする
-
-Pronunciation candidate artifact design target:
+Run reports and inventories are ordinary execution summaries. They are optional and never act as
+content certificates.
+
+## 4. Fixed p-slot workflow
+
+Coarse buckets remain p100 through p900. The following slots are active:
+
+| Bucket | Slots | Responsibility |
+| --- | --- | --- |
+| p100 | p110, p120 | source context and research authoring |
+| p200 | p210, p220 | source context and story authoring |
+| p300 | p310, p330 | visual value authoring and handoff |
+| p400 | p410, p420, p440, p450 | scene/cut authoring, supplied user edits, skeleton manifest |
+| p500 | p510, p520, p530, p550, p560, p570 | asset source context, inventory, plan, requests, generation, continuity checks |
+| p600 | p610, p620, p650, p660, p670, p680 | image source context, prompt/request authoring, readiness, generation, output checks, optional selection |
+| p700 | p710, p730, p740, p750 | narration authoring, TTS, measured duration, optional listening/selection |
+| p800 | p810, p830, p840 | motion authoring, requests, video generation |
+| p900 | p910, p920 | render inputs and final render/output checks |
+
+Retired production slots are `p130`, `p230`, `p320`, `p430`, `p435`, `p540`, `p630`, `p640`,
+`p720`, `p820`, `p850`, and `p930`. Current runs do not create those slots or synthesize a
+replacement `passed` value. Legacy state entries with those names are historical input only.
+
+Coarse target resolution:
 
 ```text
-logs/eval/narration/round_01/pronunciation_candidates.tsv
+p100 → p120   p200 → p220   p300 → p330   p400 → p450   p500 → p570
+p600 → p680   p700 → p750   p800 → p840   p900 → p920
 ```
 
-TSV columns:
+Slot completion means the owning author/materializer and ordinary validators finished. A slot may
+be `awaiting_user_choice` only when an optional user selection is explicitly part of the chosen UI
+flow; generation itself never waits for a production quality verdict.
 
-```tsv
-surface	reading	selector	reason	status
-```
+## 5. Stage boundaries
 
-`status` is `proposed|applied_tts_text|applied_alias_file|applied_official_dictionary|rejected`.
+### Research and story
 
-Intentional silent cut contract:
+Research records source passages, facts, uncertainty, provenance, and candidate material. Story
+authoring turns those inputs into a source-grounded causal sequence. Both stages preserve source IDs
+and creative additions; a human must explicitly authorize hybridization when contradictory source
+variants are intentionally combined.
 
-```yaml
-audio:
-  narration:
-    tool: "silent"
-    text: ""
-    tts_text: ""
-    silence_contract:
-      intentional: true
-      kind: "visual_value_hold|transition_hold|reaction_hold|breathing_room|other"
-      confirmed_by_human: true
-      reason: "映像で見せる価値が大きい追加カット"
-```
+### Visual value and script
 
-- `tool: "silent"` だけでは不十分
-- renderable cut で narration を空にする場合は `silence_contract` を必須にする
-- `confirmed_by_human: true` は、人レビューで「この cut は無音でよい」と確定した印
-- 最終連結では、この cut の `video_generation.duration_seconds` 分の無音 mp3 をつなぐ
-- audio-only 生成後は `check-audio-duration-gate.py` を通し、`review.duration_fit.status` を更新する
-- `cinematic_story` の target は request の `target_duration_seconds`（省略時 300、範囲 300..1200）であり、p740 minimum はその 80%。上限は設けない
-- audio timeline は measured spoken audio と confirmed intentional silence のみから作る。video timeline は `render_units[]` があれば unit 側を使い、source cut duration と足さない。二つの timeline 自体も足さず、短い方を pre-render actual とする
-- `review.duration_fit.*` には target / minimum / actual / ratio / measurement completeness / spoken / silence / audio timeline / video timeline / missing / invalid の内訳を残す
-- 未達または測定不完全時は次を artifact 化する
-  - `logs/review/duration_scene.subagent_prompt.md`
-  - `logs/review/duration_narration.subagent_prompt.md`
-- 未達時は scene 設計 / narration 設計の見直しを先に行い、人レビューへは進めない
+`visual_value.md` records visual identity, anchors, reusable asset candidates, regeneration risks,
+and downstream handoff. `script.md` owns scene intent, event sequence, cut blueprints, narration
+contract, and optional user change requests. `video_manifest.md` begins as
+`manifest_phase: skeleton` and is materialized from script selectors.
 
-Lifecycle:
+`p410` and `p420` are authoring slots. The scene/cut contract is checked structurally before asset,
+image, audio, or video generation.
 
-1. subagent が narration text を review し、finding がある node を `agent_review_ok: false` にする
-2. subagent が `agent_review_reason_keys` / `agent_review_reason_messages` を残す
-3. fix を言語正本`script.md`へ反映し、revision-aware syncでmanifestへ投影する
-4. subagent が再 review し、解消済み node を `agent_review_ok: true` に戻す
-5. なお未解消 finding を人間判断で許容する場合だけ `human_review_ok: true` と `human_review_reason` を記録する
+### Asset and image
 
-## 7. Script → Manifest narration sync
+`asset_inventory.md` and `asset_plan.md` define reusable identity and reference inputs. Asset and
+image requests are immutable snapshots containing the exact prompt, settings, references, source
+digest, and destination. Generated files are accepted only when their request-bound provenance
+matches the snapshot.
 
-ナレーション文面の human review 正本は `script.md` とする。
+### Narration and video
 
-- source: `script.md`
-- sink: `video_manifest.md`
-- sync target:
-  - top-level `audio_story_plan`
-  - top-level `narration_spans[]`
-  - `audio.narration.text`
-  - `audio.narration.tts_text`
-  - `audio.narration.span_refs[]`
-  - `audio.narration.revision` / `source_binding` / current review invalidation
+Narration uses `script.md` as the text source, records TTS text separately, and measures generated
+audio duration. Users may listen to and select among candidates or edit text; the selected revision
+is revalidated before provider execution. Video uses the compiled motion payload, ordered frame and
+reference bindings, and provider capability limits. No quality score or pass field is required.
 
-script 側の `tts_text` は `elevenlabs_prompt` を materialize した final string として扱う。
-revision-aware syncは公開文面/TTS文面を別々に選び、manifestのrevision/source bindingを更新する。
-値の優先順位は次とする。
+### Render and QA
 
-sync 優先順位は公開文面とTTS payloadで分ける。TTS文字列を公開`text`へコピーしない。
+Render normalizes video/audio streams, checks file existence and decode, and measures final duration
+and synchronization. QA records ordinary runtime and file findings. Publication authorization is a
+separate explicit user action.
 
-公開 `audio.narration.text`:
+## 6. Scene event and cut contracts
 
-1. `scenes[].cuts[].human_review.approved_narration`
-2. `scenes[].cuts[].narration`
-
-provider用 `audio.narration.tts_text`:
-
-1. `scenes[].cuts[].human_review.approved_tts_text`
-2. `scenes[].cuts[].tts_text`
-3. materialized `scenes[].cuts[].elevenlabs_prompt`
-4. `scenes[].cuts[].human_review.approved_narration`
-5. `scenes[].cuts[].narration`
-
-Narration human review contract:
-
-```yaml
-human_review:
-  status: "pending|approved|changes_requested"
-  notes: ""
-  change_requests:
-    - request_id: "hr-001"
-      status: "open|accepted|rejected|deferred|resolved"
-      category: "naturality|reveal|pronunciation|story_alignment|timing|other"
-      requested_change: ""
-      rationale: ""
-      suggested_narration: ""
-      suggested_tts_text: ""
-      requested_at: "ISO8601"
-      resolved_at: ""
-      resolution_notes: ""
-  approved_narration: ""
-  approved_tts_text: ""
-```
-
-- `status: changes_requested` のときは `change_requests[]` を空にしない
-- `approved_*` は open request を隠すために使わない
-- manifest 側の `human_review_ok` は例外許容 override であり、この block の代替ではない
-- `elevenlabs_prompt` 用の `approved_*` mirror field は追加しない
-- `elevenlabs_prompt` を直した場合は、同じ変更を `tts_text` にも反映する
-
-同期コマンド:
-
-```bash
-python scripts/sync-narration-from-script.py \
-  --script output/<topic>_<timestamp>/script.md \
-  --manifest output/<topic>_<timestamp>/video_manifest.md
-```
-
-## 8. Narration distance policy
-
-`narration` と `visual_beat` の距離は固定ルールではなく、scene 文脈で判断する。
-
-- `stay_close`
-  - 物語への没入を優先
-  - 序盤 / 中盤の標準
-- `contextual`
-  - close でも meaning add でもよい
-  - 終盤の標準
-- `meaning_first`
-  - 映像のあとに意味が残る一文を優先
-  - cautionary / tragic / bittersweet の重要 cut で使いやすい
-
-Evaluator の意図:
-
-- `stay_close` の cut では、`narration` と `visual_beat` が近いこと自体を減点しない
-- `contextual` / `meaning_first` の cut では、必要なときだけ映像のあとに意味が残る一文を許可する
-
-## 9. Human review change-request expansion
-
-`script.md` は narration だけでなく visual / asset / image / video 指示を含む human review の正本でもある。
-
-Top-level:
-
-```yaml
-human_change_requests:
-  - request_id: "hr-001"
-    source: "human_script_review"
-    created_at: "ISO8601"
-    raw_request: "string"
-    original_selectors: ["scene3_cut2"]
-    current_selectors: ["scene3.1_cut2.1"]
-    normalized_actions: []
-    status: "pending|normalized|applied|verified|waived"
-    resolution_notes: ""
-    applied_manifest_targets: []
-```
-
-Canonical `normalized_actions[].action`:
-
-- `add_scene`, `delete_scene`, `add_cut`, `delete_cut`, `renumber_scene`, `renumber_cut`
-- `update_scene_summary`, `update_story_visual`
-- `update_narration`, `clear_narration`, `set_silent_cut`
-- `update_visual_beat`, `update_scene_contract`
-- `add_location_asset`, `add_object_asset`, `add_character_variant`
-- `create_still_asset`, `derive_still_asset`, `reference_asset`
-- `set_image_direction`, `set_video_direction`
-
-`script.md.scenes[].human_review`:
-
-- `status`
-- `notes`
-- `approved_scene_summary`
-- `approved_story_visual`
-- `change_request_ids[]`
-
-`script.md.scenes[].cuts[].human_review` add:
-
-- `approved_visual_beat`
-- `approved_image_notes[]`
-- `approved_video_notes[]`
-- `change_request_ids[]`
-
-`video_manifest.md` execution additions:
-
-- `assets.location_bible[]`
-  - `location_id`, `reference_images`, `reference_variants[]`, `fixed_prompts`, `review_aliases[]`, `continuity_notes[]`, `notes`
-- `image_generation.location_ids[]`
-- `image_generation.location_variant_ids[]`
-- `still_assets[]`
-  - `asset_id`, `role`, `output`, `image_generation`, `derived_from_asset_ids[]`, `reference_asset_ids[]`, `reference_usage[]`, `direction_notes[]`, `applied_request_ids[]`
-- `reference_usage[]`
-  - `asset_id`, `mode`, `placement`, `keep[]`, `change[]`, `notes`
-- `video_generation.input_asset_id`
-- `video_generation.first_frame_asset_id`
-- `video_generation.last_frame_asset_id`
-- `video_generation.reference_asset_ids[]`
-- `video_generation.direction_notes[]`
-- `video_generation.continuity_notes[]`
-- `video_generation.applied_request_ids[]`
-- `audio.narration.applied_request_ids[]`
-- `implementation_trace`
-  - `source_request_ids[]`, `status`, `notes`
-
-ID policy:
-
-- `scene_id` / `cut_id` は dotted numeric string を許可する
-- canonical selector は `scene<scene_id>_cut<cut_id>`
-- sort は numeric token sort
-- 出力 file slug は `.` を `_` に変える
-- stable UID は導入しない
-
-Canonical reason key:
-
-- `human_change_request_unresolved`
-- `human_change_request_trace_missing`
-- `location_asset_missing`
-- `still_asset_missing`
-- `still_asset_dependency_missing`
-- `video_asset_reference_missing`
-- `reference_usage_target_missing`
-- `dotted_selector_invalid`
-- `renumber_trace_missing`
-
-## Cut Contract v3.0
-
-`video_manifest.md.scenes[].cuts[].cut_contract` を cut の正本とする。V3 の event beat 正本は `cut_contract.source_event_contract` であり、top-level `primary_event_beat_id` / `source_event_beat_ids` / `assigned_story_event_ids` や `scene_contract` alias だけでは V3 gate を pass しない。
-
-`viewer_contract.mixed_affect_design` は optional な感情設計レイヤーである。すべての cut に混合的感情を入れない。`mode: none` は有効な合格値で、`pressure` / `turn` / `payoff` / `reaction` / terminal cut など、正負感情の同時性、緊張から解放、bittersweet な余韻が scene の仕事を強める場合だけ `none` 以外を使う。採用する場合も primary intent は 1 つに保ち、視覚、ナレーション、音/リズム、handoff の少なくとも 1 つで具体的な支えを残す。
-
-## Scene Event v1
-
-`video_manifest.md.scenes[].scene_event` / `script.md.scenes[].scene_event` を scene の出来事正本とする。`scene_intent` は scene が必要な理由、`scene_event` は実際に起きる出来事、`cut_contract` はその出来事をどう見せるかを表す。画像生成はステートレスなので、downstream には scene 全体を推測させず、cut が参照する beat だけを `event_context_for_cut` として渡す。
+`scene_event` explains what happens; `scene_intent` explains why the scene exists;
+`cut_contract` explains how it is shown.
 
 ```yaml
 scene_event:
-  schema_version: "scene_event_v1"
+  schema_version: scene_event_v1
   event_logline: ""
   start_situation: ""
   source_story_beat_ids: []
-  # beat_function は任意の非空 key。setup / pressure / turn / payoff / threshold / custom は候補例であり必須集合ではない。
   event_sequence:
-    - beat_id: "scene1_event_decision"
-      beat_function: "decision"
+    - beat_id: scene1_event_01
+      beat_function: custom
       source_story_beat_ids: []
       what_happens: ""
       visible_action: ""
       visible_reaction: ""
       immediate_consequence: ""
-      emotional_pressure: ""
       required_visual_evidence: []
       story_information_revealed_ids: []
   turning_event:
-    source_event_beat_id: "scene1_event_decision"
-    causal_turn_ref: "scene_intent.causal_turn"
+    source_event_beat_id: scene1_event_01
     irreversible_change: ""
-  end_situation:
-    value_shift_to_ref: "scene_intent.value_shift.to"
-    outcome: ""
-    character_position: ""
-    object_state: ""
-    relationship_state: ""
-    new_pressure: ""
-    visible_evidence_refs: ["scene1_event_decision"]
-  offscreen_context: []
+  end_situation: ""
   forbidden_event_changes: []
 ```
 
-deterministic gate は `script.scene_event_exists`, `script.scene_event_sequence_complete`, `script.scene_event_visible_actions_complete`, `script.scene_event_no_forbidden_directing_fields`, `script.scene_event_beat_ids_unique`, `script.scene_event_turning_event_ref_valid`, `script.scene_event_end_situation_ref_valid`, `script.scene_event_reveal_constraints_respected`, `script.cut_event_beat_refs_valid`, `script.event_beat_reference_integrity`, `script.source_event_preservation`, `script.event_first_frame_alignment`, `script.event_motion_boundary`, `script.event_narration_boundary`, `script.event_context_for_cut_ready`, `script.cuts_cover_scene_event_sequence`, `script.turn_and_payoff_event_beats_have_cuts` を持つ。inventory integrity は `event_beat_inventory[]` が全 `event_sequence[]` の ordered nonblank `beat_id` を exact に保持すること、assignment coverage はそのうち `must_be_seen != false` の beat だけを cut に割り当てることとして別々に判定する。互換名 `script.turn_and_payoff_event_beats_have_cuts` は該当 function が authored された場合だけその割当を報告し、`turn` / `payoff` 自体を要求しない。自然文の意味一致は scene_detail / cut_blueprint reviewer gate で判定する。
+Structural checks require non-empty unique beat IDs, valid source references, a valid turning event,
+ordered event coverage, and no provider-specific fields in `scene_event`.
 
 ```yaml
 cut_contract:
   schema_version: "3.0"
   source_event_contract:
-    primary_event_beat_id: "scene1_event_decision"
-    source_event_beat_ids: ["scene1_event_decision"]
-    event_beat_function: "decision"
-    event_time_position: "before_trigger"
-    source_event_summary: ""
-    source_visible_action: ""
-    source_visible_reaction: ""
-    source_required_visual_evidence: []
+    primary_event_beat_id: scene1_event_01
+    source_event_beat_ids: [scene1_event_01]
     event_facts_to_preserve: []
     event_facts_not_to_invent: []
     allowed_reveal_info_ids: []
     forbidden_reveal_info_ids: []
-  # 任意の非空 key。setup / pressure / turn / payoff / reaction / handoff / custom は候補例にすぎない。
-  cut_function: "decision"
+  cut_function: custom
   intent_budget:
     primary_intent: ""
-    secondary_intents_allowed: []
-    forbidden_combined_intents:
-      - "new_location_establishing + major_reveal + next_scene_handoff"
     assigned_obligation_ids: []
-    overload_exception_reason: ""
-    custom_function_reason: ""
   viewer_contract:
-    target_beat: ""
     screen_question: ""
-    dramatic_job: ""
-    audience_knowledge_delta: ""
-    causal_proof: ""
     visual_evidence: []
-    required_roles: []
-    anti_redundancy_key: ""
-    reveal_constraints:
-      inherited_from_scene: []
-      allowed_reveals_in_this_cut: []
-      forbidden_until_later_cut: []
-      forbidden_until_later_scene: []
-    emotional_micro_shift:
-      from: ""
-      to: ""
-    mixed_affect_design:
-      mode: "none|single|mixed|tension_release|bittersweet|aftertaste"
-      optional: true
-      apply_when: []
-      positive_valence_thread: ""
-      negative_valence_thread: ""
-      arousal_strategy: "hold|rise|drop|spike|release"
-      audience_rollercoaster_job: "none|bond|strain|release|reframe|aftertaste"
-      design_intent: ""
-      visible_support: []
-      narration_support: []
-      sound_or_rhythm_support: []
-      handoff_effect: ""
-      avoid_if: []
-    visual_proof: ""
     must_show: []
     must_avoid: []
-    done_when: []
-  cinematic_contract:
-    camera_intent: ""
-    subject_priority: {}
-    screen_geography: {}
-  continuity_contract:
-    start_state: {}
-    end_state: {}
-    carry_forward_to_next_cut: []
-    continuity_risks: []
-  cut_handoff:
-    receives_from_previous:
-      anchor_id: ""
-      anchor_type: "object|sound|gaze|gesture|movement|light|threat|question|none"
-      visible_or_audible_form: ""
-      expected_previous_cut_selector: ""
-    delivers_to_next:
-      anchor_id: ""
-      anchor_type: "object|sound|gaze|gesture|movement|light|threat|question|terminal"
-      visible_or_audible_form: ""
-      expected_next_cut_selector: ""
   first_frame_contract:
     imageable: true
-    source_event_beat_id: "scene1_event_decision"
-    event_time_position: "before_trigger"
-    event_fact_visible_in_still: ""
+    source_event_beat_id: scene1_event_01
     not_yet_happened_in_still: []
-    first_frame_brief: ""
-    visible_start_state:
-      character_state: ""
-      prop_state: ""
-      spatial_state: ""
-      emotional_state: ""
-      gaze_or_attention: ""
-    motion_start_affordance:
-      movable_subject: ""
-      movement_vector: ""
-      camera_start_reason: ""
-    action_completion_state: "pre_action|early_action|mid_action|aftermath|hold"
-    static_first_frame_rule: ""
-    must_be_static_evidence_not_motion: true
   motion_contract:
-    movable: true
-    source_event_beat_id: "scene1_event_decision"
     starts_from_first_frame: true
-    must_not_advance_to_event_beat_ids: []
+    source_event_beat_id: scene1_event_01
     motion_brief: ""
-    start_from_visible_state: ""
     end_state: ""
-    end_frame_brief: ""
     must_not_add: []
   narration_contract:
-    schema_version: "narration_contract_v2"
-    source_event_beat_ids: ["scene1_event_decision"]
+    schema_version: narration_contract_v2
+    source_event_beat_ids: [scene1_event_01]
     allowed_info_ids: []
     forbidden_info_ids: []
-    must_not_advance_to_event_beat_ids: []
-    must_not_explain_visible_action_as_caption: true
-    narration_event_boundary: "same_event_only"
-    speakable_or_silent: true
-    story_role:
-      narrative_position: "opening|middle|ending"
-      # authored cut に由来する任意の非空 key。
-      cut_function: "decision"
-      voice_function: "information|emotion|causality|time|viewpoint|world_rule|contrast|meaning|aftertaste|silence"
-      audience_state_before: ""
-      audience_state_after: ""
-      must_cover: []
-      must_not_reveal: []
-      done_when: []
-    visual_distance:
-      distance_policy: "stay_close|contextual|meaning_first|silent"
-      visible_facts_in_frame: []
-      narration_should_add: []
-      must_not_caption_visible_action: true
-      visual_overlap_allowed: false
-      visual_overlap_reason: ""
-    rhythm_and_timing:
-      target_speech_seconds: 0
-      min_speech_seconds: 0
-      max_speech_seconds: 0
-      start_timing: "immediate|after_visual_read|mid_cut|late_cut|none"
-      end_timing: "before_cut_end|on_cut_end|after_visual_resolution|none"
-      pause_intent: []
-      audio_visual_sync_point: ""
-    tts_readiness:
-      normalization_policy: "kanji_public_hiragana_tts|mixed|dictionary_first"
-      pronunciation_targets: []
-      max_sentence_chars: 42
-      tts_text_must_differ_from_text_when_needed: true
-    # compatibility aliases for older readers
-    role: "setup"
-    target_function: "derive_from_story_role_voice_function"
-    must_cover:
-      - "derive_from_story_role_must_cover"
-    must_avoid:
-      - "映像のキャプション化"
-    done_when:
-      - "derive_from_story_role_done_when"
-    timing_intent: ""
-    silence_reason: ""
-    draft:
-      text: ""
-      status: "optional_draft|approved_by_human|superseded_by_p700"
-  rhythm_contract:
-    expected_duration_seconds: 8
-    pacing: "quick|standard|slow_hold|spectacle_hold"
-    comprehension_moment: ""
-    cut_out_reason: ""
-    audio_visual_sync_point: ""
-    duration_exception:
-      allowed: false
-      reason: ""
+    must_not_caption_visible_action: true
   asset_dependency:
     character_ids_required: []
     object_ids_required: []
     location_ids_required: []
-    variant_ids_required: []
-    new_asset_requests: []
-    reusable_anchor_ids: []
-    reference_role:
-      protagonist: ""
-      opponent: ""
-      proof_object: ""
-      location_anchor: ""
   downstream_handoff:
-    p500_asset:
-      required_asset_ids: []
-      asset_candidates: []
-      continuity_anchor_needed: false
-      new_asset_needed: false
-      reuse_allowed: false
-    p600_image:
-      prompt_requirements: []
-      reference_requirements: []
-      first_frame_must_include: []
-      first_frame_must_avoid: []
-    p700_narration:
-      narration_requirements: []
-      role: "setup|fact|emotion|contrast|aftertaste|silent"
-      must_not_caption_visible_content: true
-    p800_video:
-      motion_requirements: []
-      start_state: ""
-      last_frame_or_end_state: ""
-      must_not_add: []
-    carries_to_next_cut: []
-    carries_to_next_scene: []
+    p500_asset: {required_asset_ids: []}
+    p600_image: {reference_requirements: []}
+    p700_narration: {narration_requirements: []}
+    p800_video: {motion_requirements: []}
 ```
 
-Additional cut review reason keys:
+The validator checks exact source beat references, one primary intent, first-frame imageability,
+motion boundaries, narration event boundaries, asset IDs, and downstream selector closure. It does
+not ask another agent to judge whether the prose is good.
 
-```yaml
-- cut_contract_missing
-- cut_intent_budget_missing
-- cut_missing_screen_question
-- cut_missing_visual_proof
-- story_event_obligation_unassigned
-- audience_knowledge_delta_missing
-- causal_proof_weak
-- role_coverage_missing
-- static_first_frame_not_imageable
-- scene_cut_redundancy_excessive
-- cut_missing_narration_contract
-- cut_narration_is_caption
-- cut_silent_without_reason
-- cut_downstream_handoff_missing
-- cut_triangulation_unready
-- cut_function_custom_without_reason
-- cut_count_below_calculated_floor
-- cut_count_below_coverage_plan
-- coverage_plan_selected_below_floor
-- mixed_affect_support_missing
-- mixed_affect_overloads_primary_intent
-- prompt_leaks_motion_brief
-- image_prompt_action_window_missing
-- image_prompt_missing_not_yet_state
-- image_prompt_time_mixed
-- image_prompt_reveal_boundary_conflict
-- image_prompt_reference_usage_missing
-- image_prompt_character_state_gate_missing
-- image_prompt_object_visibility_missing
-- image_prompt_camera_composition_weak
-- image_prompt_scene_material_pack_missing
-- image_prompt_design_meta_leaked
-- image_prompt_visual_translation_missing
-- image_prompt_primary_visual_anchor_missing
-- image_prompt_motion_affordance_weak
-- image_prompt_motion_ceiling_missing
-- image_prompt_future_event_leak
-- image_prompt_object_visibility_conflict
-- image_prompt_reference_binding_weak
-- image_prompt_subject_priority_missing
-- image_prompt_scene_material_too_generic
-- image_prompt_action_completion_state_missing
-- image_prompt_start_state_not_drawable
-- image_prompt_overpacked_visual_intent
-- image_prompt_frame_edge_handoff_missing
-- image_prompt_character_pose_too_generic
-- image_prompt_not_yet_state_too_generic
-- scene_composite_review_missing
-- triangulation_review_missing
-- handoff_image_motion_mismatch
-- handoff_narration_captioning
-- handoff_motion_adds_new_story
-- handoff_still_finishes_action
-- handoff_reveal_early
-- handoff_end_state_missing
-- handoff_audio_visual_conflict
+## 7. Image and video prompt contracts
+
+Image generation uses the one-way compiler:
+
+```text
+scene_event + cut_contract + asset references
+  → first_frame_visual_plan
+  → drawable_prompt_ir
+  → image_generation.api_prompt_payload
+  → immutable request snapshot
 ```
 
-`cut_count_below_calculated_floor` / `cut_count_below_coverage_plan` / `coverage_plan_selected_below_floor` の `floor` は、`must_be_seen != false` beat と distinct semantic obligation から導く coverage floor だけを指す。importance、target duration、固定 seconds-per-cut から算出する cut floor には使わず、1 beat / 1 obligation を十分に担う1 cut scene はこの reason だけで fail にしない。
-
-## First Frame Visual Plan v1
-
-`first_frame_visual_plan` は p600 image prompt 本文ではなく、`scene_event` と `cut_contract` を「動画冒頭に使える描画可能な1枚」へ変換するための中間契約である。正本は `scene_event.event_sequence[]` と `cut_contract.source_event_contract` で、`first_frame_visual_plan` は `editable: false` の derived artifact として request preview / semantic pack / log に残す。
+The provider receives only the compiled prompt and bound execution options. Design metadata,
+internal IDs, hashes, and future motion are excluded from provider prose. Empty optional groups are
+omitted rather than filled with placeholders.
 
 ```yaml
-first_frame_visual_plan:
-  schema_version: "first_frame_visual_plan_v1"
-  derived_from:
-    - scene_event.event_sequence[]
-    - cut_contract.source_event_contract
-    - cut_contract.first_frame_contract
-    - cut_contract.event_context_for_cut
-  editable: false
-  source_grounding:
-    scene_id: ""
-    cut_id: ""
-    source_event_beat_id: ""
-    source_event_beat_ids: []
-    event_beat_function: ""
-    cut_function: ""
-    what_happens: ""
-    visible_action: ""
-    visible_reaction: ""
-    event_facts_to_preserve: []
-    event_facts_not_to_invent: []
-    allowed_reveal_info_ids: []
-    forbidden_reveal_info_ids: []
-  temporal_boundary:
-    event_time_position: "before_trigger|trigger_moment|early_action|mid_action|consequence|reaction_after|handoff_after"
-    first_visible_moment: ""
-    action_completion_state: "pre_action|early_action|mid_action|aftermath|hold"
-    event_fact_visible_in_still: ""
-    not_yet_happened_in_still: []
-    forbidden_future_event_beat_ids: []
-    forbidden_future_outcomes: []
-    still_must_not_show_completion: true
-    one_visible_moment_rule: true
-  visual_translation:
-    concrete_visible_evidence: []
-    nonvisual_terms_to_exclude_from_prompt: []
-    imageable_causal_proof: ""
-  subject_binding:
-    primary_subject: {}
-    secondary_subjects: []
-    background_subjects: []
-  reference_binding:
-    character_references: []
-    object_references: []
-    location_references: []
-  character_state_gate:
-    pose: ""
-    gaze: ""
-    expression: ""
-    hand_position: ""
-    foot_position: ""
-    physical_state: ""
-    character_states:
-      - character_id: "<image_generation.character_ids[] の一要素>"
-        character_name: "<同一人物の表示名>"
-        appearance_continuity:
-          costume_state: "<現在描画する衣装状態>"
-          forbidden_costume_states: []
-  object_visibility_gate:
-    objects: []
-  spatial_composition:
-    foreground: ""
-    midground: ""
-    background: ""
-    subject_priority_order: []
-    frame_edge_handoff: ""
-  scene_material_pack:
-    # scenes[].time_of_day からの read-only projection。独立 authoring しない。
-    time_of_day: "夜明け"
-    light_source: ""
-    dominant_materials: []
-    story_specific_texture: ""
-  motion_affordance:
-    movable_subjects: []
-    must_not_resolve_in_image: []
-    motion_ceiling:
-      must_stop_before_event_beat_ids: []
-      must_not_complete_outcomes: []
-  prompt_rendering_policy:
-    render_only_drawable_information: true
-    do_not_render_design_meta: true
-    do_not_render_future_motion_as_action: true
-```
-
-`motion_affordance` は review 用の境界情報であり、`motion_brief` は p800 専用である。image prompt compiler は `motion_brief` を入力にせず、`first_frame_visual_plan` 内でも描画可能な現在状態だけを採用する。
-
-`character_state_gate.character_states[]` は optional で、衣装などの状態 variant がある人物だけを持つ。`assets.character_bible[].appearance_continuity`、または `image_generation.character_variant_ids[]` で選んだ `reference_variants[].appearance_continuity` から一方向に導出する。各 `character_id` は同じ cut の `image_generation.character_ids[]` に存在しなければならず、配列順や主被写体に依存してはならない。compiler は reference binding の canonical identity と人物名を照合し、人物名付きの衣装文を生成する。projection trace は同一行に `character_name` と各 `costume_state` / `forbidden_costume_states[]` が揃うことを検証し、人物間の入れ替えも fail closed にする。legacy の flat `character_state_gate.costume_state` は旧 artifact の読み込み用に保持できるが、複数人物の新規 artifact では使わない。
-
-## Drawable Prompt IR v1
-
-production cut image は `first_frame_visual_plan -> drawable_prompt_ir -> api_prompt_payload` の一方向変換とする。IR は provider prompt そのものではなく、どの描画断片を採用したかを検証する derived artifact である。
-
-```yaml
-drawable_prompt_ir:
-  schema_version: "drawable_prompt_ir_v1"
-  dependencies:
-    character_ids: []
-    object_ids: []
-    location_ids: []
-    references: []
-    time_of_day: "夜明け"
-    required_groups:
-      - style
-      - time_of_day
-      - current_moment
-      - constraints
-  included_fragments:
-    - group: "style"
-      text: "実写映画調、自然な映画照明、実物セットとして見える質感。"
-    - group: "time_of_day"
-      text: "このシーンの時間帯は夜明け。空の明るさ、自然光と人工光、影、色温度をこの時間帯に整合させる。"
-    - group: "current_moment"
-      text: "画面には、<この cut で現在見える出来事の証拠>。"
-    - group: "constraints"
-      text: "画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラストを入れない。"
-  omitted_groups:
-    - references
-    - primary_subject
-    - characters
-    - objects
-    - location
-    - composition
-    - light_material
-    - current_state_delta
-```
-
-group の canonical order と採用条件:
-
-1. `style`（常時）
-2. `story_time`（`video_metadata.time` が非空）
-3. `time_of_day`（`scenes[].time_of_day` が非空）
-4. `references`（references が1件以上）
-5. `current_moment`（常時）
-6. `primary_subject`（`subject_binding.primary_subject.name|label` に描画可能な値がある）
-7. `characters`（`character_ids` が1件以上）
-8. `objects`（`object_ids` が1件以上）
-9. `location`（`location_ids` が1件以上）
-10. `composition`（subject priority、shot size、camera angle/height のいずれかに描画可能な値がある）
-11. `light_material`（明示された非定型の描画値がある）
-12. `current_state_delta`（sequential progression の明示された描画値がある）
-13. `constraints`（常時）
-
-`dependencies.story_time` は非空の `video_manifest.md.video_metadata.time`（script/story metadata からの projection）、`dependencies.time_of_day` は非空の同一 `video_manifest.md.scenes[].time_of_day` と exact match しなければならない。`dependencies.required_groups` は採用した全 group を canonical order で持つ。各 `included_fragments[].text` は exact `api_prompt_payload.prompt` に含まれなければならない。値が空の `story_time` / `time_of_day` は dependency / `required_groups` / `included_fragments` / `omitted_groups` のいずれにも placeholder として追加しない。dependency が無い group、空 text、定型 placeholder は採用しない。「人物なし」「小道具なし」の穴埋めも禁止し、不在自体が画面上の重要な証拠である場合だけ `constraints` 等の描画文へ落とす。
-
-## Image API Prompt Payload v2
-
-```yaml
-api_prompt_payload:
-  policy_version: "image_api_prompt_v2"
-  compiler_version: "conditional_drawable_prompt_compiler_v3"
-  prompt: "<included_fragments の描画文だけを自然文化した exact provider prompt>"
-  negative_prompt: "画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラスト"
-  reference_instructions: ""
-  reference_images: []
-  sha256: "<sha256-of-exact-prompt>"
-  drawable_prompt_ir: "<Drawable Prompt IR v1>"
-```
-
-- provider へ送る本文は `api_prompt_payload.prompt` だけである
-- `drawable_prompt_ir`、`first_frame_visual_plan`、`cut_contract`、`scene_event`、`source_event_contract`、`event_context_for_cut`、`motion_brief`、`source_event_beat_id`、`forbidden_future_event_beat_ids`、path、hash、compiler metadata は prompt 本文へ出さない
-- `shot_design_contract`、`cut_location_frame_plan`、`cut_visual_delta`、`blocking_and_interaction` 等を payload metadata に保持してもよいが、IR fragment または provider prompt として送らない
-- `image_api_prompt_v1` は legacy artifact の互換読み込み用である。v2 compile / gate failure 時に v1 へ暗黙 fallback しない
-- production v2 に固定6ブロック／11ブロックの completeness gate を適用しない
-
-## Image Generation Request Snapshot v1
-
-`image_generation_requests.md` は human review projection であり、各 item の `api_prompt` fence に exact prompt を表示する。実行正本は同時に materialize する `image_generation_request_snapshot.json` とする。
-
-```yaml
-schema_version: "toc.image_generation_request_snapshot.v1"
-request_revision: "<snapshot-content-revision>"
-kind: "scene"
-created_at: "<ISO8601>"
-source_artifact: "image_generation_requests.md"
-source_artifact_sha256: "<sha256>"
-items:
-  - item_id: "scene1_cut1"
-    kind: "scene"
-    destination: "assets/scenes/scene1_cut1_base.png"
-    prompt: "<exact api_prompt_payload.prompt>"
-    prompt_sha256: "<sha256-of-exact-prompt>"
-    prompt_policy_version: "image_api_prompt_v2"
-    compiler_version: "conditional_drawable_prompt_compiler_v3"
-    source_digest: "<sha256-of-compilation-source>"
-    references:
-      - path: "assets/characters/protagonist_front.png"
-        sha256: "<content-sha256>"
-        deferred: false
-        producer_item_id: null
-    request_digest: "<canonical-item-digest>"
-```
-
-runtime は Markdown から provider request を再構成せず、snapshot item の prompt / destination / references / hashes / revision を検証してから送信する。Markdown drift、source digest drift、reference content drift、prompt hash mismatch は stale request として停止する。並列 worker は item ごとの immutable snapshot と destination ownership に束縛し、同じ destination の重複実行や別 revision の結果混在を許可しない。output provenance は少なくとも `request_revision`、`request_digest`、`prompt_sha256`、`compiler_version` と照合できるようにする。
-
-## Video Prompt Projection Registry v5
-
-code source of truth は `toc/video_prompt_projection_registry.py`。registry version は `video_prompt_projection_registry_v5`。運用詳細は [`docs/implementation/video-prompting.md`](implementation/video-prompting.md) を正本とする。
-
-canonical group order:
-
-1. `start_state`
-2. `primary_motion`
-3. `camera_motion`
-4. `environment_motion`
-5. `emotional_change`
-6. `end_state`
-7. `continuity`
-8. `constraints`
-
-各 rule は次の 3 axes を持つ。
-
-- `authoring_relevance: required|conditional|none`
-- `provider_projection: derive|may_surface|must_not_surface`
-- `review_visibility: projection|review_only|none`
-
-併せて `source_keys`、`target_group`、`transform`、`semantic_checks`、必要なら `activation_dependency` / `exclusion_reason` を持つ。`cut_function`、`target_beat`、event / reveal ID は `review_only`、image / narration prose と scene 全体の `visualizable_action` は動画 motion の source とせず `must_not_surface` とする。`first_frame_visual_plan` 全体は exact value を `review_only / must_not_surface` trace に残し、`temporal_boundary.event_fact_visible_in_still` / `first_visible_moment` だけを `start_state` 候補へ投影する。この temporal boundary が存在する場合は generic `cut_contract.first_frame_contract` prose より優先する。`scene.time_of_day_visual_basis`、`scene.location_mode / location_sequence / location_segments`、参照 path も `review_only / must_not_surface` であり、exact value は `review_only_sources[]` と `source_digest` に残す。解決済み `motion_contract.allowed_new_reveal_elements` だけは正の allowlist として `constraints` へ条件付き `derive` し、`source_event_contract.allowed_reveal_info_ids` と upstream の `use_next_cut_first_frame_as_last_frame` は review / boundary 解決専用として provider prose へ出さない。start / primary / environment / emotion / end group に `→` / `⇒` / `->` / `=>` の scene-level sequence が残る payload は `video_motion_sequential_overview` で blocking とする。
-
-scaffold authoring の場所・状態遷移 key は次を使う。
-
-- `beat_overrides.<function>.location` / `obligation_overrides.<id>.location`: cut 開始画像の場所。exact `scene.location_sequence[]` に宣言済みであること
-- `first_frame_character_asset_overrides`: 変身や衣装変化の前に使う人物 asset
-- `first_frame_excluded_object_ids[]`: 動画中に初出するため開始画像から除く object asset
-- `allowed_new_reveal_elements[]`: motion / end state に接地した終了側の新要素
-- `use_next_cut_first_frame_as_last_frame`: 次 cut の承認済み開始画像を終了境界にする。cross-location 時は exact destination が `scene.location_sequence[]` と current obligation の allowlist の双方に存在し、current end state / allowlist と next start state が exact match すること
-
-目標尺だけを理由に `duration_*` obligation や重複 motion cut を生成しない。追加 cut は canonical event / coverage obligation の異なる可視責務を必要とする。
-
-registry review projection は少なくとも次を持つ。
-
-```yaml
-projection_review_contract:
-  registry_version: "video_prompt_projection_registry_v5"
-  group_order: [start_state, primary_motion, camera_motion, environment_motion, emotional_change, end_state, continuity, constraints]
-  groups: {}
-  active_rules: []
-  inactive_rules: []
-  excluded: []
-  review_only_sources:
-    - source_key: "scene.time_of_day_visual_basis"
-      provider_projection: "must_not_surface"
-      review_visibility: "review_only"
-      value: {light_source: "<exact canonical review evidence>"}
-  shadowed_sources: []
-  provider: "kling_3_0"
-  mode: "image_to_video"
-  authoring_source_normalization:
-    applied: false
-    groups: {}
-```
-
-canonical `cut_contract` の値は、flat `video_generation.motion_contract`、legacy `scene_contract`、`prompt_authoring_source` / `source_motion_prompt` / `motion_prompt` より優先する。上位 source がある group へ競合する下位値を追加しない。旧形式と自由文は canonical 値がない場合だけ fallback として読む。
-
-新しい story / scene / cut / video design key を追加する場合、同じ変更で registry classification、compiler projection、tests、semantic reviewer の projection contract を更新する。provider に出さない key も 3 axes と除外理由を登録する。
-
-## Video Prompt IR v2 / API Prompt Payload v1
-
-`compile_video_api_prompt_v1` は canonical design から deterministic payload を生成する。
-
-```yaml
-video_generation:
-  prompt_authoring_source: "<frontend / legacy free-text fallback>"
-  motion_prompt: "<api_prompt_payload.prompt の read-only compatibility projection>"
+image_generation:
+  character_ids: []
+  object_ids: []
+  references: []
   api_prompt_payload:
-    policy_version: "video_api_prompt_v1"
-    compiler_version: "conditional_video_prompt_compiler_v5"
-    projection_registry_version: "video_prompt_projection_registry_v5"
-    provider: "kling_3_0"
-    mode: "image_to_video"
-    provider_policy:
-      one_clip_one_intent: true
-      max_camera_instructions: 2
-      single_continuous_shot: true
-      first_last_frame_boundary: false
-      multimodal_reference: false
-      negative_prompt_mode: "separate"
+    policy_version: image_api_prompt_v2
+    compiler_version: conditional_drawable_prompt_compiler_v3
+    prompt: "exact provider-facing prompt"
+    sha256: sha256:<prompt hash>
+    source_digest: sha256:<compiler source hash>
     provider_request_binding:
-      duration_seconds: 8
-      quality: "1080p"
+      duration_seconds: 0
+      quality: 1080p
       aspect_ratio: "16:9"
-      first_frame: "assets/scenes/scene1_cut1.png"
-      last_frame: ""
       references: []
-      # reference_roles は references が非空のときだけ同数・同順で出す
-      execution_options:
-        backend: "kling"
-        model: "kling-3.0"
-        # extra_payload は承認対象の provider option が非空のときだけ出す
-        reference_content_sha256:
-          assets/scenes/scene1_cut1.png: "<sha256-of-reference-bytes>"
-    prompt: "<exact provider-facing motion prompt>"
-    negative_prompt: "<compiled high-risk constraints>"
-    source_digest: "<sha256-of-normalized-compilation-source>"
-    sha256: "<sha256-of-exact-prompt-utf8>"
-    included_fragments: &video_prompt_fragments
-      - group: "start_state"
-        text: "<approved first-frame visible state>"
-      - group: "primary_motion"
-        text: "<provider-facing sentence>"
-      - group: "continuity"
-        text: "<story time / time-of-day / subject and spatial continuity>"
-      - group: "constraints"
-        text: "<new-element and shot-transition constraints>"
-    omitted_groups: [camera_motion, environment_motion, emotional_change, end_state]
-    quality_issues: []
-    projection_review_contract:
-      registry_version: "video_prompt_projection_registry_v5"
-      group_order: [start_state, primary_motion, camera_motion, environment_motion, emotional_change, end_state, continuity, constraints]
-      groups: {}
-      active_rules: []
-      inactive_rules: []
-      excluded: []
-      review_only_sources: []
-      shadowed_sources: []
-      provider: "kling_3_0"
-      mode: "image_to_video"
-      authoring_source_normalization:
-        applied: true
-        groups:
-          primary_motion: ["<normalized fallback candidate>"]
-    video_prompt_ir:
-      schema_version: "video_prompt_ir_v2"
-      provider: "kling_3_0"
-      mode: "image_to_video"
-      dependencies:
-        story_time: ""
-        time_of_day: "夜明け"
-        has_first_frame: true
-        has_last_frame: false
-        has_references: false
-        duration_seconds: 8
-        reference_roles: []
-        required_groups: [start_state, primary_motion, continuity, constraints]
-      included_fragments: *video_prompt_fragments
-      omitted_groups: [camera_motion, environment_motion, emotional_change, end_state]
-      quality_issues: []
+      reference_content_sha256: {}
 ```
 
-- `prompt` は exact provider-facing motion text
-- `sha256` は `prompt` の UTF-8 bytes の SHA-256
-- `provider_request_binding` は duration / quality / aspect ratio / first-last / ordered references / execution options の exact materialized request。materialize 時点で読める first / last / auxiliary reference は run-relative path と file bytes SHA-256 の両方を持つ
-- `provider_request_binding.reference_roles` は ordered references が非空のときだけ存在し、同じ件数・順序の意味 binding を持つ。role は provider prose に role 指示としてのみ現れ、path / asset ID / hash は本文へ出さない
-- `provider_request_binding.execution_options.extra_payload` は承認対象の追加 option が非空のときだけ存在し、空 object の placeholder は出さない。予約 field を上書きする option は拒否する
-- `source_digest` は policy / compiler / provider / mode / duration / time continuity / first-last binding / ordered references / reference content hash / model / execution options / exact negative prompt / canonical design / fallback input / projection result を正規化した compilation source の SHA-256
-- review-only design が変わり provider text が同じ場合、`sha256` が同一でも `source_digest` は変わり得る
-- `video_prompt_ir`、projection trace、internal key / ID / path / hash、image prompt、narration は provider prompt 本文へ出さない
-- `review_only_sources[].value` は exact source value を reviewer と `source_digest` に渡すが provider prompt 本文へ出さない
-- caller の `review_only_dependencies` は string trim と空 descendant 除去後に非空なら、その exact normalized mapping を `projection_review_contract.review_only_dependencies` に返して `source_digest` に束縛する。未指定または正規化後に空なら field は出さず、返した値も `prompt`、`negative_prompt`、top-level / IR の `included_fragments`、その他の `video_prompt_ir` fragment へ投影しない
-- optional group の空値を placeholder として provider prompt に出さない
-- `video_metadata.time` と scene `time_of_day` は動画中に描き直す情報ではなく `continuity` として保持する
-- Kling 系は 1 clip 1 intent、camera 最大2指示、single continuous shot を必須 policy とする
-- first / last frame mode は last frame を arrival boundary とし、fade / cut / dissolve / 別 shot 化を禁止する
-- `mode` は `text_to_video | image_to_video | first_last_frame | reference_to_video`。Seedance の frame-boundary mode と `reference_to_video` は相互排他で、後者は reference 対応 I2V model を使う
-- `provider_policy.negative_prompt_mode` は `separate | inline`。`separate` は `allowed_new_reveal_elements` の正の allowlist 文と許可要素名を `negative_prompt` から除外し、「承認済み要素以外」の残余禁止だけを保持する。separate field 非対応の Seedance は allowlist と禁止条件を `constraints` fragment へ inline し、保存 `negative_prompt` を空文字にする
-- storyboard render unit のreference modeは sibling `video_input_contract` に `schema_version: render_unit_video_input_v1`、`input_mode: reference_images`、ordered `required_references` と同数・同順の `reference_roles` を持ち、first / input / last frameを持たない。`image_index` は1起点の連番・一意、roleは `start_state_visual_anchor | ordered_storyboard_sequence_guide` とし、compiler / provider binding / IR / digestまで同値を保持する
-- duration / reference count は共通値ではなく provider / model / input mode の capability に従う。Seedance 1.0 reference-image mode は2–12秒、ordered references 1–4枚とし、grouping・materialization・approval・server/CLI実行で同じ判定を使う
+Video generation uses `video_prompt_projection_registry_v5` and
+`conditional_video_prompt_compiler_v5` to create a saved `video_api_prompt_v1` payload. The payload
+contains exact prompt/negative prompt hashes, provider settings, first/last frame bindings, ordered
+reference roles, source digest, and execution options. Current canonical design is recompiled before
+provider execution; any drift makes the request stale.
 
-`quality_issues[]` の blocking code は次の7種である。
+## 8. Request, file, and provenance checks
 
-- `video_motion_generated_fallback`
-- `video_motion_unresolved_alternative`
-- `video_motion_abstract_primary`
-- `video_motion_abstract_end_state`
-- `video_motion_duplicate_environment`
-- `video_motion_duplicate_emotion`
-- `video_motion_sequential_overview`
-
-各 issue は `blocking: true`、`group`、`message`、`value` を持つ。provider prompt を直接修正して消すのではなく、対応する canonical start / motion / environment / emotion / end field を具体化して再 compile する。
-
-## Existing-story adaptation value lineage
-
-新規の既存物語 adaptation は `adaptation_value_contract: required_v1` を metadata に宣言し、次の一方向 lineage を保持する。
+Each generated item binds:
 
 ```text
-adaptation_source_contract.core_values[].value_id
-  -> adaptation_intent.source_value_ids[]
-  -> scene_value_amplification.source_value_refs[]
-  -> cut_contract.expressive_contract.source_value_refs[]
+generation_job_id + item_id + turn_id + prompt_sha256 + reference_sha256s
+  + saved_path + destination
 ```
 
-key と意味の正本は `docs/adaptation-value-amplification.md`、形の正本は各 `workflow/*template*`、局所 shape / enum / reference integrity は `toc/adaptation_value_contract.py` とする。marker がない legacy artifact は、この契約の欠落だけでは fail させない。
+The binding is stored before the provider call and checked again before copying output. Existing
+files may be reused only when bytes and the complete binding match. A failed regeneration leaves a
+previous valid file untouched. Resume regenerates only missing or stale items and quarantines stale
+outputs in the run's resume directory.
 
-## Video Prompt Materialization / Stale Gate
+Ordinary failure conditions include malformed YAML/JSON, duplicate or unknown IDs, missing source or
+reference paths, invalid provider settings, request hash drift, missing output, decode failure,
+duration outside provider capability, and audio/video stream incompatibility. These are processing
+errors and remain independent of human choices.
 
-frontend/server、CLI、scene storyboard は、provider 実行前に同じ compiler output を対象 cut / render unit の `video_generation.api_prompt_payload` へ保存し、`video_generation_requests.md` に exact prompt と metadata を投影する。CLI の materialize-only は manifest payload と review artifact を保存するが approval ではなく、未承認 item を自動で `approved` にしない。
+## 9. Asset and manifest boundaries
 
-materialized contract:
+`asset_plan.md` owns reusable asset identity, visual specification, reference inputs, and output
+paths. `video_manifest.md` owns scene/cut execution, image/audio/video payloads, and request IDs.
+`script.md` owns story meaning, scene intent, event order, cut intent, and narration source text.
+Downstream artifacts project these fields one way and do not invent a second authoring root.
 
-```yaml
-video_request_materialization:
-  prompt_policy_version: "video_api_prompt_v1"
-  compiler_version: "conditional_video_prompt_compiler_v5"
-  projection_registry_version: "video_prompt_projection_registry_v5"
-  review_projection: "video_generation_requests.md"
-  review_prompt_fence: "video_prompt"
-  negative_prompt_fence: "negative_prompt"
-  approval_request_flag: "approve_for_generation"
-  per_item_approval_state: "review.video_prompt.item.<item_id>"
-  approval_identity_bindings: [request_section_sha256, prompt_sha256, source_digest]
-  approval_audit_metadata: [approved_by, approved_at]
-  provider_prompt_sources:
-    - "scenes[].cuts[].video_generation.api_prompt_payload.prompt"
-    - "scenes[].render_units[].video_generation.api_prompt_payload.prompt"
-  persist_payload_before_provider_call: true
-  reject_unmaterialized: true
-  reject_prompt_hash_drift: true
-  reject_source_digest_drift: true
-  reject_setting_or_reference_drift: true
-  bind_negative_prompt: true
-  bind_provider_execution_options: true
-  bind_materialized_reference_content_sha256: true
-  bind_ordered_reference_roles: true
-  reject_blocking_quality_issues: true
-  reject_pending_or_stale_per_item_approval: true
-  cli_auto_approval: false
-  reject_reserved_provider_extra_overrides: true
-  legacy_compatibility: "prompt_authoring_source / motion_prompt は fallback / read-only projection。compiled payload がある場合の送信正本にしない"
+`video_manifest.md` may contain `render_units[]` when several ordered cuts share one provider clip.
+Each unit lists source cut IDs exactly once, preserves their contracts, and has a provider-capability
+valid duration. Render units do not double-count their source cuts.
+
+## 10. Human choices, hybridization, and publication
+
+Candidate selection, listening, image editing, narration editing, and explicit change requests are
+optional. A selected/edited candidate becomes the current request revision and must pass ordinary
+structural and provenance checks before generation.
+
+Contradictory source variants may be hybridized only after the user explicitly authorizes that
+choice; the authorization and selected source IDs are stored in the run artifact. Publishing also
+requires an explicit user action. Neither action is represented as an automated quality pass.
+
+## 11. Supervisor handoff
+
+The L2 bucket owner writes `logs/orchestration/pXXX.supervisor_result.json`:
+
+```json
+{
+  "bucket": "p400",
+  "status": "done",
+  "completed_slots": ["p410", "p420", "p450"],
+  "required_artifacts": [{"path": "script.md", "exists": true}],
+  "state_keys": {"stage.script.status": "done"},
+  "output_inventory": ["script.md", "video_manifest.md"],
+  "next_bucket": "p500",
+  "blocked_reason": null
+}
 ```
 
-生成 API は provider call の前に次を照合する。
+L1 checks the result, required paths, state, and ordinary validator result. It does not need a
+critic report, aggregate report, score, or approval certificate to start the next bucket.
 
-- target と materialized payload の存在
-- current policy / compiler / projection registry version
-- saved `prompt` と `sha256`
-- current canonical design の再 compile 結果と saved `prompt` / `negative_prompt` / `sha256` / `source_digest` / `provider_request_binding`
-- tool / duration / quality / aspect ratio / first frame / last frame / ordered references / materialized reference content hash / provider model / execution options
-- review projection の exact `video_prompt` / `negative_prompt` fence と saved payload
-- per-item `status=approved` と current `request_section_sha256` / `prompt_sha256` / `source_digest`。`prompt_sha256` は saved `api_prompt_payload.sha256` と一致すること
-
-`approved_by` / `approved_at` は誰がいつ承認操作をしたかを残す audit metadata であり、request identity ではない。metadata が存在しても `status` と 3 つの approval identity binding が current でなければ生成しない。
-
-不在、pending / missing approval、obsolete version、hash mismatch、design digest drift、setting / reference bytes / execution-option drift は stale request として拒否する。editable `prompt_authoring_source` や review Markdown を provider call 時に再解釈しない。修正は canonical design または authoring source へ戻し、payload と review projection を再 materialize / 再 review / 再承認する。
-
-## Scene acceptance contract（authoring 前倒し）
-
-scene-set の意味品質を後段 reviewer だけに任せないため、新規 artifact は script authoring 前に `scene_set_authoring_contract_v1` を作成する。これは scene prose や reviewer report の要約ではなく、全 scene の deterministic ownership と参照整合を凍結する実行正本である。
-
-### Artifact と marker
-
-```yaml
-scene_set_authoring_contract:
-  schema_version: scene_set_authoring_contract_v1
-  generation_id: scene-authoring-<id>
-  criterion_registry_version: scene_acceptance_criteria_v1
-  criterion_registry_sha256: sha256:<hex>
-  source_bindings:
-    authoring_source_ledger:
-      path: logs/authoring/staging/<generation_id>/source_ledger.json
-      sha256: sha256:<raw-file-hex>
-    story: {path: story.md, sha256: sha256:<raw-file-hex>}
-    visual_value: {path: visual_value.md, sha256: sha256:<raw-file-hex>}
-  source_refs:
-    - source_ref_id: source-event-01
-      artifact: authoring_source_ledger
-      artifact_sha256: sha256:<raw-file-hex>
-      pointer: /events/0
-      expected_id: source_event_01
-  canonical_events: []
-  evidence_catalog: []
-  reveal_ledger: []
-  handoff_chain: []
-  transition_cues: []
-  scenes: []
-authoring_preflight:
-  status: pending
-  contract_digest: ""
-  criterion_registry_digest: ""
-  source_digest: ""
-  preflight_digest: ""
-  checks: []
-  blocking_reason_keys: []
-```
-
-`script.md` は契約全体を持ち、`scene_outline` / scene draft は `contract_digest` と `scene_slice_digest` を持つ該当 scene の projection だけを持つ。`video_manifest.md` は契約全体を複製せず、canonical script path、contract digest、scene slice digest、preflight digestを投影する。これにより、複数 artifact が event ownership や reveal state の別々の authoring rootになることを防ぐ。
-
-`source_refs[].artifact` は file path ではなく `source_bindings` の key を exact reference する。未登録 key、binding と異なる digest、提供されていない参照先は fail-close とする。隣接 scene で時刻または `location_sequence` が変わる場合は transition cue を必須にし、cue の `from_*` / `to_*` は両 scene の時刻・場所と完全一致させる。
-
-marker がない legacy artifact は読み取り互換とする。ただし、marker が存在する場合は `schema_version`、未知 ID、duplicate key、source pointer、digest、cross-field invariant を fail-close で検証する。部分的な新契約を legacy fallback へ静かに降格してはならない。
-
-### Authoring の責務境界
-
-| 層 | 正本 | hard gate / 判定 |
-| --- | --- | --- |
-| planner | `scene_set_authoring_contract_v1` | event ownership、順序、reveal、role、handoff、time/location、source ref |
-| scene author | `scene_draft_v1` と contract slice | 契約 ID を参照した具体 event / evidence / visible action |
-| authoring preflight | `authoring_preflight`（derived） | exact ID coverage、state、equality、closure。provider call不要 |
-| independent reviewer | frozen contract + canonical artifact | causal proof、story-specificity、価値増幅、残存 cross-scene 意味矛盾 |
-
-planner の contract が矛盾する場合は scene prose を継ぎ足して回避せず planner へ戻す。author は `owner_scene_id`、canonical order、reveal owner、source digestを変更できない。source meaning や event ownership を変える修正は human approval に送る。
-
-### Digest / state / invalidation
-
-contract / scene slice / preflight / registry digest は domain-separated canonical JSON の SHA-256 とし、`sha256:<lowercase hex>` 形式で保存する。一方、`source_bindings.*.sha256` と `source_refs[].artifact_sha256` は JSON を含め常に保存 file の raw bytes を hash し、空白・改行・duplicate-key表現を含むbyte差分を stale とする。contract digest から derived `authoring_preflight` を除外し、scene slice digest は contract digest と scene ID を含める。preflight digest は generation、contract、criterion registry、source、ordered scene draft digest、check resultを束ねる。source / contract / registry / generation が変わった場合、旧 preflight と semantic review scope は stale として無効化する。
-
-run の append-only state には少なくとも次を残す。
-
-設計初期の表記 `artifact.scene_set_authoring_contract.digest` は非canonicalな文書aliasであり、stateへ二重書きしない。実装上の正本は次の `authoring.scene_set.*` keyである。
-
-```text
-authoring.scene_set.contract.status=validated
-authoring.scene_set.contract.path=logs/authoring/staging/<generation_id>/contract.json
-authoring.scene_set.contract.digest=sha256:<hex>
-authoring.scene_set.generation_id=scene-authoring-<id>
-authoring.scene_set.preflight.status=passed|invalidated|failed
-authoring.scene_set.preflight.digest=sha256:<hex>
-authoring.scene_set.preflight.source_digest=sha256:<hex>
-authoring.scene_set.preflight.criterion_registry_digest=sha256:<hex>
-review.semantic.scene_set.shift_left_escape.status=detected
-review.semantic.scene_set.shift_left_escape.count=0
-review.semantic.scene_set.shift_left_escape.reason_keys=
-review.semantic.scene_set.shift_left_escape.preflight_digest=sha256:<hex>
-review.semantic.scene_set.shift_left_escape.routing=authoring_contract_defect
-```
-
-`shift_left_escape.count` は final reviewer が deterministic-owned criterion を発見した件数であり、passへの変換や producer repair の根拠にはしない。preflight が pass するまで cut coverage、image request、video manifest production materializationを開始しない。known-bad fixture は provider call 0回で停止し、corrected fixture は preflight後にのみ downstreamへ進む。
-
-### Criterion registry との束縛
-
-authoring prompt、validator、final reviewer は同じ `criterion_id` と canonical reason keyを参照する。registry entry は最低限 `owner`（`deterministic` / `authoring_semantic` / `independent_semantic`）、`first_enforced_stage`、`semantic_recheck_stages`、`provider_repair_allowed`、必要入力、authoring instruction、reviewer instructionを持つ。deterministic criterion は scene_detail / cut_blueprint でprovider再審査せず、scope digestのcurrentnessだけを検証する。
