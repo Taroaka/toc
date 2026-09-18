@@ -114,7 +114,7 @@ def test_missing_supervisor_cannot_publish_completed_state(tmp_path: Path) -> No
         patch.object(app, "append_state_snapshot") as state,
     ):
         with pytest.raises(RuntimeError, match="supervisor result is missing"):
-            app._mark_image_generation_review_ready("run")
+            app._mark_image_generation_complete("run")
         state.assert_not_called()
 
 
@@ -144,8 +144,8 @@ def test_scene_request_lock_covers_freeze_and_generation(tmp_path: Path) -> None
         patch.object(app, "_generate_request_outputs_unlocked", side_effect=generate),
         patch.object(app, "_validate_p650_run"),
         patch.object(app, "_validate_generated_outputs"),
-        patch.object(app, "_validate_p680_visual_quality"),
-        patch.object(app, "_mark_image_generation_review_ready"),
+        patch.object(app, "_validate_p680_outputs"),
+        patch.object(app, "_mark_image_generation_complete"),
         patch.object(app, "_set_create_job", new=AsyncMock()),
         patch.object(app, "append_state_snapshot"),
     ):

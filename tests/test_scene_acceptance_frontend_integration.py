@@ -1,3 +1,4 @@
+from story_profile_fixture import _story_profile as fixture_story_profile
 import importlib.util
 import hashlib
 import json
@@ -26,7 +27,7 @@ def load_frontend_run_module():
 class TestSceneAcceptanceFrontendIntegration(unittest.TestCase):
     def _profile(self, module):
         return module._duration_aware_profile(
-            module._story_profile(
+            fixture_story_profile(
                 "シンデレラ",
                 "シンデレラ",
                 variant_seed="scene-acceptance-integration",

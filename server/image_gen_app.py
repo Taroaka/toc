@@ -538,25 +538,6 @@ TRANSIENT_CODEX_IMAGE_ERRORS = (
 )
 
 
-class P560AssetGateError(RuntimeError):
-    """A p570 verifier failure with structured prompt-retry classification."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        failed_check_ids: Iterable[str],
-        retryable_visual_quality: bool,
-    ) -> None:
-        super().__init__(message)
-        self.failed_check_ids = tuple(
-            str(check_id).strip()
-            for check_id in failed_check_ids
-            if str(check_id).strip()
-        )
-        self.retryable_visual_quality = retryable_visual_quality
-
-
 class CanonicalP500ResumeRequiredError(RuntimeError):
     """Image-only resume cannot safely repair current p500 references."""
 
@@ -1230,7 +1211,6 @@ def _toc_immersive_command(
             json.dumps(payload, ensure_ascii=False, indent=2),
         ]
     )
-
 
 
 def _toc_world_walk_command(
@@ -2574,7 +2554,6 @@ def _inspect_p680_regeneration_plan(
     )
 
 
-
 def _p680_regeneration_targets(
     run_dir: Path,
     *,
@@ -3131,32 +3110,6 @@ def _validate_image_prompt_request_revision(
     return snapshot.request_revision
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _prepare_image_prompt_request_revision(
     run_dir: Path,
     *,
@@ -3213,7 +3166,6 @@ def _prepare_image_prompt_request_revision(
             f"ToC run did not reach p650: unresolved image request reference: {exc}"
         ) from exc
     return provider_snapshot.request_revision
-
 
 
 def _validate_p650_run_core(
@@ -3310,7 +3262,6 @@ def _validate_p650_run_core(
         raise RuntimeError(f"ToC run did not reach p650: incomplete fixed slot states {', '.join(incomplete_slots)}")
 
 
-
 def _validate_p650_run(run_id: str) -> None:
     _validate_p650_run_core(
         run_id,
@@ -3319,14 +3270,12 @@ def _validate_p650_run(run_id: str) -> None:
     )
 
 
-
 def _validate_materialized_p650_run(run_id: str) -> None:
     _validate_p650_run_core(
         run_id,
         require_provider_ready_freeze=False,
         require_generated_asset_outputs=False,
     )
-
 
 
 def _source_title_from_run_id(run_id: str) -> str:
@@ -3395,13 +3344,6 @@ def _validate_frontend_create_run(run_id: str, *, strict_visual_quality: bool = 
     run_dir = safe_run_dir(run_id, ROOT)
     _validate_generated_outputs(run_dir, "asset")
     _validate_generated_outputs(run_dir, "scene")
-
-
-
-
-
-
-
 
 
 def _cleanup_unscaffolded_run(
@@ -6929,7 +6871,6 @@ def _apply_v2_visual_plan_patch_and_compile(
     return plan, payload
 
 
-
 def _default_narration_output_for_target(target: dict[str, Any]) -> str:
     selector = str(target["selector"])
     return f"assets/audio/{selector}/{selector}_narration.mp3"
@@ -7798,10 +7739,8 @@ def _manifest_narration_items(run_dir: Path, data: dict[str, Any] | None = None)
                 ),
                 "narrationGeneratedFromTtsHash": str(
                     (
-                        selected_candidate
-                        if narration_audio_ready
-                        else narration_candidate
-                    or {}
+                        (selected_candidate if narration_audio_ready else narration_candidate)
+                        or {}
                     ).get("generated_from_tts_hash")
                     or ""
                 ),
@@ -11858,9 +11797,6 @@ def _recompile_v2_scene_manifest(
     return compiled
 
 
-
-
-
 def _recompile_image_prompt_payloads_from_plans(run_dir: Path) -> list[str]:
     """Rebuild every compiled-v2 payload from the repaired visual-plan source."""
 
@@ -11938,8 +11874,7 @@ def _recompile_image_prompt_payloads_from_plans(run_dir: Path) -> list[str]:
     return changed_selectors
 
 
-
-def _synchronize_image_prompt_repair_outputs(
+def _synchronize_image_prompt_requests(
     run_dir: Path,
     *,
     precompiled_selectors: Iterable[str] | None = None,
@@ -12045,13 +11980,6 @@ def _synchronize_image_prompt_repair_outputs(
     )
 
 
-
-
-
-
-
-
-
 def _assert_image_prompt_request_revision_unchanged(
     run_dir: Path,
     *,
@@ -12080,8 +12008,6 @@ def _assert_image_prompt_request_revision_unchanged(
     return current
 
 
-
-
 def _mark_image_prompt_request_freeze_done(
     run_dir: Path, *, expected_request_revision: str | None = None,
 ) -> None:
@@ -12105,8 +12031,6 @@ def _mark_image_prompt_request_freeze_done(
         "slot.p650.status": "done",
         "slot.p650.note": "compiled requests and reference bytes frozen",
     })
-
-
 
 
 def _finalize_p600_supervisor_result(
@@ -12164,7 +12088,6 @@ def _finalize_p600_supervisor_result(
         }
     )
     _atomic_write_text(result_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
-
 
 
 async def _start_app_server_with_log(client: CodexAppServerClient, *, run_dir: Path, operation: str, item_id: str) -> None:
@@ -13137,7 +13060,6 @@ async def _generate_request_outputs_unlocked(*, run_dir: Path, kind: str) -> Non
     )
 
 
-
 def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
     issues: list[str] = []
     snapshot_filename = {
@@ -13197,26 +13119,11 @@ def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
         raise RuntimeError(f"{kind} image generation incomplete: {', '.join(issues)}")
 
 
-
-
-
-def _validate_p680_visual_quality(run_dir: Path, *, mode: str = "terminal") -> None:
+def _validate_p680_outputs(run_dir: Path, *, mode: str = "terminal") -> None:
     """Validate generated outputs without subjective scores or certificates."""
     _assert_bound_run_root(run_dir)
     _validate_generated_outputs(run_dir, "asset")
     _validate_generated_outputs(run_dir, "scene")
-
-
-
-
-
-
-
-def _validate_p560_asset_quality(run_dir: Path) -> None:
-    """Validate actual generated asset bytes and request provenance."""
-    _assert_bound_run_root(run_dir)
-    _validate_generated_outputs(run_dir, "asset")
-
 
 
 def _mark_asset_generation_handoff(run_dir: Path, *, asset_quality_passed: bool = True) -> None:
@@ -13227,7 +13134,6 @@ def _mark_asset_generation_handoff(run_dir: Path, *, asset_quality_passed: bool 
         "slot.p570.status": "done", "slot.p570.note": "asset outputs validated",
         "stage.asset.status": "done", "runtime.stage": "asset_images_generated",
     })
-
 
 
 def _finalize_p500_supervisor_result(
@@ -13294,13 +13200,7 @@ def _finalize_p500_supervisor_result(
     )
 
 
-
-
-
-
-
-
-def _mark_image_generation_review_ready(run_id: str) -> None:
+def _mark_image_generation_complete(run_id: str) -> None:
     """Publish generated scene outputs without an approval prerequisite."""
     run_dir = safe_run_dir(run_id, ROOT)
     _validate_generated_outputs(run_dir, "asset")
@@ -13322,14 +13222,6 @@ def _mark_image_generation_review_ready(run_id: str) -> None:
     })
 
 
-
-def _validate_image_review_ready(run_id: str) -> None:
-    run_dir = safe_run_dir(run_id, ROOT)
-    _validate_generated_outputs(run_dir, "asset")
-    _validate_generated_outputs(run_dir, "scene")
-
-
-
 def _state_list_value(state: dict[str, str], key: str) -> list[str]:
     raw = str(state.get(key, "") or "").strip()
     if not raw:
@@ -13337,47 +13229,17 @@ def _state_list_value(state: dict[str, str], key: str) -> list[str]:
     return [item.strip().strip("`\"'") for item in raw.split(",") if item.strip()]
 
 
+_frontend_authoring_runner_module: Any | None = None
+_frontend_authoring_runner_lock = threading.Lock()
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-_frontend_review_runner_module: Any | None = None
-_frontend_review_runner_lock = threading.Lock()
-
-
-def _load_frontend_review_runner() -> Any:
+def _load_frontend_authoring_runner() -> Any:
     """Load the frontend authoring helpers without executing their CLI entrypoint."""
 
-    global _frontend_review_runner_module
-    with _frontend_review_runner_lock:
-        if _frontend_review_runner_module is not None:
-            return _frontend_review_runner_module
+    global _frontend_authoring_runner_module
+    with _frontend_authoring_runner_lock:
+        if _frontend_authoring_runner_module is not None:
+            return _frontend_authoring_runner_module
         path = APP_ROOT / "scripts" / "toc-immersive-frontend-run.py"
         spec = importlib.util.spec_from_file_location(
             "toc_immersive_frontend_review_reconciliation",
@@ -13403,25 +13265,17 @@ def _load_frontend_review_runner() -> Any:
                 "frontend review runner is missing reconciliation helpers: "
                 + ", ".join(missing)
             )
-        _frontend_review_runner_module = module
+        _frontend_authoring_runner_module = module
         return module
-
-
-
-
-
-
-
 
 
 def _validate_pre_asset_provider_gate(run_dir: Path) -> None:
     """Validate authored data and concrete asset requests before submission."""
     _assert_bound_run_root(run_dir)
-    frontend = _load_frontend_review_runner()
+    frontend = _load_frontend_authoring_runner()
     frontend._require_fresh_p400_readiness(run_dir)
     if not load_request_items(run_dir, "asset"):
         raise RuntimeError("asset generation requests are missing")
-
 
 
 async def _generate_scene_outputs_after_p650_preflight(job_id: str, *, run_id: str, run_dir: Path, scene_revision_lock_held: bool=False) -> None:
@@ -13445,15 +13299,14 @@ async def _generate_scene_outputs_after_p650_preflight(job_id: str, *, run_id: s
             _validate_p650_run(run_id)
             _validate_generated_outputs(run_dir, 'asset')
             _validate_generated_outputs(run_dir, 'scene')
-            _validate_p680_visual_quality(run_dir, mode='terminal')
+            _validate_p680_outputs(run_dir, mode='terminal')
         except Exception as exc:
             generated_count = 0
             with suppress(Exception):
                 generated_count = sum((1 for item in load_request_items(run_dir, 'scene') if item.output and resolve_run_relative(run_dir, item.output).is_file()))
             append_state_snapshot(run_dir / 'state.txt', {'runtime.stage': 'scene_image_generation_failed' if failure_phase == 'media_generation' else 'p680_pre_handoff_gate_failed', 'runtime.failure.stage': 'p660' if failure_phase == 'media_generation' else 'p680', 'runtime.failure.phase': failure_phase, 'runtime.failure.error_kind': 'media_generation_failed' if failure_phase == 'media_generation' else 'validation_failed', 'slot.p660.status': 'failed', 'slot.p660.note': 'scene generation or pre-handoff validation failed', 'slot.p670.status': 'pending', 'slot.p670.note': 'waiting for successful scene output validation', 'slot.p680.status': 'pending', 'slot.p680.note': 'generated image handoff is not ready because the pre-handoff gate failed', 'stage.scene_implementation.status': 'failed', 'image_generation.status': 'failed', 'image_generation.started': 'true', 'image_generation.generated_count': str(generated_count), 'image_generation.blocked_by': 'scene_image_generation' if failure_phase == 'media_generation' else 'p680_pre_handoff_gate', 'image_generation.block_reason': 'media_generation_failed' if failure_phase == 'media_generation' else 'pre_handoff_validation_failed', 'image_generation.error': str(exc)[:2000]})
             raise
-        _mark_image_generation_review_ready(run_id)
-
+        _mark_image_generation_complete(run_id)
 
 
 async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
@@ -13468,11 +13321,6 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
         job_id, run_id=run_id, run_dir=run_dir,
     )
     return True
-
-
-
-
-
 
 
 def _invalidate_p600_supervisor_result(run_dir: Path, *, invalidated_by: str) -> None:
@@ -13503,14 +13351,13 @@ def _invalidate_p600_supervisor_result(run_dir: Path, *, invalidated_by: str) ->
     _atomic_write_text(result_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
-def _invalidate_image_generation_review_handoff(run_dir: Path, *, invalidated_by: str, reason: str) -> None:
+def _invalidate_image_generation_handoff(run_dir: Path, *, invalidated_by: str, reason: str) -> None:
     """Demote a p680 review handoff that no longer verifies."""
     _invalidate_p600_supervisor_result(run_dir, invalidated_by=invalidated_by)
     append_state_snapshot(run_dir / 'state.txt', {'status': 'P650', 'runtime.stage': 'p680_terminal_verification_failed', 'runtime.failure.stage': 'p680', 'runtime.failure.phase': 'terminal_verification', 'runtime.failure.error_kind': 'validation_failed', 'slot.p680.status': 'pending', 'slot.p680.note': 'generated image handoff is unavailable because strict p680 terminal verification failed', 'stage.scene_implementation.status': 'failed', 'image_generation.status': 'failed', 'image_generation.blocked_by': 'p680_terminal_verification', 'image_generation.block_reason': str(reason)[:2000], 'orchestration.p600.supervisor.status': 'invalidated', 'orchestration.p600.supervisor.invalidated_by': invalidated_by})
 
 
-
-def _invalidate_published_image_generation_review_handoff(
+def _invalidate_published_image_generation_handoff(
     run_dir: Path,
     *,
     invalidated_by: str,
@@ -13523,7 +13370,7 @@ def _invalidate_published_image_generation_review_handoff(
     )
     if not published:
         return False
-    _invalidate_image_generation_review_handoff(
+    _invalidate_image_generation_handoff(
         run_dir,
         invalidated_by=invalidated_by,
         reason=reason,
@@ -13531,233 +13378,7 @@ def _invalidate_published_image_generation_review_handoff(
     return True
 
 
-
-
-
-
 CREATION_SLOT_BY_STAGE = {"research": "p120", "story": "p220", "scene_set": "p410", "scene_detail": "p410", "cut_blueprint": "p420", "asset_plan": "p530", "image_prompt": "p620", "narration": "p710"}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _reject_duplicate_json_object_pairs(
@@ -13775,34 +13396,6 @@ def _reject_non_finite_json_constant(value: str) -> Any:
     raise ValueError(f"non-finite JSON value: {value}")
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _dedupe_preserve_order(values: Iterable[Any]) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
@@ -13813,50 +13406,6 @@ def _dedupe_preserve_order(values: Iterable[Any]) -> list[str]:
         seen.add(text)
         result.append(text)
     return result
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _create_run_error_message(exc: Exception, *, max_length: int = 1800) -> str:
@@ -14177,7 +13726,7 @@ async def _run_create_job_bound(
         )
     except Exception as exc:
         with suppress(Exception):
-            _invalidate_published_image_generation_review_handoff(
+            _invalidate_published_image_generation_handoff(
                 run_dir_for_log,
                 invalidated_by="create_job.post_handoff_failure",
                 reason=str(exc),
@@ -15432,7 +14981,7 @@ async def _run_image_only_resume_job_bound(
         )
     except Exception as exc:
         with suppress(Exception):
-            _invalidate_published_image_generation_review_handoff(
+            _invalidate_published_image_generation_handoff(
                 run_dir,
                 invalidated_by="image_only_resume.post_handoff_failure",
                 reason=str(exc),
@@ -15642,7 +15191,7 @@ async def _run_p500_resume_job_bound(
         # The subprocess owns both the create/resume lease and canonical resume
         # state. Preserve its semantic failure and applied checkpoint verbatim.
         with suppress(Exception):
-            _invalidate_published_image_generation_review_handoff(
+            _invalidate_published_image_generation_handoff(
                 run_dir,
                 invalidated_by="p500_resume.post_handoff_failure",
                 reason=str(exc),
@@ -15983,7 +15532,6 @@ def _request_gallery_payload(
             validate_request_outputs=False,
         ),
     }
-
 
 
 @router.get("/api/image-gen/requests")
@@ -17384,9 +16932,6 @@ async def _create_bulk_generation_job(
     return deepcopy(job)
 
 
-
-
-
 async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict[str, Any]:
     if not req.prompt.strip():
         detail = (
@@ -17660,7 +17205,6 @@ async def _generate_one(run_dir: Path, req: GenerateRequest, index: int) -> dict
     }
 
 
-
 @router.post("/api/image-gen/generate")
 async def api_generate(req: GenerateRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
@@ -17690,7 +17234,6 @@ async def api_generate(req: GenerateRequest) -> dict[str, Any]:
             return {"itemId": req.item_id, "candidates": candidates}
     finally:
         await _release_run_execution_lease(lease_id)
-
 
 
 async def _run_foreground_bulk_generation(
@@ -17792,7 +17335,6 @@ async def api_generate_bulk(req: BulkGenerateRequest) -> Any:
             )
     finally:
         await _release_run_execution_lease(lease_id)
-
 
 
 @router.get("/api/image-gen/generate-bulk/{job_id}")
@@ -17952,7 +17494,6 @@ async def api_regenerate_prompts(req: RegeneratePromptsRequest) -> dict[str, Any
     return {'runId': req.run_id, 'target': req.target, 'kind': kind, 'status': 'completed', 'operation': 'recompiled' if v2_revisions else 'direct_update', 'prompts': response_prompts, 'updated': [*v2_revisions.keys(), *update_result['updated']], 'missing': update_result['missing']}
 
 
-
 @router.post("/api/image-gen/download-zip")
 async def api_download_zip(req: ZipRequest) -> StreamingResponse:
     run_dir = safe_run_dir(req.run_id, ROOT)
@@ -18054,7 +17595,6 @@ async def api_insert_bulk(req: BulkInsertRequest) -> dict[str, Any]:
         for lease_id in reversed(lease_ids):
             await _release_run_execution_lease(lease_id)
     return {'inserted': inserted}
-
 
 
 @router.post("/api/chat/turn")

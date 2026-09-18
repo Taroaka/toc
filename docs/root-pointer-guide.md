@@ -104,6 +104,13 @@ slot contract is authoring, materialization, generation, and ordinary validation
 
 ## Required Workflow
 
+### Astra subagent policy
+
+Astra（`gpt-6-astra`）使用時は、サブエージェントを使わずメインエージェントが単独で作業する。
+サブエージェントを使う場合は、起動・再開する前にユーザーの明示的な許可を取ること。
+タスクの複雑さ、レビューの必要性、一般的な並列作業の許可を、この事前許可の代わりにしない。
+このルールは、以下の並列作業に関する記述にも優先する。
+
 For a non-trivial contract change, record requirements, design, and task list under
 `.steering/YYYYMMDD-<title>/` before editing.
 

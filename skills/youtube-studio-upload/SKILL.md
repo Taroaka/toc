@@ -1,6 +1,7 @@
 ---
 name: youtube-studio-upload
-description: Use when: Codex should upload a longform video to YouTube Studio for `にわかのAI` via browser/Chrome MCP without using the YouTube Data API. Supports draft-first upload, metadata entry, thumbnail upload, audience setting, visibility setting, and pinned comment after publish.
+description: >
+  Use when: Codex should upload a longform video to YouTube Studio for `にわかのAI` via browser/Chrome MCP without using the YouTube Data API. Supports draft-first upload, metadata entry, thumbnail upload, audience setting, visibility setting, and pinned comment after publish.
 ---
 
 # YouTube Studio Upload

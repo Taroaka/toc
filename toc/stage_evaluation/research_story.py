@@ -131,16 +131,28 @@ def _visual_scene_coverage_issues(run_dir: Path, data: dict[str, Any]) -> list[s
         for index, scene in enumerate(story_scenes, start=1)
         if isinstance(scene, dict)
     }
+    raw_keys = [
+        _scene_key(scene.get("scene_selector") or scene.get("scene_id"))
+        if isinstance(scene, dict) else ""
+        for scene in visual_scenes
+    ]
+    runtime_expected = {
+        _scene_key(scene.get("canonical_scene_index") or index)
+        for index, scene in enumerate(story_scenes, start=1)
+        if isinstance(scene, dict)
+    }
+    runtime_keys = [
+        str(int(key) // 10)
+        if key.isdigit() and int(key) > 0 and int(key) % 10 == 0 else ""
+        for key in raw_keys
+    ]
+    # Prefer exact authored IDs. Only interpret the legacy runtime numbering
+    # when the entire set maps to the canonical scene indices.
+    if set(raw_keys) != expected and all(runtime_keys) and set(runtime_keys) == runtime_expected:
+        raw_keys = runtime_keys
+        expected = runtime_expected
     actual: dict[str, int] = {}
-    for index, visual_scene in enumerate(visual_scenes, start=1):
-        if not isinstance(visual_scene, dict):
-            continue
-        raw_selector = visual_scene.get("scene_selector") or visual_scene.get("scene_id")
-        key = _scene_key(raw_selector)
-        # Runtime scene IDs are emitted as 10, 20, ... while story IDs are
-        # commonly 1, 2, ...; compare both in the same scene namespace.
-        if key.isdigit() and int(key) >= 10 and int(key) % 10 == 0:
-            key = str(int(key) // 10)
+    for index, key in enumerate(raw_keys, start=1):
         if not key:
             return [f"scene_visual_values[{index}]:scene_selector:missing"]
         actual[key] = actual.get(key, 0) + 1
@@ -185,8 +197,6 @@ def check_visual_value(
     production_issues = _p300_production_artifact_issues(run_dir) if forbid_production_artifacts else []
     add_check(checks, "visual_value.no_production_artifacts", not production_issues, "visual value stage contains no downstream production files" + (f" (issues: {','.join(production_issues[:8])})" if production_issues else ""))
     if isinstance(data.get("visual_value_metadata"), dict) and "adaptation_value_contract" in data["visual_value_metadata"]:
-        contract = data["visual_value_metadata"]["adaptation_value_contract"]
-        add_check(checks, "visual_value.adaptation_value_contract_type", isinstance(contract, dict), "declared adaptation value contract is a mapping")
         story_data = load_structured_document(run_dir / "story.md")[1] if (run_dir / "story.md").is_file() else {}
         issues = visual_value_adaptation_issues(
             data,

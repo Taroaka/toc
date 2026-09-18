@@ -1,0 +1,184 @@
+[
+  {
+    "skill": "tdd-workflow",
+    "timestamp": "2026-08-26T13:39:18.246Z",
+    "thread": "01a03431-4d2f-7850-b976-83176b52b3f6",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/24/rollout-2026-08-24T23-34-01-01a03431-4d2f-7850-b976-83176b52b3f6.jsonl",
+    "line": 5984
+  },
+  {
+    "skill": "frontend-patterns",
+    "timestamp": "2026-08-30T01:09:39.117Z",
+    "thread": "01a03431-4d2f-7850-b976-83176b52b3f6",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/24/rollout-2026-08-24T23-34-01-01a03431-4d2f-7850-b976-83176b52b3f6.jsonl",
+    "line": 29463
+  },
+  {
+    "skill": "backend-patterns",
+    "timestamp": "2026-08-28T21:47:21.249Z",
+    "thread": "01a04a57-58c2-75a1-9349-b260a1c7e57b",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/29/rollout-2026-08-29T06-47-13-01a04a57-58c2-75a1-9349-b260a1c7e57b.jsonl",
+    "line": 15
+  },
+  {
+    "skill": "coding-standards",
+    "timestamp": "2026-08-20T14:57:40.284Z",
+    "thread": "01a01fad-819a-7ca1-b9f2-1e570b0a35d7",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/20/rollout-2026-08-20T23-57-39-01a01fad-819a-7ca1-b9f2-1e570b0a35d7.jsonl",
+    "line": 397
+  },
+  {
+    "skill": "verification-loop",
+    "timestamp": "2026-08-26T13:39:18.246Z",
+    "thread": "01a03431-4d2f-7850-b976-83176b52b3f6",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/24/rollout-2026-08-24T23-34-01-01a03431-4d2f-7850-b976-83176b52b3f6.jsonl",
+    "line": 5984
+  },
+  {
+    "skill": "improve-workflow",
+    "timestamp": "2026-08-28T21:45:50.029Z",
+    "thread": "01a03431-4d2f-7850-b976-83176b52b3f6",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/24/rollout-2026-08-24T23-34-01-01a03431-4d2f-7850-b976-83176b52b3f6.jsonl",
+    "line": 23760
+  },
+  {
+    "skill": "security-review",
+    "timestamp": "2026-08-29T03:02:42.060Z",
+    "thread": "01a04b77-d398-79f3-8a97-4673b4d7df98",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/29/rollout-2026-08-29T12-02-19-01a04b77-d398-79f3-8a97-4673b4d7df98.jsonl",
+    "line": 35
+  },
+  {
+    "skill": "toc-server-restart",
+    "timestamp": "2026-08-26T14:26:58.151Z",
+    "thread": "01a03431-4d2f-7850-b976-83176b52b3f6",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/24/rollout-2026-08-24T23-34-01-01a03431-4d2f-7850-b976-83176b52b3f6.jsonl",
+    "line": 7222
+  },
+  {
+    "skill": "goal-forge",
+    "timestamp": "2026-08-26T13:38:28.570Z",
+    "thread": "01a03431-4d2f-7850-b976-83176b52b3f6",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/24/rollout-2026-08-24T23-34-01-01a03431-4d2f-7850-b976-83176b52b3f6.jsonl",
+    "line": 5960
+  },
+  {
+    "skill": "review-subagent-fix-loop",
+    "timestamp": "2026-08-26T13:52:33.035Z",
+    "thread": "01a03e57-db1e-7a90-9653-ea2a2ff6c753",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/26/rollout-2026-08-26T22-52-20-01a03e57-db1e-7a90-9653-ea2a2ff6c753.jsonl",
+    "line": 28
+  },
+  {
+    "skill": "toc-immersive-runner",
+    "timestamp": "2026-08-24T14:40:17.537Z",
+    "thread": "01a03431-4d2f-7850-b976-83176b52b3f6",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/24/rollout-2026-08-24T23-34-01-01a03431-4d2f-7850-b976-83176b52b3f6.jsonl",
+    "line": 86
+  },
+  {
+    "skill": "toc-resume-p500",
+    "timestamp": "2026-08-24T14:40:10.621Z",
+    "thread": "01a03431-4d2f-7850-b976-83176b52b3f6",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/24/rollout-2026-08-24T23-34-01-01a03431-4d2f-7850-b976-83176b52b3f6.jsonl",
+    "line": 78
+  },
+  {
+    "skill": "marketing-skills-router",
+    "timestamp": "2026-08-28T22:23:07.528Z",
+    "thread": "019fdfeb-ebb8-71a2-8482-eec4a45ec581",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/08/rollout-2026-08-08T14-50-08-019fdfeb-ebb8-71a2-8482-eec4a45ec581.jsonl",
+    "line": 864
+  },
+  {
+    "skill": "hero-journey-cinematic-setpieces",
+    "timestamp": "2026-09-08T13:26:39.424Z",
+    "thread": "01a08130-35de-7740-ace8-332e4871e035",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/09/08/rollout-2026-09-08T22-23-35-01a08130-35de-7740-ace8-332e4871e035.jsonl",
+    "line": 72
+  },
+  {
+    "skill": "toc-research",
+    "timestamp": "2026-09-07T23:10:57.119Z",
+    "thread": "01a07e23-7ad5-71d1-b175-380ec39fb812",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/09/08/rollout-2026-09-08T08-10-49-01a07e23-7ad5-71d1-b175-380ec39fb812.jsonl",
+    "line": 13
+  },
+  {
+    "skill": "toc-scene-design",
+    "timestamp": "2026-09-07T13:20:49.031Z",
+    "thread": "01a07c07-2ce8-7091-bbc5-01ebdb24d0bd",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/09/07/rollout-2026-09-07T22-20-40-01a07c07-2ce8-7091-bbc5-01ebdb24d0bd.jsonl",
+    "line": 14
+  },
+  {
+    "skill": "toc-image-prompt",
+    "timestamp": "2026-08-30T12:22:43.421Z",
+    "thread": "01a0529f-064c-7072-9dfe-f6a8db2c5f67",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/30/rollout-2026-08-30T21-22-28-01a0529f-064c-7072-9dfe-f6a8db2c5f67.jsonl",
+    "line": 32
+  },
+  {
+    "skill": "toc-narration",
+    "timestamp": "2026-08-18T15:24:50.321Z",
+    "thread": "01a01579-59d7-73e0-95dc-c0c3330450df",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/19/rollout-2026-08-19T00-24-29-01a01579-59d7-73e0-95dc-c0c3330450df.jsonl",
+    "line": 15
+  },
+  {
+    "skill": "toc-video-gen",
+    "timestamp": "2026-08-20T14:57:40.164Z",
+    "thread": "01a01fad-819a-7ca1-b9f2-1e570b0a35d7",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/20/rollout-2026-08-20T23-57-39-01a01fad-819a-7ca1-b9f2-1e570b0a35d7.jsonl",
+    "line": 23
+  },
+  {
+    "skill": "imagegen",
+    "timestamp": "2026-08-29T06:54:49.501Z",
+    "thread": "01a04c4c-75dd-7f50-8da2-bcd3638e4387",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/29/rollout-2026-08-29T15-54-34-01a04c4c-75dd-7f50-8da2-bcd3638e4387.jsonl",
+    "line": 14
+  },
+  {
+    "skill": "openai-docs",
+    "timestamp": "2026-08-20T14:56:40.028Z",
+    "thread": "01a01fac-2f07-7001-a00f-a831e66c54a7",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/20/rollout-2026-08-20T23-56-13-01a01fac-2f07-7001-a00f-a831e66c54a7.jsonl",
+    "line": 15
+  },
+  {
+    "skill": "skill-creator",
+    "timestamp": "2026-08-24T14:54:14.207Z",
+    "thread": "01a03442-e0f5-7d43-9f90-46d4bcd69641",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/24/rollout-2026-08-24T23-53-13-01a03442-e0f5-7d43-9f90-46d4bcd69641.jsonl",
+    "line": 16
+  },
+  {
+    "skill": "index",
+    "timestamp": "2026-08-28T22:23:07.528Z",
+    "thread": "019fdfeb-ebb8-71a2-8482-eec4a45ec581",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/08/rollout-2026-08-08T14-50-08-019fdfeb-ebb8-71a2-8482-eec4a45ec581.jsonl",
+    "line": 864
+  },
+  {
+    "skill": "build-business-case",
+    "timestamp": "2026-08-28T22:23:14.020Z",
+    "thread": "019fdfeb-ebb8-71a2-8482-eec4a45ec581",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/08/rollout-2026-08-08T14-50-08-019fdfeb-ebb8-71a2-8482-eec4a45ec581.jsonl",
+    "line": 872
+  },
+  {
+    "skill": "frontless_review",
+    "timestamp": "2026-08-29T05:51:16.428Z",
+    "thread": "01a03431-4d2f-7850-b976-83176b52b3f6",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/24/rollout-2026-08-24T23-34-01-01a03431-4d2f-7850-b976-83176b52b3f6.jsonl",
+    "line": 27469
+  },
+  {
+    "skill": "control-in-app-browser",
+    "timestamp": "2026-08-18T13:26:42.506Z",
+    "thread": "01a0150d-0820-7c33-b9ae-f1925190963c",
+    "rollout": "/Users/kantaro/.codex/sessions/2026/08/18/rollout-2026-08-18T22-26-10-01a0150d-0820-7c33-b9ae-f1925190963c.jsonl",
+    "line": 15
+  }
+]

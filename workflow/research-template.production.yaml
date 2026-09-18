@@ -1,4 +1,6 @@
 # Production research output template (story-material-first)
+# コピーしないこと：テンプレートの例文・物語内容・出典・信頼度を成果物へ流用しない。
+# 利用するのは項目と構造のみ。内容は対象の原作・調査結果に基づいて作ること。
 #
 # 目的:
 # - p100 は「構成表を作る工程」ではなく、後段で削れるだけの物語素材を増やす工程。
@@ -43,6 +45,8 @@ story_materials:
         evidence_refs: ["P1"]
   symbols_and_themes:
     - item_id: "SYM1"
+      # 具体的な物体のみ object。主題や質感を小道具へ変換しない。
+      kind: "object|theme|motif"
       item: "string"
       meaning: "string"
       story_value: "string"

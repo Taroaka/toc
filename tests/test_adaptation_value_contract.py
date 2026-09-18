@@ -1,3 +1,4 @@
+from story_profile_fixture import _story_profile as fixture_story_profile, _build_research as fixture_research
 import sys
 import unittest
 import importlib.util
@@ -622,12 +623,12 @@ class AdaptationValueContractTests(unittest.TestCase):
         spec.loader.exec_module(module)
         with patch.dict(os.environ, {"TOC_ENABLE_LEGACY_CINDERELLA_PROFILE": "1"}):
             profile = module._duration_aware_profile(
-                module._story_profile("シンデレラ", "シンデレラ", variant_seed="adaptation-lineage"),
+                fixture_story_profile("シンデレラ", "シンデレラ", variant_seed="adaptation-lineage"),
                 target_duration_seconds=300,
             )
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
-            research = module._build_research(
+            research = fixture_research(
                 "シンデレラ",
                 "シンデレラ",
                 "2099-01-01T00:00:00+09:00",

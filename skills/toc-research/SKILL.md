@@ -1,6 +1,7 @@
 ---
 name: toc-research
-description: Run the ToC research stage with the repo's canonical docs, templates, and source context. Use when: creating or revising `research.md` for a run directory.
+description: >
+  Run the ToC research stage with the repo's canonical docs, templates, and source context. Use when: creating or revising `research.md` for a run directory.
 ---
 
 # ToC Research

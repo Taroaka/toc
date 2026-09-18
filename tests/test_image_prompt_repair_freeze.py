@@ -505,7 +505,7 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
                 "server.image_gen_app.subprocess.run",
                 return_value=Mock(returncode=0, stdout="", stderr=""),
             ):
-                image_gen_app._synchronize_image_prompt_repair_outputs(run_dir)
+                image_gen_app._synchronize_image_prompt_requests(run_dir)
             unchanged_state = image_gen_app.parse_state_file(run_dir / "state.txt")
 
             manifest["assets"]["character_bible"].append(
@@ -525,7 +525,7 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
                 "server.image_gen_app.subprocess.run",
                 return_value=Mock(returncode=0, stdout="", stderr=""),
             ):
-                image_gen_app._synchronize_image_prompt_repair_outputs(run_dir)
+                image_gen_app._synchronize_image_prompt_requests(run_dir)
 
             asset_snapshot = image_gen_app.load_request_snapshot(
                 run_dir / "asset_generation_request_snapshot.json",
@@ -590,7 +590,7 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
                 "server.image_gen_app.subprocess.run",
                 return_value=Mock(returncode=0, stdout="", stderr=""),
             ):
-                image_gen_app._synchronize_image_prompt_repair_outputs(run_dir)
+                image_gen_app._synchronize_image_prompt_requests(run_dir)
 
             after = image_gen_app.load_request_snapshot(
                 run_dir / "asset_generation_request_snapshot.json",
@@ -705,7 +705,7 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
                     return_value=Mock(returncode=0, stdout="", stderr=""),
                 ),
             ):
-                image_gen_app._synchronize_image_prompt_repair_outputs(
+                image_gen_app._synchronize_image_prompt_requests(
                     run_dir,
                     precompiled_selectors=["scene1_cut1"],
                 )
@@ -742,7 +742,7 @@ class ImagePromptRepairFreezeTests(unittest.TestCase):
                 ),
             ):
                 with self.assertRaisesRegex(RuntimeError, "request failed"):
-                    image_gen_app._synchronize_image_prompt_repair_outputs(
+                    image_gen_app._synchronize_image_prompt_requests(
                         run_dir,
                         precompiled_selectors=["scene1_cut1"],
                     )

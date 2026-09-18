@@ -1,6 +1,7 @@
 ---
 name: toc-video-gen
-description: Run the ToC video generation stage with canonical video docs, playbooks, and source context. Use when: preparing or executing `video_manifest.md` for clip generation.
+description: >
+  Run the ToC video generation stage with canonical video docs, playbooks, and source context. Use when: preparing or executing `video_manifest.md` for clip generation.
 ---
 
 # ToC Video Generation

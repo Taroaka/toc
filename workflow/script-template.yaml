@@ -196,6 +196,23 @@ scenes:
         to: ""
         visible_evidence: []
       causal_turn: "次 scene を発生させる不可逆な出来事"
+      scene_value_amplification:
+        schema_version: scene_value_amplification_v1
+        source_value_refs: []
+        why_this_scene_matters: ''
+        audience_state_before: ''
+        audience_state_after: ''
+        cinematic_gain:
+          performance: ''
+          blocking_and_space: ''
+          camera_and_composition: ''
+          edit_and_rhythm: ''
+          sound: ''
+        iconic_moment_target: ''
+        must_preserve_story_facts: []
+        must_not_reduce_to: []
+        success_evidence: []
+        emotional_contradiction: ''
     start_state:
       state_id: "scene_01_start"
       characters: []
@@ -261,6 +278,9 @@ scenes:
         cut_contract:
           schema_version: "3.0"
           expressive_contract:
+            schema_version: cut_expressive_contract_v1
+            scene_amplification_ref: scene1.scene_intent.scene_value_amplification
+            must_not_reduce_to: []
             source_value_refs: []
             expressive_function: recognition|withhold|pressure|release|contrast|reaction|reframe|afterimage|spectacle|transition
             audience_experience_delta: ""

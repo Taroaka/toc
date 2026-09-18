@@ -84,6 +84,11 @@ request revisions、provider provenance、ordinary validation results を記録�
 
 ## 4. Generation flow
 
+Frontend create の p100 は `scripts/author-research-with-codex.py` で入力原文・取得した出典から
+`research.md` を執筆する。リサーチ前に固定の物語パターンや小道具を選ばない。
+初期化は実行ID・目標尺などの技術情報だけを扱い、物語用 profile は執筆済みの research/story から投影する。
+出典取得や構造検証が失敗した場合は後続を開始せず、定型の筋による代替出力をしない。
+
 ```text
 source context → research → story → visual value → script
   → skeleton manifest → asset plan/generation
@@ -149,4 +154,3 @@ downstream item だけを stale にして再 materialize/re-generate し、valid
 - docs/implementation/video-integration.md
 - docs/implementation/image-prompting.md
 - workflow/video-manifest-template.md
-

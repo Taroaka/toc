@@ -664,6 +664,127 @@ def _validate_source_basis(
             _validate_ids(basis.get(field), set(maps[category]), errors)
 
 
+def _character_binding_values(registry: Mapping[str, Any]) -> set[str]:
+    """Return the exact subject tokens that the downstream character binder accepts.
+
+    Research character records are addressed by their registry key and by the
+    source IDs carried in each record.  Their display name is also a valid
+    authored subject.  The generated pipeline has one stable protagonist
+    alias, ``protagonist``; expose it only when the registry identifies a
+    protagonist so an empty or unrelated character registry does not invent a
+    subject binding.
+    """
+
+    characters = _registry_maps(registry)["characters"]
+    values: set[str] = set()
+    protagonist_found = False
+    for registry_id, record in characters.items():
+        registry_id = _text_id(registry_id)
+        if registry_id:
+            values.add(registry_id)
+        if not isinstance(record, Mapping):
+            continue
+        record_ids = [
+            _text_id(record.get(key))
+            for key in (
+                "character_id",
+                "source_character_id",
+                "person_id",
+                "id",
+            )
+        ]
+        values.update(item_id for item_id in record_ids if item_id)
+        name = _text_id(record.get("name"))
+        if name:
+            values.add(name)
+        if (
+            registry_id.casefold() == "protagonist"
+            or any(item_id.casefold() == "protagonist" for item_id in record_ids if item_id)
+            or _text_id(record.get("role")).casefold() == "protagonist"
+            or "主人公" in _text_id(record.get("role"))
+        ):
+            protagonist_found = True
+    if protagonist_found:
+        values.add("protagonist")
+    return values
+
+
+def _iter_explicit_subject_values(segment: Mapping[str, Any]) -> Iterable[str]:
+    """Yield authored subject values from one location segment.
+
+    Only the subject-bearing keys in the segment contract are inspected.  In
+    particular, prose such as ``visible_action`` is not searched for names;
+    subject binding is an exact field-level contract rather than a substring
+    heuristic.
+    """
+
+    def value_text(value: Any) -> str:
+        # An absent value and an explicitly empty optional value both mean
+        # inheritance.  Other shapes remain visible as a non-matching token,
+        # which makes malformed authored subject data fail closed.
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return str(value)
+        return _text_id(value)
+
+    if "primary_subject" in segment:
+        subject = value_text(segment.get("primary_subject"))
+        if subject:
+            yield subject
+
+    by_function = segment.get("primary_subject_by_function")
+    if isinstance(by_function, Mapping):
+        for value in by_function.values():
+            subject = value_text(value)
+            if subject:
+                yield subject
+
+    def walk_override(value: Any) -> Iterable[str]:
+        if not isinstance(value, Mapping):
+            return
+        if "primary_subject" in value:
+            subject = value_text(value.get("primary_subject"))
+            if subject:
+                yield subject
+        obligation_overrides = value.get("obligation_overrides")
+        if isinstance(obligation_overrides, Mapping):
+            for obligation_override in obligation_overrides.values():
+                yield from walk_override(obligation_override)
+
+    beat_overrides = segment.get("beat_overrides")
+    if isinstance(beat_overrides, Mapping):
+        for override in beat_overrides.values():
+            yield from walk_override(override)
+
+
+def _validate_segment_subject_bindings(
+    scene: Mapping[str, Any],
+    registry: Mapping[str, Any],
+    errors: list[str],
+) -> None:
+    """Reject authored segment subjects that cannot resolve to one character.
+
+    This runs at the story/scene boundary, before p420 materializes cut
+    blueprints.  Optional subject fields are not required; when present they
+    must be one exact supported name, ID, or protagonist alias.
+    """
+
+    location = _mapping(scene.get("location"))
+    if location is None:
+        return
+    segments = location.get("segments")
+    if not isinstance(segments, (list, tuple)):
+        return
+    supported = _character_binding_values(registry)
+    for segment in segments:
+        if not isinstance(segment, Mapping):
+            continue
+        if any(subject not in supported for subject in _iter_explicit_subject_values(segment)):
+            _append_error(errors, "story.scene_primary_subject_binding_invalid")
+            return
+
+
 def _validate_scene_references(
     scene: Mapping[str, Any],
     maps: Mapping[str, Mapping[str, Any]],
@@ -1095,6 +1216,7 @@ def validate_story_document(
         scene_event_ids.extend(owned)
         _validate_scene_authoring_surface(scene, errors)
         _validate_scene_references(scene, maps, errors)
+        _validate_segment_subject_bindings(scene, registry, errors)
 
         beats = _sequence_beats(scene)
         if beats is not None:

@@ -86,6 +86,19 @@ cuts:
     deletion_reason: ""
     cut_contract:
       schema_version: "3.0"
+      expressive_contract:
+        schema_version: cut_expressive_contract_v1
+        source_value_refs: []
+        scene_amplification_ref: scene1.scene_intent.scene_value_amplification
+        audience_experience_delta: ''
+        expressive_function: recognition|withhold|pressure|release|contrast|reaction|reframe|afterimage|spectacle|transition
+        performance_beat: ''
+        visual_pressure: ''
+        attention_shift: ''
+        edit_trigger: ''
+        sound_function: ''
+        emotional_afterimage: ''
+        must_not_reduce_to: []
       source_event_contract:
         primary_event_beat_id: "scene1_event_01"
         source_event_beat_ids: ["scene1_event_01"]

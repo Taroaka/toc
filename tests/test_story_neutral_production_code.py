@@ -1,4 +1,5 @@
 from __future__ import annotations
+from story_profile_fixture import _story_profile as fixture_story_profile, _build_research as fixture_research
 
 import re
 import importlib.util
@@ -208,12 +209,10 @@ def test_generic_location_anchors_do_not_embed_scene_time_variants() -> None:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
 
-    time_tokens = re.compile(r"夜|朝|昼|夕|黄昏|月光|月明かり")
-    for variant in module.RUN_VARIANTS:
-        assert not any(
-            time_tokens.search(str(place))
-            for place in variant["places"]
-        ), variant
+    assert not hasattr(module, "RUN_VARIANTS")
+    profile = module._story_profile("作品名", "原文", "test")
+    assert profile["places"] == []
+    assert profile["scene_times_of_day"] == []
 
 
 def test_two_generic_stories_keep_scene_cut_and_first_frame_contracts() -> None:
@@ -237,10 +236,10 @@ def test_two_generic_stories_keep_scene_cut_and_first_frame_contracts() -> None:
             run_dir = Path(tmp)
             now = "2099-01-01T00:00:00+09:00"
             profile = module._duration_aware_profile(
-                module._story_profile(title, source, seed),
+                fixture_story_profile(title, source, seed),
                 target_duration_seconds=300,
             )
-            research = module._build_research(
+            research = fixture_research(
                 title,
                 run_dir,
                 now,

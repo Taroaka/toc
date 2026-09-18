@@ -36,7 +36,7 @@ def test_missing_artifacts_return_structural_result_without_scores(tmp_path: Pat
         "toc-run",
     )
 
-    assert set(result) == {"stage", "artifact", "passed", "checks", "details"}
+    assert set(result) == {"stage", "artifact", "passed", "reason_keys", "checks", "details"}
     assert result["passed"] is False
     assert updates == {}
 

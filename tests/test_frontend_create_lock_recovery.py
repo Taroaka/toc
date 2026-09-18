@@ -1247,7 +1247,7 @@ class FrontendCreateLockRecoveryTests(unittest.TestCase):
                     ),
                     patch.object(
                         image_gen_app,
-                        "_invalidate_published_image_generation_review_handoff",
+                        "_invalidate_published_image_generation_handoff",
                     ),
                     patch.object(
                         image_gen_app,
@@ -1317,7 +1317,7 @@ class FrontendCreateLockRecoveryTests(unittest.TestCase):
                     ),
                     patch.object(
                         image_gen_app,
-                        "_invalidate_published_image_generation_review_handoff",
+                        "_invalidate_published_image_generation_handoff",
                     ),
                     patch.object(
                         image_gen_app,

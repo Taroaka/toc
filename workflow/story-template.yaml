@@ -1,4 +1,6 @@
 # Minimal story output template (from docs/story-creation.md)
+# コピーしないこと：テンプレートの筋・人物・場所・小道具・例文を成果物へ流用しない。
+# 利用するのは項目と構造のみ。内容は対象の原作・調査結果に基づいて作ること。
 story_metadata:
   topic: "string"
   # New story artifacts are authored by the Story Architect / Scene Author

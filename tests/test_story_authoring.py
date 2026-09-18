@@ -237,3 +237,125 @@ def test_rich_story_validator_rejects_event_gap_and_handoff_mismatch() -> None:
 
     assert "story.scene_source_event_coverage" in errors
     assert "story.scene_handoff_state_mismatch" in errors
+
+
+def test_rich_story_validator_rejects_composite_segment_subject_before_cut_authoring() -> None:
+    registry = build_research_registry(_research("SEA"))
+    story = _story("SEA", registry)
+    story["script"]["scenes"][0]["location"].update(
+        {
+            "mode": "sequence",
+            "segments": [
+                {
+                    "location": "SEA-L01",
+                    "primary_subject": "SEA主人公と小さな鍵",
+                }
+            ],
+        }
+    )
+
+    errors = validate_story_document(story, registry)
+
+    assert "story.scene_primary_subject_binding_invalid" in errors
+
+
+@pytest.mark.parametrize(
+    ("subject_path", "subject"),
+    [
+        (("primary_subject",), "SEA主人公と小さな鍵"),
+        (("primary_subject_by_function", "source_event"), "帰還した主人公"),
+        (("beat_overrides", "source_event", "primary_subject"), "SEA主人公と小さな鍵"),
+        (
+            (
+                "beat_overrides",
+                "source_event",
+                "obligation_overrides",
+                "obligation_01",
+                "primary_subject",
+            ),
+            "帰還した主人公",
+        ),
+        *[
+            (path, value)
+            for path in (
+                ("primary_subject",),
+                ("primary_subject_by_function", "source_event"),
+                ("beat_overrides", "source_event", "primary_subject"),
+                ("beat_overrides", "source_event", "obligation_overrides", "obligation_01", "primary_subject"),
+            )
+            for value in (True, False)
+        ],
+    ],
+)
+def test_rich_story_validator_rejects_unsupported_explicit_subjects(
+    subject_path: tuple[str, ...], subject: str | bool
+) -> None:
+    registry = build_research_registry(_research("SEA"))
+    story = _story("SEA", registry)
+    segment = {
+        "location": "SEA-L01",
+        "primary_subject": "SEA主人公",
+        "primary_subject_by_function": {},
+        "beat_overrides": {},
+    }
+    cursor = segment
+    for key in subject_path[:-1]:
+        cursor[key] = {}
+        cursor = cursor[key]
+    cursor[subject_path[-1]] = subject
+    story["script"]["scenes"][0]["location"].update(
+        {"mode": "sequence", "segments": [segment]}
+    )
+
+    errors = validate_story_document(story, registry)
+
+    assert "story.scene_primary_subject_binding_invalid" in errors
+
+
+@pytest.mark.parametrize("subject", ["SEA主人公", "SEA-C01", "protagonist", "SEA同行者", "SEA-C02"])
+def test_rich_story_validator_accepts_exact_research_character_bindings(
+    subject: str,
+) -> None:
+    registry = build_research_registry(_research("SEA"))
+    story = _story("SEA", registry)
+    story["script"]["scenes"][0]["location"].update(
+        {
+            "mode": "sequence",
+            "segments": [
+                {
+                    "location": "SEA-L01",
+                    "primary_subject": subject,
+                    "primary_subject_by_function": {"source_event": subject},
+                    "beat_overrides": {
+                        "source_event": {
+                            "primary_subject": subject,
+                            "obligation_overrides": {
+                                "obligation_01": {"primary_subject": subject}
+                            },
+                        }
+                    },
+                }
+            ],
+        }
+    )
+
+    assert validate_story_document(story, registry) == []
+
+
+def test_rich_story_validator_ignores_absent_optional_subject_overrides() -> None:
+    registry = build_research_registry(_research("SEA"))
+    story = _story("SEA", registry)
+    story["script"]["scenes"][0]["location"].update(
+        {
+            "mode": "sequence",
+            "segments": [
+                {
+                    "location": "SEA-L01",
+                    "primary_subject_by_function": {},
+                    "beat_overrides": {},
+                }
+            ],
+        }
+    )
+
+    assert validate_story_document(story, registry) == []

@@ -1,6 +1,7 @@
 ---
 name: toc-narration
-description: Run the ToC script / narration authoring stage with the canonical script docs and current upstream source. Use when: drafting or revising narration-bearing script artifacts for a run.
+description: >
+  Run the ToC script / narration authoring stage with the canonical script docs and current upstream source. Use when: drafting or revising narration-bearing script artifacts for a run.
 ---
 
 # ToC Narration

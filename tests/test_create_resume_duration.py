@@ -146,6 +146,10 @@ class CreateResumeDurationTests(unittest.TestCase):
                 run_dir,
                 action="regenerate_p600_scene",
             )
+            from PIL import Image
+            asset = run_dir / "assets/characters/hero.png"
+            asset.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (64, 64), "white").save(asset)
             with (
                 patch("server.image_gen_app.ROOT", root),
                 patch("server.image_gen_app._current_process_number_for_run", return_value=650),
@@ -155,6 +159,7 @@ class CreateResumeDurationTests(unittest.TestCase):
                     side_effect=RuntimeError("p680 incomplete"),
                 ),
                 patch("server.image_gen_app._validate_p650_run"),
+                patch("server.image_gen_app._has_completed_app_server_image_provenance", return_value=True),
                 patch("server.image_gen_app._acquire_run_execution_lease", AsyncMock()),
                 patch("server.image_gen_app._create_process_record_best_effort", return_value=None),
                 patch("server.image_gen_app.write_app_server_debug_log"),
@@ -268,7 +273,7 @@ class CreateResumeDurationTests(unittest.TestCase):
         )
         run_image_only.assert_not_called()
 
-    def test_resume_with_strict_p650_rejects_malformed_asset_plan_before_scheduling(
+    def test_resume_with_strict_p650_rejects_malformed_asset_request_before_scheduling(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory(prefix="toc_resume_bad_asset_plan_") as td:
@@ -285,14 +290,8 @@ class CreateResumeDurationTests(unittest.TestCase):
                 run_dir,
                 action="regenerate_p500_reference_first",
             )
-            report_path = run_dir / "eval_report.json"
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-            report["stages"]["image"]["details"]["image_regeneration_plan"][0][
-                "vector_like_references"
-            ] = "assets/characters/hero.png"
-            report_path.write_text(
-                json.dumps(report) + "\n",
-                encoding="utf-8",
+            (run_dir / "asset_generation_request_snapshot.json").write_text(
+                "not valid JSON", encoding="utf-8"
             )
             acquire_lease = AsyncMock()
             create_task = Mock()
@@ -337,7 +336,7 @@ class CreateResumeDurationTests(unittest.TestCase):
                 self.assertEqual(image_gen_app._create_jobs, {})
 
         self.assertEqual(raised.exception.status_code, 409)
-        self.assertIn("p500 reference targets", str(raised.exception.detail))
+        self.assertIn("asset request snapshot", str(raised.exception.detail))
         acquire_lease.assert_awaited_once()
         create_task.assert_not_called()
         run_image_only.assert_not_called()

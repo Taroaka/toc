@@ -1,39 +1,16 @@
 ---
 name: hero-journey-cinematic-setpieces
-description: |
-  Hero’s Journey を保ちつつ、物語の主役級アイテム/舞台装置（setpiece/artifact）を “bible化” して映画品質へ引き上げる。
+description: 物語の重要な道具・舞台装置を、映像上の役割と一貫した外観を持つ ToC asset bible に設計する。
 metadata:
   tags: story, hero-journey, cinematic, setpiece, props, immersive
 ---
 
-## When to use
+# Cinematic Setpieces
 
-- 物語は成立しているが、映像化したときの“見せ場”が薄いとき
-- 竜宮城/玉手箱のような「背景ではなく重要要素」を、キャラ同様に設計して一貫させたいとき
-- 文字無し（字幕/看板/刻印なし）で、映像だけで理解が進む構成にしたいとき
+重要な道具や舞台装置の映像設計を求められたときに使う。既存の物語構造と原作の意味を保ち、別の物語のアイテムや一律の英雄の旅フェーズを押し込まない。
 
-## What to produce
-
-- `video_manifest.md` の `assets.object_bible`（設計の正本）
-- reference scene（`assets/objects/...png` を生成する scene）
-- 各sceneの `image_generation.object_ids`（混ざり防止）
-
-## Checklist（decision complete）
-
-1) 主役級 object を抽出（英雄の旅フェーズに割当）
-2) 各 object に以下を埋める:
-   - `cinematic.role`（映画での役割）
-   - `cinematic.visual_takeaways[]`（映像から与える情報）
-   - `cinematic.spectacle_details[]`（メイン筋と無関係でも魅力的な要素）
-   - `fixed_prompts[]`（材質/構造/機構/禁止を短文で）
-3) `reference_images[]` を必ず用意し、対応する reference scene を manifest に追加
-4) story scene では `object_ids: []|[...]` を必ず明示
-5) prompt 見出しは `GLOBAL/CHARACTERS/PROPS/SCENE/CONTINUITY/AVOID` の順（正本参照）
-
-## Where to look (source of truth)
-
-- 設計/契約: `docs/implementation/asset-bibles.md`
-- prompt の型: `docs/implementation/image-prompting.md`
-- 実装（注入/ゲート）: `scripts/generate-assets-from-manifest.py`
-- 運用（スキル編）: `workflow/playbooks/script/hero-journey-cinematic-setpieces.md`
-
+- 設計と schema は `docs/implementation/asset-bibles.md`、具体的な手順は `workflow/playbooks/script/hero-journey-cinematic-setpieces.md` を必要な範囲で読む。
+- プロンプトを執筆する場合は `docs/implementation/image-prompting.md` の現行形式を使う。
+- `video_manifest.md` の `assets.object_bible` に映画での役割、映像から伝わる情報、視覚的特徴、材質・構造・機構・不変条件を記録する。
+- story scene の `image_generation.object_ids` と asset 定義を対応づける。reference scene / `reference_images` の要件は選択した生成 lane の現行契約に従う。
+- 設計完了は必要な定義・参照・schema の整合で確認する。画像生成まで依頼された場合だけ、既存の asset materialization / generation 手順へ進む。

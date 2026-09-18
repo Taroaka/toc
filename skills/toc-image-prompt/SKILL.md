@@ -1,6 +1,7 @@
 ---
 name: toc-image-prompt
-description: Run the ToC image prompt / manifest authoring stage against the canonical prompt docs and current upstream artifacts. Use when: revising `video_manifest.md` prompts before image generation.
+description: >
+  Run the ToC image prompt / manifest authoring stage against the canonical prompt docs and current upstream artifacts. Use when: revising `video_manifest.md` prompts before image generation.
 ---
 
 # ToC Image Prompt

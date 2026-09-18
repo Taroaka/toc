@@ -1,65 +1,22 @@
 ---
 name: marketing-skills-router
-description: Use when the task is explicitly scoped to ToC marketing, including the public site, persona-specific LPs, digital acquisition, lead conversion, or SNS distribution under `marketing/`.
+description: Route ToC marketing work on its public site, landing pages, acquisition, conversion, SEO, or SNS to the relevant marketing docs.
 ---
 
-# Marketing Skills Router
+# ToC Marketing Router
 
-## Purpose
+Read `marketing/README.md` for current positioning and scope. Choose the relevant source below; do not preload every channel's guidance.
 
-This skill is the scoped gateway for marketing guidance in this repository. It keeps visitor acquisition and conversion rules available without leaking them into normal ToC production.
+| Task | Read |
+| --- | --- |
+| Offer, price, delivery scope, or comparison claims | `marketing/first-offer.md` |
+| Public site, landing page, or intake form | Relevant files under `marketing/LP/` |
+| Channel, campaign, or marketing analytics | Relevant files under `marketing/SNS/` |
+| YouTube marketing strategy | `marketing/SNS/YouTube/strategy.md` |
+| Google ranking improvement or seven-day observation | `skills/seo-rank-watch/SKILL.md`, then its referenced SEO workflow |
 
-Primary source:
+Keep product modes, personas, prices, eligibility counts, and comparison assumptions consistent with those canonical docs. They are maintained there rather than copied into this router.
 
-- `marketing/README.md`
-- `marketing/first-offer.md` for the first sellable offer and delivery boundary
+Apply marketing changes under `marketing/` and required pointers. Production story/script/media work and the generation frontend use their own contracts; marketing promises do not change production validation.
 
-Routed sources:
-
-- public site / LP / native form: `marketing/LP/`
-- SNS / channel distribution: `marketing/SNS/`
-- YouTube strategy: `marketing/SNS/YouTube/strategy.md`
-
-## Scope gate
-
-Use this skill when at least one is true:
-
-- the task creates, edits, reviews, or organizes files under `marketing/`
-- the task concerns the ToC public marketing site or persona-specific LPs
-- the task concerns digital acquisition, lead conversion, Meta / SNS routing, or marketing analytics for ToC
-
-Do not use this skill for normal:
-
-- research or story production
-- script or narration production
-- image or video generation
-- output run orchestration
-- production frontend behavior under `server/web/`
-
-## How to work
-
-1. Read `marketing/README.md` first.
-2. Select only the relevant slice:
-   - site / LP / form -> `marketing/LP/`
-   - channel / campaign / analytics -> `marketing/SNS/`
-3. Preserve the positioning boundary:
-   - ToC has exactly two production modes: `image_batch` for generating the necessary images together, and `video` for completing structure, images, motion, voice, and editing
-   - reuse across the same idea or assets is a shared strength, not a third production mode
-   - primary personas are side-business individuals and small-business operators; personal brand is a small-business use case
-   - the first focused persona is a side-business individual who wants to turn their knowledge or experience into a video using images that match their worldview; this persona does not redefine the entire side-business segment
-   - the first production mode for this persona is `video`; small-business operators remain the next market
-   - the first offer's core value is generating images that match the customer's brand or worldview and using them to complete a video; do not lead with faceless production, a generic production system, or a next-production promise
-   - the first 30 completed contracts receive the JPY 29,800 tax-included introductory price; the 31st and later receive JPY 59,800 tax included; count only after eligibility, contract, and payment steps are complete
-   - the three-video comparison assumes JPY 10,000 editing cost per video and must disclose excluded external-service costs, customer labor, and the absence of any income guarantee
-   - mythology / folklore are proof examples, not the product category
-4. Apply changes only to marketing-scoped files and required repo pointers.
-
-## Guardrails
-
-- Use plain Japanese for user-facing copy and explanations. Do not insert internal English terms mid-sentence. When a specialist concept is unavoidable, explain its meaning in Japanese before using it.
-- Never let marketing promises rewrite production quality gates.
-- Never use unmeasured speed claims, revenue guarantees, or fake scarcity.
-- Treat `large-volume image generation` as evidence-backed only; default to `necessary images in a managed batch` until requested/generated/accepted counts, time, cost, and review evidence are bound.
-- Keep side-business and small-business-operator personas separate in ads, LPs, CTA, and analytics.
-- Treat campaign-specific files as subordinate to `marketing/README.md`.
-- Do not use Notion or Google Forms as the canonical public site / intake route.
+Use plain Japanese in public copy. Support speed, volume, price-comparison, and scarcity claims with the required evidence; do not invent revenue guarantees or performance measurements. Preserve the distinct persona routes and the canonical public intake channel defined in `marketing/README.md`.

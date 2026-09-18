@@ -54,6 +54,15 @@
 - `beat_overrides: {}`: 同じ authored `beat_function` を key に、その beat の具体的な action / reaction / evidence / roles / character state / motion boundary を上書きする。`setup` / `pressure` / `turn` / `payoff` / `threshold` / `custom` は候補例であり、固定 ladder ではない
 - `beat_overrides.<function>.obligation_overrides.<obligation_id>`: 同じ beat から複数 cut 責務が作られる場合に、その obligation の cut だけを具体化する。scene 全体や同 function の別 cut を変更しない
 
+`primary_subject` を author する場合、値は research registry の character key / ID または
+character `name` のいずれか一つとし、主人公だけは canonical alias `protagonist` も使える。
+`primary_subject_by_function` と `beat_overrides`（`obligation_overrides` を含む）の値にも同じ
+exact binding を適用する。人物名と小道具を組み合わせたり、状態を修飾した人物名を書いたりする
+表現は一つの character binding ではないため、visual evidence / action prose に置く。これらの
+optional map がない、または空 map のときは上位値を継承し、subject がないことだけで scene を
+reject しない。構造検証は cut blueprint の authoring 前にこの exact binding を確認し、
+名前の部分一致や heuristic な正規化で別の人物へ解決しない。
+
 必須 coverage は function 名ではなく、`scene_cut_coverage_plan.event_beat_inventory[].beat_id` が `scene_event.event_sequence[].beat_id` の ordered nonblank list と exact に一致することで判定する。inventory は `must_be_seen: false` を含む全 authored ID と順序を保ち、そのうち `must_be_seen != false` の beat だけを cut assignment へ投影する。独自 function の1 beatだけを authored した scene も、固定 function がないことだけを理由に reject しない。
 
 `obligation_overrides.<obligation_id>` で使う値は、次の描画・motion 設計 key に限定する。

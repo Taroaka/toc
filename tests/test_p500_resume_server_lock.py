@@ -209,13 +209,6 @@ class P500ResumeServerLockTests(unittest.TestCase):
                     "server.image_gen_app._validate_image_prompt_request_revision",
                     return_value="revision-1",
                 ),
-                patch("server.image_gen_app._validate_semantic_reviews"),
-                patch(
-                    "server.image_gen_app._validate_semantic_reviews_for_media_generation"
-                ),
-                patch(
-                    "server.image_gen_app._refresh_deterministic_image_prompt_review_if_stale"
-                ),
             ):
                 image_gen_app._validate_materialized_p650_run("sample")
 
@@ -242,20 +235,12 @@ class P500ResumeAssetGenerationTests(unittest.IsolatedAsyncioTestCase):
                     "server.image_gen_app._set_create_job",
                     new=AsyncMock(),
                 ),
-                patch(
-                    "server.image_gen_app._run_pre_asset_semantic_fixed_point",
-                    new=AsyncMock(return_value=None),
-                ),
                 patch("server.image_gen_app._validate_pre_asset_provider_gate"),
-                patch(
-                    "server.image_gen_app._run_semantic_review_for_media_generation",
-                    new=AsyncMock(return_value=None),
-                ),
                 patch(
                     "server.image_gen_app._generate_request_outputs",
                     new=AsyncMock(),
                 ),
-                patch("server.image_gen_app._validate_p560_asset_quality"),
+                patch("server.image_gen_app._validate_generated_outputs"),
                 patch(
                     "server.image_gen_app._generate_scene_outputs_after_p650_preflight",
                     new=AsyncMock(side_effect=record_preflight),

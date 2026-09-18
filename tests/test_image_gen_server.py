@@ -3282,7 +3282,7 @@ class ImageGenParserTests(unittest.TestCase):
                     patch("server.image_gen_app.ROOT", root),
                     patch("server.image_gen_app.create_codex_app_server_client", FakeClient),
                     patch("server.image_gen_app._run_toc_immersive_frontend_cli_helper", fake_frontend_cli_helper),
-                    patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
+                    patch("server.image_gen_app._validate_p680_outputs", Mock()),
                 ):
                     asyncio.run(image_gen_app._run_toc_skill_helper(topic="桃太郎", source="鬼ヶ島の資料", run_id=run_id))
 
@@ -5125,7 +5125,7 @@ cinematic character portrait
                 }
             )
 
-            with self.assertRaisesRegex(CodexAppServerError, "model unsupported"):
+            with patch.object(client, "diagnostics", return_value={}), self.assertRaisesRegex(CodexAppServerError, "model unsupported"):
                 await client.run_turn(thread_id="thread-1", text="hello", timeout_seconds=1)
 
         asyncio.run(run())
@@ -5140,7 +5140,7 @@ cinematic character portrait
             client.request = fake_request  # type: ignore[method-assign]
             await client._notifications.put({"method": "approval/requested", "params": {"turnId": "turn-1"}})
 
-            with self.assertRaisesRegex(CodexAppServerError, "interactive approval"):
+            with patch.object(client, "diagnostics", return_value={}), self.assertRaisesRegex(CodexAppServerError, "interactive approval"):
                 await client.run_turn(thread_id="thread-1", text="hello", timeout_seconds=1)
 
         asyncio.run(run())
@@ -7062,7 +7062,7 @@ class ImageGenApiTests(unittest.TestCase):
                 patch("server.image_gen_app.ROOT", root),
                 patch("server.image_gen_app.CREATE_SKILL_STOP_POLL_SECONDS", 0.01),
                 patch("server.image_gen_app._run_toc_skill_helper", fake_toc_skill_helper),
-                patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
+                patch("server.image_gen_app._validate_p680_outputs", Mock()),
             ):
                 asyncio.run(
                     image_gen_app._run_toc_skill_helper_until_stop_target(
@@ -7298,7 +7298,7 @@ class ImageGenApiTests(unittest.TestCase):
                         provider,
                     ),
                     patch(
-                        "server.image_gen_app._mark_image_generation_review_ready",
+                        "server.image_gen_app._mark_image_generation_complete",
                         mark_ready,
                     ),
                 ):
@@ -7355,7 +7355,7 @@ class ImageGenApiTests(unittest.TestCase):
                 patch("server.image_gen_app._set_create_job", fake_set_create_job),
                 patch("server.image_gen_app._generate_request_outputs_unlocked", fake_generate),
                 patch("server.image_gen_app._validate_generated_outputs", Mock()),
-                patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
+                patch("server.image_gen_app._validate_p680_outputs", Mock()),
                 patch("server.image_gen_app._finalize_p600_supervisor_result", Mock()),
             ):
                 asyncio.run(
@@ -13128,8 +13128,8 @@ scene two
                 patch("server.image_gen_app._set_create_job", fake_set_create_job),
                 patch("server.image_gen_app._generate_request_outputs_unlocked", fake_generate_unlocked),
                 patch("server.image_gen_app._validate_generated_outputs", Mock()),
-                patch("server.image_gen_app._validate_p680_visual_quality", Mock()),
-                patch("server.image_gen_app._mark_image_generation_review_ready", fake_mark_complete),
+                patch("server.image_gen_app._validate_p680_outputs", Mock()),
+                patch("server.image_gen_app._mark_image_generation_complete", fake_mark_complete),
             ):
                 generation = asyncio.create_task(
                     image_gen_app._generate_scene_outputs_after_p650_preflight(

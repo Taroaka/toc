@@ -1,6 +1,7 @@
 ---
 name: toc-scene-design
-description: Run the ToC story / scene design stage with the canonical story docs and source context. Use when: turning `research.md` into `story.md` for a run directory.
+description: >
+  Run the ToC story / scene design stage with the canonical story docs and source context. Use when: turning `research.md` into `story.md` for a run directory.
 ---
 
 # ToC Scene Design

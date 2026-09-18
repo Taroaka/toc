@@ -94,3 +94,18 @@ def test_narration_validator_only_checks_declared_media_files(tmp_path: Path) ->
     assert "narration.text_review" not in ids
     assert "narration.duration_fit" not in ids
     assert all("semantic" not in check_id for check_id in ids)
+
+
+def test_visual_projection_accepts_direct_ids_and_canonical_runtime_ids(tmp_path: Path) -> None:
+    import yaml
+    from toc.stage_evaluation.research_story import check_visual_value
+
+    for scenes in (
+        [{"scene_id": 10}, {"scene_id": 20}],
+        [{"scene_id": "SC01", "canonical_scene_index": 1}, {"scene_id": "SC02", "canonical_scene_index": 2}],
+    ):
+        (tmp_path / "story.md").write_text(yaml.safe_dump({"script": {"scenes": scenes}}))
+        (tmp_path / "visual_value.md").write_text(yaml.safe_dump({"scene_visual_values": [{"scene_selector": 10}, {"scene_selector": 20}]}))
+        stage, _ = check_visual_value(tmp_path, "fast")
+        coverage = next(check for check in stage["checks"] if check["id"] == "visual_value.scene_coverage")
+        assert coverage["passed"], coverage
