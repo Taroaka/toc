@@ -39,6 +39,7 @@ ToCの制作方針として、次の2点を重視します。
 - Asset bibles（object / setpiece）: `docs/implementation/asset-bibles.md`
 - Image prompting（Codex built-in image generation / gpt-image-2）: `docs/implementation/image-prompting.md`
 - Assistant tooling（Claude/Codex）: `docs/implementation/assistant-tooling.md`
+- Higgsfield MCP（任意・無効な設定例）: [接続準備](implementation/higgsfield-mcp.md)
 - Entrypoint (/toc-run): `docs/implementation/entrypoint.md`
 - Entrypoint (/toc-scene-series): `docs/implementation/scene-series-entrypoint.md`
 - Entrypoint (/toc-immersive-ride): `docs/implementation/immersive-ride-entrypoint.md`

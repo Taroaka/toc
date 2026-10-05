@@ -163,3 +163,9 @@ scripts/ai/install-claude-rules.sh
 ```
 
 ※ 影響範囲は全プロジェクトになるため、不要なら削除/運用で調整する。
+
+## 任意のメディア生成 MCP
+
+Higgsfield の公式 remote MCP 接続準備は [Higgsfield MCP](higgsfield-mcp.md) を参照。
+設定例は自動読込せず初期状態は無効。OAuth と利用料金の確認は利用開始時に行う。
+ToC の自動生成 provider は、このエージェント用接続とは別に管理する。
