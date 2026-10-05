@@ -37,6 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from toc.script_narration import is_b_roll, resolve_manifest_narration
 from toc.story_duration import measure_manifest_runtime  # noqa: E402
 
 
@@ -162,23 +163,19 @@ def _round_duration(seconds: float, *, mode: str) -> int:
 
 
 def _is_intentional_silent(container: dict) -> bool:
-    audio = container.get("audio")
-    if not isinstance(audio, dict):
-        return False
-    narration = audio.get("narration")
+    narration = resolve_manifest_narration(container)
     if not isinstance(narration, dict):
         return False
     return (_as_opt_str(narration.get("tool")) or "").strip().lower() == "silent"
 
 
 def _has_complete_silence_contract(container: dict) -> bool:
-    audio = container.get("audio")
-    narration = audio.get("narration") if isinstance(audio, dict) else None
+    narration = resolve_manifest_narration(container)
     contract = narration.get("silence_contract") if isinstance(narration, dict) else None
     return (
         isinstance(contract, dict)
         and contract.get("intentional") is True
-        and contract.get("confirmed_by_human") is True
+        and (is_b_roll(container) or contract.get("confirmed_by_human") is True)
         and bool(str(contract.get("kind") or "").strip())
         and bool(str(contract.get("reason") or "").strip())
     )

@@ -277,6 +277,8 @@ scenes:
       - cut_id: "scene_01_cut_01"
         cut_contract:
           schema_version: "3.0"
+          # Optional discriminator; B-roll audio and subtitles may each be omitted.
+          # a_roll_or_b_roll: b_roll
           expressive_contract:
             schema_version: cut_expressive_contract_v1
             scene_amplification_ref: scene1.scene_intent.scene_value_amplification

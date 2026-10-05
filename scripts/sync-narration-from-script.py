@@ -32,7 +32,7 @@ from toc.immersive_manifest import (
 from toc.narration_revision import apply_authoring_update, ensure_narration_revision
 from toc.narration_continuity import invalidate_stale_tts_context_audio, reconcile_audio_story_text
 from toc.runtime_locks import sync_file_lock
-from toc.script_narration import resolve_script_cut_tts_text
+from toc.script_narration import is_b_roll, resolve_manifest_narration, resolve_script_cut_tts_text
 
 
 def replace_yaml_block(text: str, new_yaml: str) -> str:
@@ -485,6 +485,12 @@ def _sync_human_fields_to_manifest_cut(
 ) -> tuple[bool, bool]:
     changed = False
     narration_changed = False
+    source_contract = _as_dict(script_cut.get("cut_contract"))
+    if "a_roll_or_b_roll" in source_contract:
+        contract = _as_dict(cut.get("cut_contract"))
+        if contract.get("a_roll_or_b_roll") != source_contract["a_roll_or_b_roll"]:
+            cut["cut_contract"] = {**contract, "a_roll_or_b_roll": source_contract["a_roll_or_b_roll"]}
+            changed = True
     narration = _ensure_audio_narration(cut)
     authoring = _as_dict(script_cut.get("narration_authoring"))
     tool = str(
@@ -496,6 +502,18 @@ def _sync_human_fields_to_manifest_cut(
 
     new_text = preferred_text(script_cut)
     new_tts_text = preferred_tts_text(script_cut)
+    # Script authoring can omit B-roll speech without a per-cut human approval.
+    # An explicit voiced provider or existing requested audio still fails closed.
+    source_tool = script_cut.get("narration_tool") or authoring.get("tool")
+    if is_b_roll(cut) and (new_text or new_tts_text) and source_tool in (None, "") and tool == "silent":
+        tool = "elevenlabs"  # Authored speech may replace the optional B-roll silence.
+    if not new_text and not new_tts_text and source_tool in (None, "", "silent"):
+        optional_narration = resolve_manifest_narration(cut)
+        if optional_narration and optional_narration.get("tool") == "silent" and is_b_roll(cut):
+            tool = "silent"
+            if "silence_contract" not in narration:
+                narration["silence_contract"] = dict(optional_narration["silence_contract"])
+                changed = True
     revision = ensure_narration_revision(narration)
     human_review = _as_dict(script_cut.get("human_review"))
     authoring_status = str(authoring.get("status") or "").strip()

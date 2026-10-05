@@ -16,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from toc.script_narration import resolve_manifest_narration
 from toc.immersive_manifest import (
     default_story_scene_start,
     dotted_id_slug,
@@ -176,9 +177,7 @@ def _audio_story_scratch(scene_ids: list[str], locked_cut_inputs: list[dict]) ->
 
 
 def _cut_audio_narration(cut: dict) -> dict:
-    audio = cut.get("audio") if isinstance(cut.get("audio"), dict) else {}
-    narration = audio.get("narration") if isinstance(audio.get("narration"), dict) else {}
-    return narration
+    return resolve_manifest_narration(cut) or {}
 
 
 def _authoring_status(narration: dict) -> str:
@@ -198,6 +197,9 @@ def _locked_cut_inventory(manifest_scenes: list[dict], targets: list[str]) -> li
             cut_id = _normalized_id(cut.get("cut_id"))
             assert cut_id is not None
             narration = _cut_audio_narration(cut)
+            raw_audio = cut.get("audio") if isinstance(cut.get("audio"), dict) else {}
+            if narration is not raw_audio.get("narration"):
+                continue  # Omitted B-roll speech is optional, not a user text lock.
             status = _authoring_status(narration)
             if status not in {"human_locked", "reviewed", "silent"}:
                 continue
@@ -219,7 +221,8 @@ def _scene_cut_scratch(cut_id: str, manifest_cut: dict | None) -> dict:
     manifest_cut = manifest_cut or {}
     narration = _cut_audio_narration(manifest_cut)
     status = _authoring_status(narration)
-    locked = status in {"human_locked", "reviewed", "silent"}
+    raw_audio = manifest_cut.get("audio") if isinstance(manifest_cut.get("audio"), dict) else {}
+    locked = status in {"human_locked", "reviewed", "silent"} and narration is raw_audio.get("narration")
     text = str(narration.get("text") or "").strip()
     tts_text = str(narration.get("tts_text") or text).strip()
     return {
@@ -380,7 +383,9 @@ def _prompt_text(manifest_data: dict, targets: list[str]) -> str:
         "",
         "## Blocking rules",
         "",
-        "- 空文字、TODO、選択肢のままのenum、仮文を残さない。",
+        "- Bロールの音声・字幕はそれぞれ任意。音声なしなら空の narration_text / tts_text を保持し、字幕も必須にしない。指定済み内容は保持する。",
+        "- 発話するcutに空文字、TODO、選択肢のままのenum、仮文を残さない。",
+        "- 全cutが音声なしのBロールなら、通し原稿やvoiced spanを捏造せず空のままにする。",
         "- 全sceneに `scene_arcs` を1件ずつ置き、attention_state / audience_state_before / audience_state_after / semantic_load を具体化する。",
         "- voiced spanは text / tts_text / tts_generation_group_id / source_cut_ids を必須とする。",
         "- 各voiced cutは、原則ちょうど1つのvoiced spanへanchorする。",

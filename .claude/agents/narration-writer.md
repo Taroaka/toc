@@ -43,7 +43,9 @@ model: inherit
 例外:
 
 - `audio.narration.tool: "silent"` の cut は、`text: ""` のままでよい
-- これは `visual_value.md` に基づく視覚報酬カットなど、意図的に無音にする場面だけに使う
+- Bロール (`cut_contract.a_roll_or_b_roll: b_roll`、または既存manifestのshot-design内の同名値) は音声・字幕をそれぞれ任意にする。両方なし、片方のみ、両方ありを許可する
+- Bロールで音声を省略する場合は空の `narration` / `tts_text` とし、発話providerを指定しない。文字数・cut数を満たすために音声や字幕を補わない。指定済みの音声・字幕は保持する
+- Bロール以外の未記入検知と明示無音契約は維持する
 
 ## 全編先行フロー
 

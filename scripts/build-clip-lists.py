@@ -11,6 +11,10 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
+import math
+import subprocess
+import tempfile
 import re
 import sys
 from pathlib import Path
@@ -25,6 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from toc.script_narration import is_b_roll, resolve_manifest_narration
 from toc.run_index import write_run_index
 from toc.immersive_manifest import (
     is_non_renderable_manifest_node,
@@ -147,7 +152,48 @@ def _append_render_unit_outputs(
         )
 
 
-def parse_manifest(path: Path) -> tuple[list[str], list[str], list[dict[str, object]]]:
+def _prepare_broll_silence(data: dict, run_dir: Path, *, materialize: bool) -> None:
+    """Pad audio-free B-roll in concat lists so later narration keeps its timing.
+
+    Only the in-memory projection changes. These local render padding files are
+    not TTS outputs and never replace authored audio or the canonical manifest.
+    """
+    for scene in data.get("scenes") or []:
+        if not isinstance(scene, dict) or is_non_renderable_manifest_node(scene):
+            continue
+        cuts = scene.get("cuts")
+        for node in cuts if isinstance(cuts, list) and cuts else [scene]:
+            if not isinstance(node, dict) or is_non_renderable_manifest_node(node) or not is_b_roll(node):
+                continue
+            narration = resolve_manifest_narration(node) or {}
+            silence = narration.get("silence_contract") or {}
+            if narration.get("tool") != "silent" or narration.get("output") or not isinstance(silence, dict) or silence.get("intentional") is not True:
+                continue
+            generation = node.get("video_generation") or {}
+            raw_duration = generation.get("duration_seconds") if isinstance(generation, dict) else None
+            try:
+                duration = float(raw_duration)
+            except (TypeError, ValueError):
+                raise SystemExit("audio-free B-roll requires positive video_generation.duration_seconds")
+            if isinstance(raw_duration, bool) or not math.isfinite(duration) or duration <= 0:
+                raise SystemExit("audio-free B-roll requires positive video_generation.duration_seconds")
+            duration_key = hashlib.sha256(repr(duration).encode()).hexdigest()[:16]
+            relative = f"assets/audio/render_padding/b_roll_{duration_key}.mp3"
+            destination = run_dir / relative
+            if materialize and not destination.is_file():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(dir=destination.parent) as scratch:
+                    temporary = Path(scratch) / "silence.mp3"
+                    subprocess.run([
+                        "ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+                        "-i", "anullsrc=r=44100:cl=mono", "-t", str(duration),
+                        "-c:a", "libmp3lame", "-b:a", "128k", str(temporary),
+                    ], check=True)
+                    temporary.replace(destination)
+            node["audio"] = {**(node.get("audio") or {}), "narration": {**narration, "output": relative}}
+
+
+def parse_manifest(path: Path, *, materialize_silence: bool = False) -> tuple[list[str], list[str], list[dict[str, object]]]:
     if yaml is None:  # pragma: no cover
         raise SystemExit("PyYAML is required for scripts/build-clip-lists.py")
 
@@ -155,6 +201,8 @@ def parse_manifest(path: Path) -> tuple[list[str], list[str], list[dict[str, obj
     data = yaml.safe_load(extract_yaml_block(raw_text))
     if not isinstance(data, dict):
         raise SystemExit(f"Manifest root must be a mapping: {path}")
+
+    _prepare_broll_silence(data, path.parent, materialize=materialize_silence)
 
     clips: list[str] = []
     narrations: list[str] = []
@@ -309,7 +357,7 @@ def main() -> None:
         raise SystemExit("No manifest files found. Use --manifest, --story-dir, or --dir.")
 
     for manifest in manifest_paths:
-        clips, narrations, exclusions = parse_manifest(manifest)
+        clips, narrations, exclusions = parse_manifest(manifest, materialize_silence=not args.dry_run)
 
         base = manifest.stem
         if base.endswith("_manifest"):

@@ -39,6 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from toc.script_narration import is_b_roll, resolve_manifest_narration
 from toc.env import load_env_files
 from toc.asset_prompt_compiler import ASSET_PROMPT_COMPILER_VERSION
 from toc.harness import append_state_snapshot, load_structured_document, parse_state_file
@@ -202,6 +203,7 @@ class SceneSpec:
     narration_silence_kind: str | None
     narration_silence_reason: str | None
     still_assets: list[dict[str, Any]]
+    is_b_roll: bool = False
     image_asset_id: str | None = None
     image_asset_type: str | None = None
     image_execution_lane: str | None = None
@@ -1466,12 +1468,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 narration_silence_kind = None
                 narration_silence_reason = None
 
-                audio = raw_cut.get("audio")
-                narration = None
-                if isinstance(audio, dict):
-                    narration = audio.get("narration")
-                if narration is None:
-                    narration = raw_cut.get("narration")
+                narration = resolve_manifest_narration(raw_cut)
                 if isinstance(narration, dict):
                     narration_tool = _as_opt_str(narration.get("tool"))
                     narration_text = _as_opt_str(narration.get("text"))
@@ -1534,6 +1531,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                         video_aspect_ratio=video_aspect_ratio,
                         video_output=video_output,
                         video_applied_request_ids=video_applied_request_ids,
+                        is_b_roll=is_b_roll(raw_cut),
                         narration_tool=narration_tool,
                         narration_text=narration_text,
                         narration_tts_text=narration_tts_text,
@@ -1645,12 +1643,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
         narration_silence_kind = None
         narration_silence_reason = None
 
-        audio = raw_scene.get("audio")
-        narration = None
-        if isinstance(audio, dict):
-            narration = audio.get("narration")
-        if narration is None:
-            narration = raw_scene.get("narration")
+        narration = resolve_manifest_narration(raw_scene)
         if isinstance(narration, dict):
             narration_tool = _as_opt_str(narration.get("tool"))
             narration_text = _as_opt_str(narration.get("text"))
@@ -1713,6 +1706,7 @@ def _parse_manifest_yaml_pyyaml(yaml_text: str) -> tuple[dict, AssetGuides, list
                 video_aspect_ratio=video_aspect_ratio,
                 video_output=video_output,
                 video_applied_request_ids=video_applied_request_ids,
+                is_b_roll=is_b_roll(raw_scene),
                 narration_tool=narration_tool,
                 narration_text=narration_text,
                 narration_tts_text=narration_tts_text,
@@ -3611,7 +3605,7 @@ def validate_scene_narration(
 
         narration_source = scene.narration_tts_text or scene.narration_text
         if tool == "silent":
-            if not scene.narration_silence_intentional or not scene.narration_silence_confirmed_by_human:
+            if not scene.narration_silence_intentional or not (scene.is_b_roll or scene.narration_silence_confirmed_by_human):
                 raise SystemExit(
                     f"scene{scene.scene_id}: silent narration requires "
                     "audio.narration.silence_contract.intentional=true and confirmed_by_human=true."
