@@ -1,0 +1,1 @@
+2026-10-09: 現行38cutは物語assets/audio内に保存済み。重複コピー0、再生成0。38ファイルでhash一致・ffmpeg decode確認。30候補をselectedへ正規化し、全38cutに今回のユーザー承認を記録。state.currentとrun_statusで38cut採用の一致を確認。stage.narrationはin_progress。残件20: scene1の8cutは現行revisionの音声がなく、12の旧形式silent cutはreadinessで未完扱い。候補hash/原稿の改ざんや無音の勝手な実音声化は行っていない。Pointer docs valid、対象doc diff check成功。

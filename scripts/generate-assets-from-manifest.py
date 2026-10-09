@@ -75,9 +75,11 @@ from toc.immersive_manifest import (
 )
 from toc.providers.elevenlabs import (
     DEFAULT_ELEVENLABS_LANGUAGE_CODE,
+    DEFAULT_ELEVENLABS_MODEL_ID,
     DEFAULT_ELEVENLABS_VOICE_ID,
     ElevenLabsClient,
     ElevenLabsConfig,
+    normalize_elevenlabs_model_id,
     parse_pronunciation_dictionary_locators,
 )
 from toc.providers.evolink import EvoLinkClient, EvoLinkConfig
@@ -2954,7 +2956,7 @@ def _generate_single_audio_scene(
         generate_elevenlabs_tts(
             client=elevenlabs_client,
             voice_id=str((args.elevenlabs_voice_id or DEFAULT_ELEVENLABS_VOICE_ID)),
-            model_id=args.elevenlabs_model_id or "eleven_v3",
+            model_id=args.elevenlabs_model_id or DEFAULT_ELEVENLABS_MODEL_ID,
             output_format=args.elevenlabs_output_format or "mp3_44100_128",
             language_code=args.elevenlabs_language_code or DEFAULT_ELEVENLABS_LANGUAGE_CODE,
             pronunciation_dictionary_locators=getattr(args, "elevenlabs_pronunciation_dictionary_locators", ()),
@@ -3258,6 +3260,18 @@ def _expand_character_bible_with_existing_refstrips(
 
 
 def merge_asset_references_into_scene(*, scene: SceneSpec, guides: AssetGuides, character_refs_mode: str) -> None:
+    if scene.image_first_frame_visual_plan.get('cut_role') == 'sub':
+        if scene.image_character_ids or scene.image_character_variant_ids:
+            raise ValueError('b_roll.character_reference_forbidden')
+        cast_refs = {
+            ref for entry in guides.character_bible or []
+            for ref in _all_reference_images(entry.reference_images, entry.reference_variants)
+        }
+        if cast_refs.intersection(scene.image_references or []):
+            raise ValueError('b_roll.character_reference_forbidden')
+        # The authored sub payload already binds its location/object references.
+        # Global cast/style references must not silently enter a frozen sub request.
+        return
     style_refs = guides.style_guide.reference_images if guides.style_guide else []
     # Preserve explicit scene references as-authored, including self-references used for edit-style regeneration.
     explicit_refs = _dedupe_keep_order(list(scene.image_references or []))
@@ -3611,7 +3625,10 @@ def validate_scene_narration(
 
         narration_source = scene.narration_tts_text or scene.narration_text
         if tool == "silent":
-            if not scene.narration_silence_intentional or not scene.narration_silence_confirmed_by_human:
+            authored_b_roll = (scene.cut_contract.get('cut_role') == 'sub'
+                and scene.cut_contract.get('b_roll_policy') == 'boundary_b_roll_v1'
+                and scene.narration_silence_kind == 'b_roll')
+            if not scene.narration_silence_intentional or not (scene.narration_silence_confirmed_by_human or authored_b_roll):
                 raise SystemExit(
                     f"scene{scene.scene_id}: silent narration requires "
                     "audio.narration.silence_contract.intentional=true and confirmed_by_human=true."
@@ -3695,6 +3712,7 @@ def generate_macos_say_tts(
 ) -> None:
     if out_path.exists() and not force:
         return
+
     if dry_run:
         v = f" voice={voice}" if (voice or "").strip() else ""
         print(f"[dry-run] AUDIO {out_path} <- macos_say{v}")
@@ -3931,6 +3949,7 @@ def generate_elevenlabs_tts(
     if out_path.exists() and not force:
         return
 
+    model_id = normalize_elevenlabs_model_id(model_id)
     payload: dict = {
         "text": text,
         "model_id": model_id,
@@ -3938,8 +3957,6 @@ def generate_elevenlabs_tts(
         "voice_settings": {
             "stability": 0.35,
             "similarity_boost": 0.75,
-            "style": 0.0,
-            "use_speaker_boost": True,
         },
     }
 
@@ -8697,7 +8714,7 @@ def main() -> None:
     parser.add_argument("--elevenlabs-api-key", default=_env("ELEVENLABS_API_KEY"))
     parser.add_argument("--elevenlabs-api-base", default=_env("ELEVENLABS_API_BASE", "https://api.elevenlabs.io/v1"))
     parser.add_argument("--elevenlabs-voice-id", default=_env("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID))
-    parser.add_argument("--elevenlabs-model-id", default=_env("ELEVENLABS_MODEL_ID", "eleven_v3"))
+    parser.add_argument("--elevenlabs-model-id", default=_env("ELEVENLABS_MODEL_ID", DEFAULT_ELEVENLABS_MODEL_ID))
     parser.add_argument("--elevenlabs-output-format", default=_env("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128"))
     parser.add_argument("--elevenlabs-language-code", default=_env("ELEVENLABS_LANGUAGE_CODE", DEFAULT_ELEVENLABS_LANGUAGE_CODE))
     parser.add_argument(
@@ -8724,6 +8741,7 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    args.elevenlabs_model_id = normalize_elevenlabs_model_id(args.elevenlabs_model_id)
     if args.chain_first_frame_from_prev_video:
         raise SystemExit(
             "--chain-first-frame-from-prev-video is deprecated and unsupported. "
@@ -9840,4 +9858,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from toc.production_diagnostics import diagnostic_cli
+    diagnostic_cli(main)

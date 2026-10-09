@@ -177,6 +177,7 @@ Meta / YouTube / SNS / 検索
 - 紹介ページの調査と設計: `marketing/LP/lp-strategy.md`
 - 顧客層と伝える内容: `marketing/LP/personas.md`
 - SNS 配信: `marketing/SNS/`
+- ToC作品・サービス・ECのAI広告制作: [AI広告制作](AI-ads/README.md)（スキル入口: `skills/ai-ad-creative/SKILL.md`）
 - YouTube 方針: `marketing/SNS/YouTube/strategy.md`
 - Google 検索順位の継続改善: [SEO Rank Watch](SEO/rank-watch.md)（スキル入口: `skills/seo-rank-watch/SKILL.md`）
 - 立ち位置変更の記録: `.steering/20260718-marketing-site-repositioning/`
@@ -220,12 +221,14 @@ marketing/
 ├── browser-use.md
 ├── LP/
 ├── SEO/
+├── AI-ads/
 └── SNS/
 ```
 
 - `LP/`: 独立した公開サイト、共通の紹介ページ、顧客層別の紹介ページ、サイト内フォームの正本
 - `SNS/`: 公開サイトへ案内し、ToC の価値を実例で示す各配信先の正本
 - `SEO/`: 検索順位の測定、1回1キーワードの改善、7日観察と効果判定の運用手順
+- `AI-ads/`: 広告教材の参照記録、ToC作品・サービス・ECの広告制作と比較テストの手順
 - `go-to-market.md`: 複数スレッドで販売準備・問い合わせ獲得・反応分析を並行するための分担
 - `positioning-and-offer.md`: スレッド1が管理する対象顧客、提供内容の仮説、商談対象の条件、下流への引き継ぎの正本
 - `first-offer.md`: 最初の顧客像へ販売する商品、納品物、役割分担、価格決定条件の正本

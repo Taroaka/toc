@@ -8,6 +8,7 @@ story_metadata:
   scene_authoring_contract: "story_scene_contract_v1"
   story_author_model: "gpt-6-astra"
   scene_author_model: "gpt-6-astra"
+  repair_author_model: "gpt-6-luna"
   # 既存物語を映像化する場合のみ、次のコメントを外す。original_story では key 自体を出力しない。
   # adaptation_value_contract: "required_v1"
   # scene time-of-day 新契約の明示マーカー。Historical time の有無で代用しない。
@@ -78,6 +79,12 @@ outcome_contract:
 # - “創造”で多様性を出し、“選択”で source grounding と映像化可能性を確認する。
 # - Hero's Journey への当てはめは必須ではない（フレームワークは道具）。
 selection:
+  event_selection_contract: "story_event_selection_v1"
+  selected_variant_ids: ["REPLACE_ME_VARIANT_ID"] # 未指定時はもっとも広く知られる一版
+  selected_event_ids: ["REPLACE_ME_EVENT_ID"] # coverageはこの集合のみ
+  selection_rationale: "REPLACE_ME: 指定版または一般に知られた筋を採る理由"
+  familiarity_basis: "REPLACE_ME: 対象視聴者・普及の根拠・不確実性"
+  omitted_events: [] # 採用版内で省く場合 {event_id, reason}。他版は使わなくてよい。
   candidates:
     - candidate_id: "A"
       logline: "string"
@@ -231,9 +238,18 @@ script:
           what_happens: "誰がどこで何をするか"
           conflict_or_constraint: "行為を妨げる具体的な力"
           required_visual_evidence: ["画面で確認できる人物・物・状態"]
+          # 原作に根拠があり、このbeatの主動作で新しく現れる結果だけ。変身・授与などがなければ空。
+          # 同じ具体名をvisible_action / immediate_consequenceにも記す。別beatへの一括許可ではない。
+          allowed_new_reveal_elements: []
           # 更新だけでなく、理解の補強・維持・疑念も記述できる。毎 beat の反転や新事実は要求しない。
           audience_knowledge_delta: "観客の理解の変化"
           immediate_consequence: "次beatを発生させる結果"
+          # 複数cutが必要な場合だけ明示する。本文やIDを位置順で別beatへ付け替えない。
+          # cut_transitions:
+          #   - transition_id: "scene_01_beat_01_step_01"
+          #     first_frame_brief: "このcut開始時点だけの可視状態"
+          #     motion_brief: "開始状態から行う一つの動作"
+          #     motion_end_state: "このcut終了時点の可視状態"
       turning_event:
         beat_id: "scene_01_beat_01"
         irreversible_change: "後戻りできない具体的変化"

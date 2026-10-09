@@ -53,9 +53,9 @@ class TestScriptNarration(unittest.TestCase):
         }
         actual = resolve_script_metadata_elevenlabs(script_data)
         self.assertEqual(actual["provider"], "elevenlabs")
-        self.assertEqual(actual["model_id"], "eleven_v3")
-        self.assertEqual(actual["voice_name"], "Shohei - Warm, Clear and Husky")
-        self.assertEqual(actual["voice_id"], "8FuuqoKHuM48hIEwni5e")
-        self.assertEqual(actual["prompt_contract_version"], "v3_tagged_context_v1")
+        self.assertEqual(actual["model_id"], "eleven_v4")
+        self.assertEqual(actual["voice_name"], "Jun - Calm, Clear and Husky")
+        self.assertEqual(actual["voice_id"], "JOcmGzB8OFjY8MhjHHEf")
+        self.assertEqual(actual["prompt_contract_version"], "v4_tagged_context_v1")
         self.assertEqual(actual["default_stability_profile"], "natural")
         self.assertEqual(actual["text_policy"], "natural_japanese_plus_audio_tags")

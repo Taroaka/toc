@@ -339,15 +339,16 @@ class AdaptationValueContractTests(unittest.TestCase):
         cut_blueprint = yaml.safe_load((REPO_ROOT / "workflow" / "cut-blueprint-template.yaml").read_text(encoding="utf-8"))
         _manifest_text, manifest = load_structured_document(REPO_ROOT / "workflow" / "video-manifest-template.md")
 
-        for template_text in (story_text, visual_text, script_text, manifest_text):
+        for template_text in (story_text, script_text, manifest_text):
             self.assertIn('# adaptation_value_contract: "required_v1"', template_text)
         self.assertNotIn("adaptation_value_contract", story["story_metadata"])
         self.assertNotIn("adaptation_value_contract", visual["visual_value_metadata"])
         self.assertNotIn("adaptation_value_contract", script["script_metadata"])
         self.assertNotIn("adaptation_value_contract", manifest["video_metadata"])
         self.assertIn("core_values", story["adaptation_source_contract"])
-        self.assertIn("adaptation_intent", visual)
-        self.assertIn("scene_value_amplification", visual["scene_visual_values"][0])
+        self.assertEqual(visual["visual_value_metadata"]["visual_planning_contract"], "source_first_v2")
+        self.assertNotIn("adaptation_intent", visual)
+        self.assertEqual(visual["scene_visual_values"][0]["notes"], [])
         self.assertIn("scene_value_amplification", script["scenes"][0]["scene_intent"])
         self.assertIn("expressive_contract", script["scenes"][0]["cuts"][0]["cut_contract"])
         self.assertIn("expressive_contract", cut_blueprint["cuts"][0]["cut_contract"])

@@ -25,7 +25,7 @@ active target map:
 
 ```text
 p100→p120  p200→p220  p300→p330  p400→p450  p500→p570
-p600→p680  p700→p750  p800→p840  p900→p920
+p600→p680  p700→p750  p800→p860  p900→p920
 ```
 
 p410/p420 は authoring slots。p400 では scene/cut structure を作り、p450 で skeleton
@@ -87,7 +87,8 @@ request revisions、provider provenance、ordinary validation results を記録�
 Frontend create の p100 は `scripts/author-research-with-codex.py` で入力原文・取得した出典から
 `research.md` を執筆する。リサーチ前に固定の物語パターンや小道具を選ばない。
 初期化は実行ID・目標尺などの技術情報だけを扱い、物語用 profile は執筆済みの research/story から投影する。
-出典取得や構造検証が失敗した場合は後続を開始せず、定型の筋による代替出力をしない。
+p120 は調査結果の内容・出典取得記録・構造・尺設定を機械検証せず、LLM出力を保存して p200 に渡す。
+通信・JSONデコード・保存の実行エラーは停止として扱い、定型の筋による代替出力をしない。
 
 ```text
 source context → research → story → visual value → script
@@ -146,6 +147,9 @@ contradictory source variants の hybridization と publication は、別々の�
 resume は同じ run の append-only state に新しい delta を追加する。upstream digest が変わった
 downstream item だけを stale にして再 materialize/re-generate し、valid output は完全な binding
 が一致する限り保持する。run lease と destination lock を使って concurrent mutation を防ぐ。
+
+途中再開のAPI、前半工程のチェックポイント、音声・動画・書き出しの操作記録は
+[全工程の再開](all-stage-resume.md) を参照する。
 
 ## References
 

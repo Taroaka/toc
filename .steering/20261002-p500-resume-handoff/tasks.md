@@ -1,0 +1,4 @@
+- [x] Regression tests and skeleton promotion
+- [x] Canonical failure propagation (delegated)
+- [x] Related tests (96 passed + 2 subtests; failure/create-resume 33 passed) and independent review
+- [x] Restore stale stopped run state under lock; do not start media generation

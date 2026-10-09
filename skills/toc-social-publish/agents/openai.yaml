@@ -1,0 +1,6 @@
+interface:
+  display_name: "ToC SNS動画投稿"
+  short_description: "TikTok・Instagram動画の投稿準備、予約と公開確認"
+  default_prompt: "$toc-social-publish を使って、完成動画をTikTok・Instagram向けに準備し、投稿計画を確認してから実行してください。"
+policy:
+  allow_implicit_invocation: true

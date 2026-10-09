@@ -1,0 +1,5 @@
+- [x] tmp記録とrun内音声を照合
+- [x] 現行38cutのhash/context/grounding/decodeを確認
+- [x] 30候補の状態をselectedにそろえ38cutの正式採用を記録
+- [x] item完了とstage未完をstate/current/run_status/indexに反映
+- [x] 全素材種別の承認後保存ルールを制作正本に追記

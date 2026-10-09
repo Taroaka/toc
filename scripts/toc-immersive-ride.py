@@ -67,7 +67,7 @@ BIG_STAGE_HANDOFF_SLOTS: dict[str, str] = {
     "p500": "p570",
     "p600": "p680",
     "p700": "p750",
-    "p800": "p850",
+    "p800": "p860",
     "p900": "p930",
 }
 
@@ -98,9 +98,10 @@ STAGE_TARGETS: dict[str, str] = {
     "700": "p750",
     "p700": "p750",
     "narration": "p750",
-    "800": "p850",
-    "p800": "p850",
-    "video_generation": "p850",
+    "800": "p860",
+    "p800": "p860",
+    "video_generation": "p860",
+    "sound_design": "p860",
 }
 for _big_stage, _handoff_slot in BIG_STAGE_HANDOFF_SLOTS.items():
     STAGE_TARGETS.setdefault(_big_stage, _handoff_slot)

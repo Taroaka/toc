@@ -719,6 +719,10 @@ for _slot in range(110, 931, 10):
         stages = ["research", "story", "visual_value", "script", "manifest", "asset", "image", "narration", "video"]
     STAGE_TARGETS.setdefault(f"p{_slot}", stages)
 
+for _target, _enabled_stages in STAGE_TARGETS.items():
+    if int(_target[1:]) >= 860 and "sound_design" not in _enabled_stages:
+        _enabled_stages.append("sound_design")
+
 STAGE_TARGET_ALIASES = {
     "100": "p130", "p100": "p130", "research": "p130",
     "200": "p230", "p200": "p230", "story": "p230",
@@ -727,7 +731,7 @@ STAGE_TARGET_ALIASES = {
     "500": "p570", "p500": "p570", "asset": "p570",
     "600": "p680", "p600": "p680", "image": "p680", "image_generation": "p680", "scene_implementation": "p680",
     "700": "p750", "p700": "p750", "narration": "p750",
-    "800": "p850", "p800": "p850", "video_generation": "p850",
+    "800": "p860", "p800": "p860", "video_generation": "p860", "sound_design": "p860",
     "900": "p930", "p900": "p930", "render": "p930", "video": "p930", "done": "p930",
 }
 
@@ -770,6 +774,19 @@ def build_report(run_dir: Path, flow: str, profile: str, stage_target: str = "p9
         stages.append(check_narration(run_dir)[0])
     if "video" in enabled:
         stages.append((check_video_scene_series(run_dir, target_slot=target) if flow == "scene-series" else check_video_single(run_dir, target_slot=target))[0])
+    if "sound_design" in enabled:
+        from server.sound_design_api import freeze as freeze_sound
+        checks = []
+        from server.image_gen_app import _read_manifest_data
+        sound_runs = sorted(path for path in (run_dir / "scenes").glob("scene*") if path.is_dir()) if flow == "scene-series" else [run_dir]
+        add_check(checks, "sound_design.runs", bool(sound_runs), "sound design run directories exist")
+        for sound_run in sound_runs:
+            try:
+                freeze_sound(sound_run, _read_manifest_data(sound_run)[2])
+                add_check(checks, f"sound_design.current:{sound_run.name}", True, "current video approval and completed BGM/SE selections verified")
+            except (ValueError, FileNotFoundError) as exc:
+                add_check(checks, f"sound_design.current:{sound_run.name}", False, str(exc))
+        stages.append(pipeline_policy.make_stage("sound_design", "sound_design.json", checks))
     report = {
         "generated_at": now_iso(),
         "run_dir": str(run_dir.resolve()),

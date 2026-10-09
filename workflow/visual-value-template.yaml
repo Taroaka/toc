@@ -1,223 +1,28 @@
+# New-run planning. Replace source scene IDs; metadata bindings are set by the runtime.
+# See docs/implementation/visual-planning.md. Examples are structure only.
 visual_value_metadata:
-  template_status: "TEMPLATE_ONLY_REPLACE_ALL_REPLACE_ME_AND_EXAMPLE_ONLY_VALUES"
-  # 既存物語 adaptation の場合のみ、次のコメントを外す。original_story では key 自体を出力しない。
-  # adaptation_value_contract: "required_v1"
-  topic: "REPLACE_ME_TOPIC"
-  source_research: "REPLACE_ME_RUN_DIR/research.md"
-  source_story: "REPLACE_ME_RUN_DIR/story.md"
-  created_at: "REPLACE_ME_ISO8601_TIMESTAMP"
-  purpose: "p300 visual planning source of truth: define visual identity, scene visual value, anchor/reference strategy, asset bible candidates, regeneration risks, and p400/p500/p600/p700 handoff"
-  authoring_rules:
-    - "REPLACE_ME_* values are unfinished placeholders and must not survive into visual_value.md."
-    - "EXAMPLE_ONLY_* values show shape only; replace or delete them before treating the file as stage output."
-    - "Do not copy example IDs such as EXAMPLE_ONLY_scene01 into production selectors."
+  visual_planning_contract: source_first_v2
+  # New author output is checked and this marker is bound by runtime.
+  b_roll_policy: boundary_b_roll_v1
+  source_bindings:
+    research: {path: research.md, sha256: "sha256:REPLACE_ME_RUNTIME_HASH"}
+    story: {path: story.md, sha256: "sha256:REPLACE_ME_RUNTIME_HASH"}
 
-# ここからは既存物語 adaptation の場合のみ出力する。
-# story.md の value_id を全編の映画言語へ翻訳する方針。原作を変更する権限は持たない。
-adaptation_intent:
-  schema_version: "adaptation_intent_v1"
-  source_value_ids:
-    - "REPLACE_ME_STORY_VALUE_ID"
-  effect_fidelity_goal: "REPLACE_ME: 原作で評価された観客効果を映像でどう再体験させるか"
-  adaptation_angle: "REPLACE_ME: 原作価値を変えず、この映像化で何を再発見させるか"
-  visual_principles:
-    - "REPLACE_ME: 構図、空間、光で価値を増幅する全編原則"
-  performance_principles:
-    - "REPLACE_ME: 感情名ではなく身体反応・抑制・解放で演じる原則"
-  sound_principles:
-    - "REPLACE_ME: 環境音、沈黙、音の先行・残響を使う原則"
-  editorial_principles:
-    - "REPLACE_ME: hold、reaction、reveal、余韻を扱う編集原則"
-  forbidden_generic_treatments:
-    - "REPLACE_ME: 豪華さや美麗さだけで原作価値を代替する処理"
-
-global_visual_identity:
-  # 任意: docs/story-creation.md「観客の理解と意味の設計」を採用した story の意図を引き継ぐ。
-  # 全編の見せ方は notes、各場面の具体化は visual_value / continuity_hooks / p400_script_notes へ。
-  # 新規 block や adaptation marker は不要。原作の事実・意味・結末・開示順を変えない。
-  visual_style: "REPLACE_ME: 実写、シネマティック等。この run 固有の一貫した画作りを書く"
-  camera_principles:
-    - "scene の物語価値が読める構図を優先する"
-    - "cut prompt ではなく、後続 stage が守る視覚原則として書く"
-  lighting_color_principles:
-    - "場所ごとの光環境と人物/物体の固有色の優先順位を明示する"
-  continuity_principles:
-    - "同じ人物、場所、小道具、状態差分は後続 asset/reference で固定する"
-  forbidden:
-    - "text overlay"
-    - "watermark"
-    - "logo"
-    - "subtitles"
-  notes:
-    - "ここでは本番 image prompt / motion prompt は書かない"
-
+# One row per source scene, in its exact order. Empty notes are valid authored decisions.
 scene_visual_values:
-  - scene_selector: "REPLACE_ME_scene_selector"
-    story_function: "REPLACE_ME: この scene が物語上担う役割"
-    # 理解の維持・深化・揺らぎ・複数解釈の併存も扱える。毎 scene の反転や教訓を要求しない。
-    # 世界観は選択・行動・関係・結果へ具体化し、その主体の信念と世界内の事実を分ける。
-    visual_value: "REPLACE_ME: 観客に画として何を理解・体感させるか"
-    must_show:
-      - "REPLACE_ME: 映像で落とすと物語価値が弱くなる要素"
-    must_avoid:
-      - "REPLACE_ME: 後続 prompt が流れやすい誤表現"
-    emotional_payload: "REPLACE_ME: この scene の視覚的な感情到達点"
-    # 反復を採用するときだけ、同じと認識させる要素・文脈の差・対応 scene を記す。
-    # 小道具に限定せず、音・行為・関係も扱う。反復を作るための追加 scene/asset は不要。
-    continuity_hooks:
-      - "REPLACE_ME: 次 scene / 後半で再利用する視覚要素"
-    p400_script_notes:
-      - "REPLACE_ME: script / cut skeleton 作成時に守ること"
-    # このsceneで原作価値をどう観客体験へ増幅するか。抽象的な「映画的に」は禁止。
-    scene_value_amplification:
-      schema_version: "scene_value_amplification_v1"
-      source_value_refs:
-        - "REPLACE_ME_STORY_VALUE_ID"
-      why_this_scene_matters: "REPLACE_ME: 原作全体に対してこのsceneが不可欠な理由"
-      # 知識・解釈を感情と区別する。感情の狙いは emotional_payload / emotional_contradiction へ。
-      audience_state_before: "REPLACE_ME: scene開始時の観客に開示済みの情報・期待・解釈"
-      audience_state_after: "REPLACE_ME: scene終了時の理解・期待・残る問い。維持・深化・揺らぎも扱う"
-      emotional_contradiction: "REPLACE_ME: 同時に存在する相反感情や圧力"
-      cinematic_gain:
-        performance: "REPLACE_ME: 呼吸、視線、抑制、身体反応の具体差"
-        blocking_and_space: "REPLACE_ME: 距離、遮蔽、孤立、接近、退路の変化"
-        camera_and_composition: "REPLACE_ME: 誰の認識に寄り添い、何をいつ見せないか"
-        edit_and_rhythm: "REPLACE_ME: hold、cut、reaction、reveal、余韻の設計"
-        sound: "REPLACE_ME: 環境音、沈黙、音の先行・残響の働き"
-      iconic_moment_target: "REPLACE_ME: 観客が再体験・再発見する一瞬"
-      must_preserve_story_facts:
-        - "REPLACE_ME: このsceneで変えてはいけない原作事実"
-      must_not_reduce_to:
-        - "REPLACE_ME: 説明絵、美麗な壁紙、generic montage等への縮退"
-      success_evidence:
-        - "REPLACE_ME: 台詞や設計文なしでも価値増幅が成立したと分かる証拠"
+  - scene_selector: REPLACE_ME_EXACT_SOURCE_SCENE_ID
+    notes: []
+    boundary_b_roll:
+      reason: "REPLACE_ME_接続判断。原則1件、0件にする場合は直接接続の理由"
+      cuts: []
+      # Each authored cut requires: technique, source_event_beat_id (final existing beat),
+      # location (scene end), subject, first_frame, motion, end_state, foreground, background, light.
+      # See docs/implementation/b-roll-design.md. No runtime cut IDs or invented events.
 
-anchor_cut_candidates:
-  - selector: "REPLACE_ME_sceneXX_cutYY"
-    proposed_still_mode: "REPLACE_ME_ONE_OF_generate_still_reuse_anchor_bridge"
-    anchor_role: "REPLACE_ME_ONE_OF_character_anchor_location_anchor_object_anchor_state_transition_visual_value_hold_other"
-    why_anchor_needed: "REPLACE_ME: この cut を anchor 化しないと後続で何がブレるか"
-    reuse_targets:
-      - "REPLACE_ME_sceneXX_cutYY"
-    bridge_or_reuse_candidates:
-      - selector: "EXAMPLE_ONLY_scene01_cut02"
-        proposed_still_mode: "EXAMPLE_ONLY_reuse_anchor_or_bridge"
-        reason: "EXAMPLE ONLY: 新規 still ではなく anchor reuse / bridge で足りる理由"
+# Optional work-specific choices; no default palette or emotional arc.
+global_visual_identity:
+  notes: []
 
-asset_bible_candidates:
-  characters:
-    - asset_id: "REPLACE_ME_character_asset_id"
-      story_purpose: "REPLACE_ME: 物語上の役割"
-      fixed_identity:
-        - "REPLACE_ME: 顔、髪型、衣装、年齢感など、後続で変えてはいけない要素"
-      candidate_reference_views:
-        - "EXAMPLE_ONLY_front"
-        - "EXAMPLE_ONLY_side"
-        - "EXAMPLE_ONLY_back"
-        - "EXAMPLE_ONLY_refstrip"
-      used_by_selectors:
-        - "REPLACE_ME_sceneXX_cutYY"
-      p500_handoff: "REPLACE_ME: asset_plan.md で設計すること"
-  objects:
-    - asset_id: "REPLACE_ME_object_asset_id"
-      story_purpose: "REPLACE_ME: 反復する小道具 / setpiece の役割"
-      fixed_identity:
-        - "REPLACE_ME: silhouette、材質、装飾、比率など"
-      candidate_reference_views:
-        - "EXAMPLE_ONLY_hero"
-        - "EXAMPLE_ONLY_detail"
-      used_by_selectors:
-        - "REPLACE_ME_sceneXX_cutYY"
-      p500_handoff: "REPLACE_ME: object_bible / reference image として固定する理由"
-  locations:
-    - asset_id: "REPLACE_ME_location_asset_id"
-      story_purpose: "REPLACE_ME: 反復する場所 / 状態差分の役割"
-      fixed_identity:
-        - "REPLACE_ME: spatial identity、主要構造、光環境など"
-      relation_to_other_locations: "REPLACE_ME_ONE_OF_independent_same_place_variant_background_glimpse_foreground_anchor"
-      used_by_selectors:
-        - "REPLACE_ME_sceneXX_cutYY"
-      p500_handoff: "REPLACE_ME: location_bible / reference_usage へ渡す判断"
-  reusable_stills:
-    - asset_id: "REPLACE_ME_reusable_still_asset_id"
-      source_selector: "REPLACE_ME_sceneXX_cutYY"
-      story_purpose: "REPLACE_ME: 後続 cut の continuity anchor としての役割"
-      fixed_identity:
-        - "REPLACE_ME: same camera、同じ状態差分、同じ構図など"
-      p500_handoff: "REPLACE_ME: reusable still として asset_plan.md に載せる理由"
-
-reference_strategy:
-  required_reference_assets:
-    - asset_id: "REPLACE_ME_asset_id"
-      reference_type: "REPLACE_ME_reference_type"
-      required_before_stage: "REPLACE_ME_stage_id"
-      reason: "REPLACE_ME: 人物同一性などを固定するため"
-  reference_usage_rules:
-    - situation: "EXAMPLE ONLY: 別エリアから主エリアが奥に見える"
-      mode: "EXAMPLE_ONLY_background_glimpse"
-      rule: "EXAMPLE ONLY: location derived_from ではなく cut 側の reference_usage で表す"
-  no_reference_allowed:
-    - case: "EXAMPLE ONLY: 独立 location anchor の初期 seed"
-      reason: "EXAMPLE ONLY: 参照入力なしの bootstrap として作れるため"
-  color_and_lighting_priority:
-    - "REPLACE_ME: 環境光と人物/物体の固有色が衝突する場合の優先順位を書く"
-
-regeneration_risks:
-  - risk_id: "REPLACE_ME_risk_id"
-    affected_selectors:
-      - "REPLACE_ME_sceneXX_cutYY"
-    failure_mode: "REPLACE_ME: 後続生成で起きそうなブレや再生成原因"
-    prevention_rule: "REPLACE_ME: p500/p600/p700 に渡す予防指示"
-    owner_stage: "REPLACE_ME_ONE_OF_p400_p500_p600_p700"
-
-handoff_to_p400_p500_p600_p700:
-  p400_script:
-    must_preserve:
-      - "scene/cut skeleton に残す visual value"
-    must_not_do:
-      - "p300 で未承認の新規主筋を追加しない"
-  p500_asset:
-    must_create:
-      - "asset_bible_candidates から asset_plan.md へ渡す候補"
-    authoring_focus:
-      - "visual identity と continuity anchor として十分か"
-  p600_scene_implementation:
-    must_materialize:
-      - "anchor_cut_candidates と reference_strategy を video_manifest.md に反映する"
-    authoring_focus:
-      - "prompt / references / still_image_plan が p300 の意図と矛盾しないか"
-  p700_narration:
-    must_preserve:
-      - "scene image と矛盾しない narration の視点・距離感"
-    authoring_focus:
-      - "visual を説明しすぎず、音声で補うべき意味だけを足しているか"
-
-value_parts:
-  - part_id: "EXAMPLE_ONLY_midroll_visual_payoff_01"
-    optional: true
-    example_only: true
-    title: "EXAMPLE ONLY: 中盤の視覚報酬パート"
-    placement_window:
-      start_percent: 20
-      end_percent: 80
-      preferred_percent: 50
-      rationale: "EXAMPLE ONLY: 最序盤や最終盤ではなく、中盤の視覚報酬として置く場合に使う"
-    why_this_matters:
-      - "読者は名前を知っているが、細部を見たことがない要素を報酬化する"
-      - "高価な実物セットなしでは難しい壮大さを、生成AI前提で視覚化する"
-    ai_visualization_advantage:
-      no_physical_set_required: true
-      spectacle_scale: "巨大建築 / 異界 / 群体 / 発光 / 流体 / 変形"
-      notes: "文字説明ではなく、形・光・動き・機構で価値を伝える"
-    related_objects:
-      - "REPLACE_ME_object_asset_id"
-    cut_plan:
-      - cut_id: "EXAMPLE_ONLY_1"
-        duration_seconds: 4
-        narration: "REPLACE_ME_OR_EMPTY_STRING"
-        focus: "REPLACE_ME: 主役となる場所 / 物 / 現象"
-        description: "REPLACE_ME: 何が見えるかを1-2文で具体的に"
-        viewer_payoff: "REPLACE_ME: このカットで何を感じさせるか"
-    notes:
-      - "silent midroll visual payoff が必要な run だけ使う"
-      - "本番 cut prompt ではなく、script / manifest に落とす前の設計メモとして扱う"
+# Optional entries: source_refs [{source: story|research, pointer: /...}],
+# scene_selectors [existing source IDs], note (concrete continuity decision).
+continuity_notes: []

@@ -82,13 +82,16 @@ def test_authored_research_reaches_story_without_synthetic_replacement(tmp_path)
     assert not (tmp_path / 'script.md').exists()
 
 
-def test_empty_research_cannot_fall_back_to_generic_plot(tmp_path):
-    m = runner();story = Mock()
+@pytest.mark.parametrize('authored', [{}, {'story_materials': {}}, {'topic': 'different', 'metadata': {'target_duration_seconds': 999}}])
+def test_research_without_content_or_duration_contract_reaches_story(tmp_path, authored):
+    m = runner()
+    story = Mock(side_effect=RuntimeError('story boundary reached'))
     def research_author(**kwargs):
-        (tmp_path / 'research.md').write_text(m._md_yaml('empty', {'story_materials': {}}))
-    with pytest.raises(RuntimeError, match='research contract failed'):
+        (tmp_path / 'research.md').write_text(m._md_yaml('authored', authored))
+    with pytest.raises(RuntimeError, match='story boundary reached'):
         m.materialize_run('作品名', '作品名', tmp_path, 'p680', research_author_runner=research_author, story_author_runner=story)
-    story.assert_not_called()
+    story.assert_called_once()
+    assert 'slot.p120.status=done' in (tmp_path / 'state.txt').read_text()
 
 
 def test_research_subprocess_receives_exact_source_file(tmp_path):
@@ -110,3 +113,12 @@ def test_abstract_research_theme_is_not_a_preselected_prop():
     p = m._profile_from_research(m._story_profile('作品名', '作品名'), research)
     assert p['artifact_name'] == ''
     assert p['artifact_scene_indices'] == []
+
+
+@pytest.mark.parametrize('text', ['```yaml\n{}\n```\n', 'LLM-authored research without structured fields'])
+def test_pipeline_inspection_does_not_validate_research_content(tmp_path, text):
+    from toc.stage_evaluation.pipeline import check_research
+    (tmp_path / 'research.md').write_text(text)
+    report, _ = check_research(tmp_path)
+    assert report['passed'] is True
+    assert [check['id'] for check in report['checks']] == ['research.file_exists']

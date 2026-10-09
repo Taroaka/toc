@@ -170,6 +170,18 @@ class FakeTurnRunner:
 
     async def __call__(self, **kwargs):
         self.calls.append(kwargs)
+        if kwargs['role'] == 'field_repair':
+            from toc.story_field_repair import scene_digest
+            correct = _scene('scene_02', 'E02', 'state_clock_found', 'state_time_restored', 'scene_01', None)
+            operations = []
+            for issue in kwargs['field_issues']:
+                value = correct
+                for part in issue['path'].strip('/').split('/'):
+                    value = value[int(part)] if isinstance(value, list) else value[part]
+                if issue['expected_type'] == 'object':
+                    value = json.dumps(value, ensure_ascii=False)
+                operations.append({'path': issue['path'], 'value': value})
+            return {'scene_id': kwargs['scene_id'], 'base_digest': scene_digest(kwargs['scene']), 'operations': operations}
         if kwargs["role"] == "repair":
             return {
                 "scene_id": "scene_02",
@@ -361,7 +373,7 @@ def test_story_pipeline_reconciles_only_frozen_handoff_keys() -> None:
     assert second["handoff_chain"]["incoming"]["state_id"] == "state_clock_found"
 
 
-def test_story_pipeline_repairs_only_failing_scene_then_revalidates() -> None:
+def test_story_pipeline_repairs_only_failing_field_then_revalidates() -> None:
     runner = FakeTurnRunner(break_turning_event=True)
 
     result = asyncio.run(
@@ -380,8 +392,25 @@ def test_story_pipeline_repairs_only_failing_scene_then_revalidates() -> None:
         "architect",
         "scene_author",
         "scene_author",
-        "repair",
+        "field_repair",
     ]
     for call in runner.calls:
         assert AUDIENCE_MEANING_INSTRUCTION in json.loads(call["prompt"])["instructions"]
     assert result.story["script"]["scenes"][1]["start_state"]["state_id"] == "state_clock_found"
+
+
+def test_architect_is_repaired_with_previous_output_and_error():
+    base = FakeTurnRunner()
+    attempts = []
+    async def turn(**kwargs):
+        if kwargs['role'] == 'architect':
+            attempts.append(kwargs)
+            if len(attempts) == 1:
+                return {'scene_plan': 'invalid'}
+        return await base(**kwargs)
+    result = asyncio.run(author_story_from_research(_research(), topic='時計', target_duration_seconds=600,
+        turn_runner=turn, max_repair_rounds=2))
+    assert not result.validation_errors
+    context = json.loads(attempts[1]['prompt'])['repair_context']
+    assert context['previous_output'] == {'scene_plan': 'invalid'}
+    assert 'scene_plan' in context['errors'][0]

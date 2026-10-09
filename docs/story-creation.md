@@ -101,6 +101,46 @@ p200 は、p100 が厚く残した `story_materials` / `source_passages` / `vari
 scene / beat / emotion curve / candidate selection へ再構成する主責務を持つ。
 p100 に `scene_plan` や `scene_ids` が含まれていても参考扱いであり、p200 の分割判断を拘束しない。
 
+### 既定の採用方針：広く知られる一つの物語
+
+ユーザーの指定版があれば優先する。未指定なら、対象視聴者にもっとも広く知られる一つの版・筋を採用する。
+対象地域・視聴者が未指定なら依頼言語の一般視聴者を想定する。知名度はresearchの普及・受容の根拠から判断し、
+裏付けが弱い場合は不確実性を残す。最古の版、資料量の多い版、珍しい結末を既定の選定理由にしない。
+調査した他の版・補足情報は使わなくてよい。全資料を使うために複数版を二部構成にしたり、混成したりしない。
+採用版の中でも、物語の理解・因果・象徴的な見せ場・結末を維持できる範囲で出来事を省略できる。
+
+新規selectionに以下を残す:
+- `event_selection_contract: story_event_selection_v1`
+- `selected_variant_ids`: 一つの実在版ID。版情報のない創作等では空配列。
+- `selected_event_ids`: 採用する実在event IDを採用版のevent_ids順に列挙（版別順序の記録がなければ元の出来事一覧順）。
+- `selection_rationale` / `familiarity_basis`: 選定理由、知名度の根拠と不確実性。指定版優先ならその旨。
+- `omitted_events`: 採用版内で省くevent IDと理由。採用しない他版を逐一説明する必要はない。
+
+Architect・完成story・p400のcoverage対象はこの採用event集合だけとする。
+採用済みeventの漏れ・重複・順序違反は検証するが、未採用eventを場面へ戻すことはしない。
+全research本文は参照可能な根拠として保持し、資料の保存と作品への採用を区別する。
+`adaptation_source_contract` のcore values・必須出来事・見せ場・結末も採用版と採用eventに限定し、
+未採用の別版・補足知識を別フィールドから必須要件として戻さない。
+
+### p100 の根拠記録を受け取る際の責務
+
+- p100 の `story_materials.causal_links` は資料が支える出来事間の因果であり、scene の設計図ではない。
+  p200 が採用素材・scene / beat 分割・提示順・場面接続・感情曲線を設計する。時間的隣接だけを
+  原作の因果とせず、p100 に全出来事の因果接続や人物の成長設計を要求しない。
+- `variants[].story_dump / event_ids` と出来事・主張の `variant_ids` を読み、採用版を明示する。
+  ユーザーの指定版があれば尊重する。複数版の素材を一つの連続した原作として扱わず、矛盾要素の
+  混成はユーザー承認を要する。版別の一覧順序を横断して単一の時系列と見なさない。
+- `facts.items[].material_path` が指す動機・設定・象徴などの主張を、その `evidence_kind` と根拠で読む。
+  `source_inference` と `external_interpretation` を `explicit_text` に格上げしない。
+  `creative_proposal` は採用検討用であり、source fact ではない。情報の種類と確信度を混同しない。
+- 人物の見せ方、変化の強調、観客への開示順、伏線の配置、構成上の創作補完は p200 が担当する。
+  p100 の記録にない事実を原作由来として足さず、創作補完は既存の story 契約に従って区別する。
+- `open_questions[].resolution_need` の `research_required` は、事実として使用する前に追加調査するか、
+  その主張を使わずに成立するか判断する。`p200_decision` は構成時に選び、`non_blocking` は不明のまま保持できる。
+- 旧 research に新しい根拠フィールドがない場合は、既存の出典・抜粋へ戻って必要な判断を行う。
+  欠落を原文明示・全版共通・因果成立の証拠とは扱わない。p100 の執筆契約は
+  `docs/information-gathering.md` の「p100 / p200 の責務境界と根拠の記録」を参照する。
+
 ### Success criteria
 
 - `story.md` が `workflow/story-template.yaml` の主要フィールドを満たしている
@@ -108,6 +148,9 @@ p100 に `scene_plan` や `scene_ids` が含まれていても参考扱いであ
 - p100 の素材から scene / beat / emotion curve / candidate selection が明示的に作られている
 - p200 は原則 20 scene 単位の物語骨格までを担当し、短尺/限定 flow では 8 scene 以上の dense grounded scenes でもよい。cut 分割は後続 stage に渡す
 - 各 scene は `purpose / conflict / turn / affect / visualizable_action / grounding_note` を持ち、単なる一行要約で終わらせない
+- `conflict` と `turn` は文字列として保持し、原作に該当する葛藤・転換がなければ空文字を許可する。
+  `turning_event: {}` と同一の `start_state / end_state` も正常。転換を記載するときは実在beatと変化を参照する。
+  必須キーを埋めるために、人物の心理や不可逆な出来事を足さない。
 - 各 scene は非空の `time_of_day` を持ち、歴史的時代の `story_metadata.time` と分離されている
 - 各 scene は `time_of_day_visual_basis` で光源・明るさ・影・色温度を説明でき、複数場所の場合は順序付き location contract と場所別 segment contract を持つ
 - primary hook と opening が、視聴者の問いを作る具体的な事実または強い物語状況を持っている
@@ -117,21 +160,25 @@ p100 に `scene_plan` や `scene_ids` が含まれていても参考扱いであ
 - `scene_prompt_payload` は scene 正本生成だけに使い、first-frame / motion / API prompt / camera / lens / framing / shot / 固定cut数を混ぜない。cut/image/video は `scene_event` と `scene_cut_coverage_plan` から逆算する
 - `concrete_event` は人物・場所・関係性・小道具・ルール・視覚証拠のうち、その物語で置換できない要素へ接地する。抽象表現は禁止しないが、抽象だけで終わる scene は不可
 - 具体ディテールは `story_function` を持つものに限る。装飾的な小物や背景描写を、source grounding なしに story fact のように扱わない
-- 原典・既知筋・ユーザー入力の重要出来事は `canonical_event_coverage_matrix` で scene / event beat へ割り当て、欠落・順序破壊・source reference のない発明を structural check で止める
+- 採用版・採用event集合の重要出来事は `canonical_event_coverage_matrix` で scene / event beat へ割り当て、欠落・順序破壊・source reference のない発明を structural check で止める
 - 矛盾するソースを混成する場合は、hybridization gate でユーザー承認を得ている
 - 下流の prompt 設計で `1 clip = 1意図` に分けられる scene 意図が残っている
 
 ### Story Author runtime
 
 新規 `story.md` の物語本文は、決定論関数で汎用 prose を連結して作らない。
-既定 `gpt-6-astra` の Story Architect と同じモデルの batched
-Scene Author が、source/readset を解決した `research.md` の完全な registry から
-structured JSON を生成する。それぞれ `TOC_STORY_AUTHOR_MODEL` /
-`TOC_SCENE_AUTHOR_MODEL` で差し替え可能。reasoning effort は共通 app-server runtime が各 turn に `high` を明示する。
+既定は `gpt-6-astra` の Story Architect と Scene Author、
+`gpt-6-luna` の局所 Repair Author とする。source/readset を解決した
+`research.md` の完全な registry から structured JSON を生成し、難易度と
+責務に応じて GPT-6 ファミリ内で使い分ける。それぞれ
+`TOC_STORY_AUTHOR_MODEL` / `TOC_SCENE_AUTHOR_MODEL` / `TOC_REPAIR_AUTHOR_MODEL`
+で差し替え可能。reasoning effort は共通 app-server runtime が各 turn に `high` を明示する。
+Sol は既定では使わず、Astra の最終判断と Luna の限定枝作業の中間にある
+例外的なタスクで、明示的に指定されたときだけ使う。
 
 ```text
 research.md full registry
-  -> Story Architect: scene ownership / order / handoff
+  -> Story Architect: one familiar variant / selected events / scene ownership / order / handoff
   -> batched Scene Author: all scenes, each with start / all beats / turn / end / reveal / preservation
   -> deterministic validation
   -> bounded key-level repair
@@ -944,6 +991,10 @@ sources:
 
 ## Handoff Artifact: `visual_value.md`
 
+新規runでは [source-first映像設計](implementation/visual-planning.md) と
+`workflow/visual-value-template.yaml` を使う。以下のamplification/anchor候補の形は旧v1の説明であり、
+新規p300の必須欄ではない。全sceneの対応は必須だが、追加の演出notesは空でよい。
+
 Visual Value Ideator は `workflow/visual-value-template.yaml` を基に、
 次のような構造で `visual_value.md` を作る。これは p300 の planning artifact であり、canonical generation stage の成果物ではない。p300 では本番 cut prompt、画像生成 request、asset 画像、動画 motion prompt は作らない。
 
@@ -1124,7 +1175,7 @@ artifact である。scene author は契約を変更せず、`event_id`、`beat_
 
 ### 作成前に凍結する項目
 
-- canonical event の順序、scene ownership、required beat
+- 採用した canonical event の順序、scene ownership、required beat
 - 各 beat の required role / character / evidence / non-replaceable element
 - 情報・artifact の `withheld -> revealed -> carried|known` の遷移と開示所有 scene
 - scene 間の incoming / outgoing handoff anchor、producer / consumer、state
@@ -1133,7 +1184,7 @@ artifact である。scene author は契約を変更せず、`event_id`、`beat_
 
 scene author の prompt には、その scene の slice、前後 handoff、authoring instructions だけを渡す。
 authoring 後の `authoring_preflight` は追加 provider turnを必要としない決定論的チェックであり、
-canonical event の欠落・重複・順序破壊、reveal rollback、required role closure、handoff 不一致、
+採用した canonical event の欠落・重複・順序破壊、reveal rollback、required role closure、handoff 不一致、
 transition cue 欠落、source evidence 欠落を cut 作成前に停止する。
 
 既知の legacy artifact は `scene_set_authoring_contract_v1` marker がなくても読み取り互換経路を持つ。ただし marker がある artifact の部分契約、unsupported version、digest mismatch、未知 ID は fail-close とし、legacy 互換を理由に新契約の欠落を隠してはならない。
@@ -1205,3 +1256,17 @@ transition cue 欠落、source evidence 欠落を cut 作成前に停止する�
 
 - [The Script Lab - Star Wars Hero's Journey](https://thescriptlab.com/features/screenwriting-101/12309-the-heros-journey-breakdown-star-wars/)
 - [神話の法則を千と千尋で解説](https://kkusaba.com/heros-journey/)
+
+## 終幕の焦点と観客の余韻
+
+終幕では、出来事の後始末に加え、観客が最後に誰の何を感じて見終えるかを設計する。
+主人公の物語では、脇役の事情を整理した後に、主人公または中心となる関係へ感情の焦点を戻す。
+最後の主要cutで、冒頭から何が変わったかを表情、距離、触れ合い、行動などの具体的な画で受け取れるようにする。
+群像劇など別の人物を最後に置く構成は、その人物が結末の主題を担う理由を明示する。
+作品に合う納得と満足、感動を intended affect として狙い、観客の実際の感情を保証するとは書かない。
+
+- 最後の2〜3cutを続けて読み、中心人物や中心関係が脇役の説明に埋もれていないか確認する。
+- 結末に必要な出来事が成立した後は、語りで幸福や教訓を繰り返さず、画面と間、後工程の音楽に余地を残す。
+- 人物を見届けることが終幕の責務ならmainとして設計する。末尾に人物なしBロールを必ず置く規則にはしない。
+- 同じ寄りの画を3枚並べず、行動→応答→関係を見届ける画のように各cutの役割を分ける。
+- 作品が意図した未解決や悲劇も保持する。原作にない後日談を加える場合は、ユーザーの追加意図と創作範囲を記録する。

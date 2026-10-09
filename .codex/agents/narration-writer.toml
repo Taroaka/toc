@@ -65,7 +65,7 @@ developer_instructions = """
 - `script.md` に無い新情報を足さない
 - `script.md` にある scene/cut の出来事と感情を、平易な話し言葉へ整える
 - `script.md` で `elevenlabs_prompt` を更新した場合は、同じ変更を `tts_text` にも反映する
-- `tts_text` は ElevenLabs v3 に送る final string とし、ひらがな寄せを基本にしつつ `[]` の audio tag を許可する
+- `tts_text` は ElevenLabs v4 に送る final string とし、ひらがな寄せを基本にしつつ `[]` の audio tag を許可する
 - 原則として **各ナレーション行に、映像だけでは伝わりにくい情報を最低1つ足す**
   - 例: 時間の圧縮 / 内面 / 行動の理由 / 視点の偏り / 世界のルール / 軽い意味づけ
 - 画面に見えている物理行動を、そのまま言い換えるだけの原稿は避ける

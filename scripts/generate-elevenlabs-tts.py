@@ -22,9 +22,11 @@ from toc.env import load_env_files
 from toc.http import HttpError
 from toc.providers.elevenlabs import (
     DEFAULT_ELEVENLABS_LANGUAGE_CODE,
+    DEFAULT_ELEVENLABS_MODEL_ID,
     DEFAULT_ELEVENLABS_VOICE_ID,
     ElevenLabsClient,
     ElevenLabsConfig,
+    normalize_elevenlabs_model_id,
     parse_pronunciation_dictionary_locators,
 )
 from toc.tts_text import load_pronunciation_aliases, prepare_elevenlabs_tts_text
@@ -70,7 +72,7 @@ def main() -> None:
     parser.add_argument("--api-key", default=_env("ELEVENLABS_API_KEY"))
     parser.add_argument("--api-base", default=_env("ELEVENLABS_API_BASE", "https://api.elevenlabs.io/v1"))
     parser.add_argument("--voice-id", default=_env("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID))
-    parser.add_argument("--model-id", default=_env("ELEVENLABS_MODEL_ID", "eleven_v3"))
+    parser.add_argument("--model-id", default=_env("ELEVENLABS_MODEL_ID", DEFAULT_ELEVENLABS_MODEL_ID))
     parser.add_argument("--output-format", default=_env("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128"))
     parser.add_argument("--language-code", default=_env("ELEVENLABS_LANGUAGE_CODE", DEFAULT_ELEVENLABS_LANGUAGE_CODE))
     parser.add_argument(
@@ -90,14 +92,24 @@ def main() -> None:
 
     parser.add_argument("--stability", type=float, default=0.35)
     parser.add_argument("--similarity-boost", type=float, default=0.75)
-    parser.add_argument("--style", type=float, default=0.0)
-    parser.add_argument("--use-speaker-boost", action="store_true")
+    parser.add_argument(
+        "--style",
+        type=float,
+        default=0.0,
+        help="Legacy compatibility option; ignored by Eleven v4 (style is unsupported).",
+    )
+    parser.add_argument(
+        "--use-speaker-boost",
+        action="store_true",
+        help="Legacy compatibility option; ignored by Eleven v4.",
+    )
 
     parser.add_argument("--duration-seconds", type=int, default=None, help="Pad/trim output to this length.")
     parser.add_argument("--save-request", default=None, help="Optional path to save request JSON (no secrets).")
     parser.add_argument("--dry-run", action="store_true")
 
     args = parser.parse_args()
+    args.model_id = normalize_elevenlabs_model_id(args.model_id)
 
     if not args.api_key:
         raise SystemExit("Missing ELEVENLABS_API_KEY or --api-key.")
@@ -123,8 +135,6 @@ def main() -> None:
         "voice_settings": {
             "stability": args.stability,
             "similarity_boost": args.similarity_boost,
-            "style": args.style,
-            "use_speaker_boost": bool(args.use_speaker_boost),
         },
     }
     if locators:

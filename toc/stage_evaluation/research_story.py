@@ -181,6 +181,14 @@ def check_visual_value(
     if not path.is_file():
         return make_stage("visual_value", path.name, checks), {}
     _text, data = load_structured_document(path)
+    from toc.visual_planning_contract import planning_declared, validate_visual_value_files
+    if planning_declared(data, "visual_value_metadata"):
+        issues = validate_visual_value_files(run_dir, data)
+        if forbid_production_artifacts:
+            issues.extend(_p300_production_artifact_issues(run_dir))
+        add_check(checks, "visual_value.source_first_contract", not issues, "source-first visual planning references and shape" + (f" (issues: {','.join(issues[:8])})" if issues else ""))
+        return make_stage("visual_value", path.name, checks), {}
+
     add_check(checks, "visual_value.structured", bool(data), "visual_value.md contains structured YAML output")
     if "scene_visual_values" in data:
         add_check(checks, "visual_value.scene_values_type", isinstance(data.get("scene_visual_values"), list), "scene_visual_values is a list when declared")

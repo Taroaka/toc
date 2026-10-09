@@ -10,6 +10,14 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 
+from toc.visual_planning_contract import (
+    planning_declared,
+    planning_marker,
+    validate_planning_projection,
+    validate_visual_value_document,
+)
+
+
 ADAPTATION_VALUE_MARKER = "required_v1"
 ADAPTATION_SOURCE_SCHEMA = "adaptation_source_contract_v1"
 ADAPTATION_INTENT_SCHEMA = "adaptation_intent_v1"
@@ -227,7 +235,13 @@ def visual_value_adaptation_issues(
     data: Mapping[str, Any],
     *,
     source_value_ids: set[str] | None = None,
+    story: Mapping[str, Any] | None = None,
+    research: Mapping[str, Any] | None = None,
 ) -> list[str]:
+    if planning_declared(data, "visual_value_metadata"):
+        if story is None:
+            return ["visual_value.source_story_required"]
+        return validate_visual_value_document(data, story, research)
     enabled, issues = _marker_issues(data, "visual_value_metadata")
     if not enabled:
         return issues
@@ -365,6 +379,13 @@ def script_adaptation_issues(
     source_value_ids: set[str] | None = None,
     visual_value: Mapping[str, Any] | None = None,
 ) -> list[str]:
+    if planning_declared(data, "script_metadata") or (visual_value is not None and planning_declared(visual_value, "visual_value_metadata")):
+        issues = validate_planning_projection(data, "script_metadata", visual_value)
+        if visual_value is None:
+            issues.append("visual_value:missing_for_source_first_projection")
+        if _marker(data, "script_metadata") != ADAPTATION_VALUE_MARKER:
+            issues.append("script_metadata.adaptation_value_contract:missing_projection")
+        return issues
     enabled, issues = _marker_issues(data, "script_metadata")
     if not enabled:
         return issues
@@ -535,6 +556,24 @@ def manifest_adaptation_issues(
     source_value_ids: set[str] | None = None,
     script: Mapping[str, Any] | None = None,
 ) -> list[str]:
+    if planning_declared(data, "video_metadata") or (script is not None and planning_declared(script, "script_metadata")):
+        issues = validate_planning_projection(data, "video_metadata")
+        if _marker(data, "video_metadata") != ADAPTATION_VALUE_MARKER:
+            issues.append("video_metadata.adaptation_value_contract:missing_projection")
+        if not script:
+            return [*issues, "script:missing_for_source_first_projection"]
+        issues.extend(validate_planning_projection(script, "script_metadata"))
+        if planning_marker(data, "video_metadata") != planning_marker(script, "script_metadata"):
+            issues.append("visual_planning.version_mismatch")
+        if _dict(data.get("video_metadata")).get("source_visual_value") != _dict(script.get("script_metadata")).get("source_visual_value"):
+            issues.append("visual_planning.binding_mismatch")
+        script_scenes = _list(script.get("scenes"))
+        manifest_scenes = _list(data.get("scenes"))
+        projection = lambda scenes: [(s.get("scene_id"), s.get("source_story_scene_id"), _dict(s.get("scene_intent")).get("visual_notes")) for s in scenes if isinstance(s, dict)]
+        if projection(script_scenes) != projection(manifest_scenes):
+            issues.append("visual_planning.scene_projection_mismatch")
+        issues.extend(_projection_issues(data, script))
+        return issues
     script_requires_contract = bool(script) and _marker(script or {}, "script_metadata") == ADAPTATION_VALUE_MARKER
     metadata = _dict(data.get("video_metadata"))
     marker_present = "adaptation_value_contract" in metadata

@@ -112,6 +112,8 @@ persona-specific post / ad
 
 ## Current operating files
 
+- SNSアカウントと使用スキル：[accounts.md](accounts.md)（Instagram・TikTok：`eiyu_no_tabi`）
+
 - persona / customer-attribute registry: `marketing/SNS/audience-unit-registry.md`
 - first five-customer interview sprint: `marketing/SNS/first-customer-interview-sprint.md`
 - proof inventory / claim boundary: `marketing/SNS/proof-inventory.md`

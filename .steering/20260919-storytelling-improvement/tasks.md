@@ -1,30 +1,30 @@
 # 実装順・検証計画
 
-状態: 2026-09-19にユーザーが実装開始を依頼。順番に実装・検証中。
+状態: 2026-09-19にユーザーが実装開始を依頼。コード・契約・ガイドの修正を実施。検証結果は [validation.md](validation.md)。
 最初の完成単位は、新規runが原作の意味を定型文で変更せずp450へ到達すること。
 単にp300文書を短くして、下流が壊れた状態で止めない。
 
 ## 0. 変更前の挙動を固定する
 
-- [ ] `tests/` に制作結果の違いを検査する少数のfixtureを用意する。下表のケースを使う。
-- [ ] E2〜E7の値が、どの新規経路のartifact/author入力へ入るかを実際の出力で確認する。
-- [ ] p400のフィールドを、参照整合性に必要なもの、作品次第のauthoring判断、既存互換に分類する。
-- [ ] 既存v1とmarkerなしlegacyの正常な入力・再開fixtureを保存する。
-- [ ] 現在の上流source-first実装のテストを確認し、既存のユーザー変更を保持する。
+- [x] `tests/` に制作結果の違いを検査する少数のfixtureを用意する。下表のケースを使う。
+- [x] E2〜E7の値が、どの新規経路のartifact/author入力へ入るかを実際の出力で確認する。
+- [x] p400のフィールドを、参照整合性に必要なもの、作品次第のauthoring判断、既存互換に分類する。
+- [x] 既存v1とmarkerなしlegacyの正常な入力・再開fixtureを保存する。
+- [x] 現在の上流source-first実装のテストを確認し、既存のユーザー変更を保持する。
 
 成果物: 再現可能な入力、現在の出力、失われる/追加される情報、該当関数の短い記録。
 品質スコアではなく、変更前後で比較できる事実を残す。
 
 ## 1. p300とp400を一緒に切り替える — 最優先
 
-- [ ] 9月17日のp300設計を再利用し、共通authoringとv2 validatorを実装する。
-- [ ] frontendの `visual = {...}` を共通入口へ置換。全編の固定価値、配色、番号由来のvalue割当を除く。
-- [ ] story本文、実在scene ID、source bindingをauthor入力に渡す。入力の黙示的truncateをしない。
-- [ ] 新規v2のp400では定型blueprintを初期値にしない。作者のscene/event/stateを直接利用する。
-- [ ] dramatic question、不可逆なturn、相反感情、iconic moment、全演出領域の一律必須を見直す。
-- [ ] `start/end_state` が同じ場合や、演出notes空の場合を正常に扱う。scene欠落やruntime failureとは分ける。
-- [ ] script/manifest/source ledger/cut contextの参照・digest・版を一方向に揃える。
-- [ ] writer/reader/validator/template/docsを同じ変更単位で同期し、p450までの統合テストを通す。
+- [x] 9月17日のp300設計を再利用し、共通authoringとv2 validatorを実装する。
+- [x] frontendの `visual = {...}` を共通入口へ置換。全編の固定価値、配色、番号由来のvalue割当を除く。
+- [x] story本文、実在scene ID、source bindingをauthor入力に渡す。入力の黙示的truncateをしない。
+- [x] 新規v2のp400では定型blueprintを初期値にしない。作者のscene/event/stateを直接利用する。
+- [x] dramatic question、不可逆なturn、相反感情、iconic moment、全演出領域の一律必須を見直す。
+- [x] `start/end_state` が同じ場合や、演出notes空の場合を正常に扱う。scene欠落やruntime failureとは分ける。
+- [x] script/manifest/source ledger/cut contextの参照・digest・版を一方向に揃える。
+- [x] writer/reader/validator/template/docsを同じ変更単位で同期し、p450までの統合テストを通す。
 
 主な対象:
 
@@ -37,21 +37,21 @@
 
 ## 2. p100/p200の判断指針と実際の入力を揃える
 
-- [ ] 既存 `AUDIENCE_MEANING_INSTRUCTION` に必要な差分だけを加え、同義の巨大な別指示を作らない。
-- [ ] 原作の事実、人物の自己説明、他者の評価、creative additionの帰属が下流へ残ることを確認する。
-- [ ] 成功と代償、外的成果と内的悪化、集団ごとの評価を保持するfixtureを追加する。
-- [ ] 原作の因果と、sceneの配置理由を混同しない。支持されない因果を補完する経路を確認する。
-- [ ] 新作向けの発想と、既存原作の映像化の指示を分ける。全人物に傷や改心を要求しない。
+- [x] 既存 `AUDIENCE_MEANING_INSTRUCTION` に必要な差分だけを加え、同義の巨大な別指示を作らない。
+- [x] 原作の事実、人物の自己説明、他者の評価、creative additionの帰属が下流へ残ることを確認する。
+- [x] 成功と代償、外的成果と内的悪化、集団ごとの評価を保持するfixtureを追加する。
+- [x] 原作の因果と、sceneの配置理由を混同しない。支持されない因果を補完する経路を確認する。
+- [x] 新作向けの発想と、既存原作の映像化の指示を分ける。全人物に傷や改心を要求しない。
 
 主な対象: `toc/research_author.py`、`toc/story_authoring.py`、`toc/story_author_pipeline.py`、
 research/storyのガイドとテンプレート。現在のlossless source inputを維持する。
 
 ## 3. p700の矛盾と過剰説明を修正する
 
-- [ ] 未回収の問いを一律禁止するpromptと、`intentional_unresolved` の既存契約を一致させる。
-- [ ] narratorの知識境界、人物の自己説明、観客に見せる情報がprojectionで混ざらないか確認する。
-- [ ] 元の映像にない心理・恒久的な変容・和解を語りで追加しない例を用意する。
-- [ ] silent、human_locked、通し原稿→span→cut→TTS textの既存同期を維持する。
+- [x] 未回収の問いを一律禁止するpromptと、`intentional_unresolved` の既存契約を一致させる。
+- [x] narratorの知識境界、人物の自己説明、観客に見せる情報がprojectionで混ざらないか確認する。
+- [x] 元の映像にない心理・恒久的な変容・和解を語りで追加しない例を用意する。
+- [x] silent、human_locked、通し原稿→span→cut→TTS textの既存同期を維持する。
 
 主な対象: `scripts/ai/toc-immersive-narration-multiagent.py`、
 `toc/narration_prompt_projection_registry.py`、`toc/narration_arc.py`、`toc/script_narration.py`。
@@ -59,22 +59,23 @@ research/storyのガイドとテンプレート。現在のlossless source input
 
 ## 4. 素材・画像・動画への具体化を確認する
 
-- [ ] p500の固定の時間制限の光を除き、source/scriptで使われる具体的な対象だけを計画する。
-- [ ] 比喩/themeからobjectへの自動追加を、入口からasset計画まで通して検証する。
-- [ ] 同一性と状態差分を分け、first-frameの時点・所有・位置・開閉状態を守る。
-- [ ] 動画compilerの動作fallback到達条件を確認し、人物不在と意図的な静止のケースを扱う。
-- [ ] narrationとPOVの指定を混同せず、ユーザー指定の体験形式を保持する。
+- [x] p500の固定の時間制限の光を除き、source/scriptで使われる具体的な対象だけを計画する。
+- [x] 比喩/themeからobjectへの自動追加を、入口からasset計画まで通して検証する。
+- [x] 同一性と状態差分を分け、first-frameの時点・所有・位置・開閉状態を守る。
+- [x] 動画compilerの動作fallback到達条件を確認し、人物不在と意図的な静止のケースを扱う。
+- [x] narrationとPOVの指定を混同せず、ユーザー指定の体験形式を保持する。
 
 主な対象: frontendのasset生成部分、`toc/asset_prompt_compiler.py`、
 `toc/image_prompt_compiler.py`、`toc/video_prompt_compiler.py`、対応するprojection registry。
 
 ## 5. 互換性と実際の出力を検証する
 
-- [ ] 新規v2、既存v1、markerなしlegacy、未知版、混在、stale入力を区別する。
-- [ ] p400 rebuildとp500 resumeが、保存対象の入力を勝手に再執筆しないことを確認する。
-- [ ] providerなしの統合テストを先に通す。その後、必要な少数の出力で表現上の差を確認する。
-- [ ] 原作→story→visual→script→prompt→映像/音声の比較で、どこが改善したかを説明する。
-- [ ] 既存のrender/file/provenance検証を通す。制作ごとのcritic・採点gateは追加しない。
+- [x] 新規v2、既存v1、markerなしlegacy、未知版、混在、stale入力を区別する。
+- [x] p400 rebuildとp500 resumeが、保存対象の入力を勝手に再執筆しないことを確認する。
+- [x] providerなしの統合テストと、fixtureのstory/script/manifest/promptの具体的な差を確認する。
+- [x] 原作→story→visual→script→promptの保持と変換をfixtureで確認し、改善箇所を説明する。
+- [ ] 実モデルによる執筆・映像/音声生成後の作品比較。今回の自動テストは生成品質を確認していない。
+- [x] 既存のrender/file/provenance検証を通す。制作ごとのcritic・採点gateは追加しない。
 
 既存runでの有料再生成や新規書籍の取得は、計画作成や単体回帰テストの前提にしない。
 

@@ -62,7 +62,8 @@ def test_cli_freezer_builds_exact_canonical_p750_request(tmp_path: Path) -> None
     gate = Mock()
     captured: dict[str, Any] = {}
 
-    def fake_freeze(supplied_run_dir: Path, request: Any) -> dict[str, Any]:
+    def fake_freeze(supplied_run_dir: Path, request: Any, *, snapshot_id: str) -> dict[str, Any]:
+        assert len(snapshot_id) == 32
         captured["run_dir"] = supplied_run_dir
         captured["request"] = request
         return {"status": "frozen", "approvedAudioSetHash": "sha256:audio"}

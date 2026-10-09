@@ -36,7 +36,7 @@ The canonical order is:
 
 ```text
 RESEARCH → STORY → VISUAL_PLANNING → SCRIPT → ASSET →
-SCENE_IMPLEMENTATION → NARRATION → VIDEO → RENDER → QA
+SCENE_IMPLEMENTATION → NARRATION → VIDEO → SOUND_DESIGN → RENDER → QA
 ```
 
 L1 resolves bucket order and stop targets. It checks the L2 result, required artifact paths,
@@ -57,7 +57,9 @@ resolver prepares the source/readset; authors read it in the order
 `global_docs → stage_docs → templates → inputs`. Readsets provide authoring context and are not
 quality certificates.
 
-Every author validates its output before handing it to the next stage:
+p120 research publishes LLM output without content, source-retrieval, reference, or duration
+validation. It retains runtime decoding, safe file operations, and publication logging.
+Other stages validate their outputs before handing them to the next stage:
 
 - YAML/JSON/Markdown shape and required types
 - unique IDs and valid source, selector, path, and handoff references
@@ -105,7 +107,7 @@ contract. The active slots are:
 | p500 | p510, p520, p530, p550, p560, p570 | asset context, inventory, plan, requests, generation, ordinary continuity checks |
 | p600 | p610, p620, p650, p660, p670, p680 | image context, prompt authoring, request readiness, generation, ordinary output checks, optional user selection |
 | p700 | p710, p730, p740, p750 | narration authoring, TTS, measured duration, optional listening/selection |
-| p800 | p810, p830, p840 | motion authoring, requests, video generation |
+| p800 | p810, p830, p840, p860 | motion authoring, video generation, approved-video BGM/SE generation and settings |
 | p900 | p910, p920 | render inputs and final render/output checks |
 
 `p410` and `p420` are authoring slots. The retired p130, p230, p320, p430, p435, p540, p630,
@@ -116,7 +118,7 @@ Coarse targets resolve to the last active slot in that bucket:
 
 ```text
 p100 → p120   p200 → p220   p300 → p330   p400 → p450   p500 → p570
-p600 → p680   p700 → p750   p800 → p840   p900 → p920
+p600 → p680   p700 → p750   p800 → p860   p900 → p920
 ```
 
 ## Supervisor handoff
@@ -137,6 +139,10 @@ stored as user actions and may change a request revision, which then triggers or
 and provenance validation. A user must explicitly authorize source hybridization and publication;
 those decisions are separate from artifact generation and do not stand in for an automated
 quality result.
+
+Before p900, the user approves the generated video set and completes p860 BGM/SE settings,
+including an explicit no-added-sound choice when appropriate. This is a user action, not an
+automated review certificate. See [Sound Design](implementation/sound-design.md).
 
 ## Module ownership
 

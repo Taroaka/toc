@@ -15,6 +15,19 @@ ToC の役割を source reading、authoring、materialization、generation、ord
   統合する。生成 worker は request-bound output を専用 path に書く。
 - `state.txt` は append-only。派生 view は state history から再構築する。
 
+### モデルとコンテキストルーティング
+
+- 物語の canonical な意味、全体因果、最終統合を所有するメインモデルは
+  `gpt-6-astra` とする。Story Architect と Scene Author はこの範囲に含む。
+- `gpt-6-luna` は高速な枝作業専用とする。抽出、局所修復、独立検証、分類、
+  大量の小さな独立タスクを受け持ち、canonical artifact の全体判断は行わない。
+- Luna worker は `model=gpt-6-luna` / `fork_turns=none` で起動し、親の会話履歴を継承しない。
+  枝専用の入力は path / selector / hash と
+  最小限の task contract で参照し、入力本文や途中 transcript を親のコンテキストへ
+  戻さない。親は最小限の result / patch / evidence summary だけを回収する。
+- `gpt-6-sol` は常用しない。Luna では狭すぎ、Astra に全体を所有させるまでもない
+  中間タスクに限り、orchestrator が理由と範囲を明示して選ぶ。
+
 ## 役割と責務
 
 ### Run Orchestrator（L1）
@@ -96,6 +109,10 @@ worker であっても、この境界内で authoring を行う。
  確認する。
 
 ### Visual Value Ideator
+
+- 新規runは `docs/implementation/visual-planning.md` のsource_first_v2を使う。
+  全文のresearch/storyに基づいて必要なnotesだけを執筆し、追加判断がなければ空配列を返す。
+  下記のanchor/reference/asset候補は必要な場合の検討事項であり、全欄を埋める義務ではない。
 
 - 入力: `research.md`、`story.md`
 - 出力: `visual_value.md`
@@ -193,4 +210,3 @@ prompt は source meaning を provider-facing prose に直接漏らさず、comp
 
 Role format は `role@vX.Y.Z`。role prompt の変更は canonical docs と対応する Claude/Codex
 mirror を同時に更新する。
-

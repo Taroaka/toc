@@ -6,9 +6,13 @@ p700 は authoring、TTS、実測 duration、任意の user listening/selection 
 
 ## 原則
 
+執筆前に `docs/implementation/narration-prompting.md` の標準の語り口・音声タグ・単語の修正を読む。
+ですます調・落ち着いた語り・平易な用語を基本とし、TTS本文に語り方タグと読みを入れる。
+runの `narration_style.json` に承認済みの指示がある場合はそれを引き継ぐ。
+
 - `toc/narration_prompt_projection_registry.py` の `authoring_relevance` と
   `spoken_projection` を使い、design key を spoken text へ一方向に投影する。
-- `tts_text` は ElevenLabs v3 の final string。TODO や制作 metadata を入れない。
+- `tts_text` は ElevenLabs v4 の final string。TODO や制作 metadata を入れない。
 - 未記入は `text: ""`、`tts_text: ""`、`authoring_status: missing` で表す。
 - `story_role`、`visual_distance`、`tts_readiness`、silence contract を authoring 時に決める。
 - `1 cut = 1 narration` は必須ではない。span は複数 cut をまたげる。
@@ -49,6 +53,10 @@ single writer が authoring prompt を読み、`audio_story_plan` と continuous
 2. cut 境界なしの `continuous_full_draft`
 3. `narration_spans[]` と source cut anchors
 4. readable `text`、TTS 用 `tts_text`、pronunciation targets
+
+原稿は [音声だけで理解できる説明の具体性](../docs/implementation/narration-prompting.md#音声だけで理解できる説明の具体性) に従う。
+映像との重複回避や尺の都合で、理解に必要な場所・対象・期限・因果を削らない。
+執筆者は通し原稿を音声だけのつもりで読み直し、曖昧な指示語や行為の省略を補ってからTTSへ渡す。
 
 全編の canonical order、source event boundary、visible overlap、TTS normalization は ordinary
 structural checks で確認する。
@@ -113,4 +121,3 @@ prompt/source hashes を使う。direct audio generation が current script/TTS 
 state は append-only。p710/p730/p740/p750 の stage/slot status、narration revision、audio hash、
 timeline、request provenance を記録する。resume は stale downstream item だけを再生成し、
 valid audio と user choice は完全な binding が一致する限り保持する。
-

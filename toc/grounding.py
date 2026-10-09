@@ -279,6 +279,10 @@ def resolve_stage_grounding(*, stage: str, run_dir: Path, flow: str | None = Non
     required_docs = [_repo_entry(path, kind="doc") for path in stage_spec.get("required_docs", []) if isinstance(path, str)]
     required_templates = [_repo_entry(path, kind="template") for path in stage_spec.get("required_templates", []) if isinstance(path, str)]
     required_inputs = [_run_entry(run_dir, path, flow=resolved_flow) for path in stage_spec.get("required_inputs", []) if isinstance(path, str)]
+    # Legacy runs may lack visual planning. When present it must be part of the
+    # readset (including its digest), rather than an untracked author input.
+    optional_inputs = [_run_entry(run_dir, path, flow=resolved_flow) for path in stage_spec.get("optional_inputs", []) if isinstance(path, str)]
+    required_inputs.extend(entry for entry in optional_inputs if entry["exists"] and entry["path"] not in {item["path"] for item in required_inputs})
     optional_playbooks = [_repo_entry(path, kind="playbook") for path in stage_spec.get("optional_playbooks", []) if isinstance(path, str)]
 
     state = _load_state_for_grounding(run_dir, flow=resolved_flow)

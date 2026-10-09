@@ -1,4 +1,4 @@
-contract_version: 7
+contract_version: 11
 
 global_required_docs:
   - docs/system-architecture.md
@@ -33,9 +33,11 @@ stages:
     # p300 visual planning grounding entry. This tracks visual_value.md
     # authoring; it is not a canonical generation stage.
     required_docs:
+      - docs/implementation/b-roll-design.md
       - docs/story-creation.md
       - docs/data-contracts.md
       - docs/adaptation-value-amplification.md
+      - docs/implementation/visual-planning.md
     required_templates:
       - workflow/visual-value-template.yaml
     required_inputs:
@@ -44,7 +46,16 @@ stages:
     optional_playbooks: []
 
   script:
+    optional_inputs:
+      - narration_style.json
+      - visual_value.md
+      - cinematic_preferences.md
     required_docs:
+      - docs/implementation/narration-prompting.md
+      - docs/implementation/p400-cinematic-authoring.md
+      - workflow/playbooks/sound-design/affect-and-spotting.md
+      - docs/implementation/cinematic-language.md
+      - docs/implementation/b-roll-design.md
       - docs/story-creation.md
       - docs/script-creation.md
       - docs/implementation/scene-loop.md
@@ -63,7 +74,13 @@ stages:
       - workflow/playbooks/script/visual-value-midroll-pass.md
 
   narration:
+    optional_inputs:
+      - narration_style.json
+      - cinematic_direction.json
+      - visual_value.md
     required_docs:
+      - docs/implementation/narration-prompting.md
+      - docs/implementation/b-roll-design.md
       - docs/implementation/video-integration.md
     required_templates:
       - workflow/video-manifest-template.md
@@ -77,6 +94,9 @@ stages:
         - production
 
   asset:
+    optional_inputs:
+      - cinematic_direction.json
+      - visual_value.md
     required_docs:
       - docs/implementation/asset-bibles.md
       - docs/data-contracts.md
@@ -90,9 +110,12 @@ stages:
     optional_playbooks: []
 
   manifest:
+    optional_inputs:
+      - cinematic_direction.json
     # p450 skeleton manifest grounding. This is part of p400 authoring,
     # so it only requires the manifest and script inputs.
     required_docs:
+      - docs/implementation/b-roll-design.md
       - docs/script-creation.md
       - docs/implementation/agent-roles-and-prompts.md
       - docs/data-contracts.md
@@ -105,7 +128,11 @@ stages:
     optional_playbooks: []
 
   scene_implementation:
+    optional_inputs:
+      - cinematic_direction.json
+      - visual_value.md
     required_docs:
+      - docs/implementation/b-roll-design.md
       - docs/implementation/image-prompting.md
       - docs/implementation/asset-bibles.md
       - docs/implementation/agent-roles-and-prompts.md
@@ -121,7 +148,11 @@ stages:
       - workflow/playbooks/image-generation/reference-consistent-batch.md
 
   video_generation:
+    optional_inputs:
+      - cinematic_direction.json
+      - visual_value.md
     required_docs:
+      - docs/implementation/b-roll-design.md
       - docs/video-generation.md
       - docs/implementation/video-prompting.md
       - docs/adaptation-value-amplification.md
@@ -140,3 +171,18 @@ stages:
       path: video_manifest.md
       allowed_values:
         - production
+
+  sound_design:
+    required_docs:
+      - docs/implementation/sound-design.md
+      - docs/implementation/video-integration.md
+      - docs/research/film-sound-emotion.md
+      - workflow/playbooks/sound-design/affect-and-spotting.md
+    required_templates:
+      - workflow/sound-spotting-template.md
+    required_inputs:
+      - video_manifest.md
+    optional_inputs:
+      - script.md
+      - sound_design.json
+    optional_playbooks: []

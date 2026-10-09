@@ -1,0 +1,5 @@
+- [x] Regression tests for stage receipts, upstream drift, failed attempts, path safety.
+- [x] Existing-run authoring continuation and API routing under locks.
+- [x] Durable narration/video/render operation continuation.
+- [x] API and pipeline integration tests; existing resume regression checks.
+- [x] Review and update operational documentation.

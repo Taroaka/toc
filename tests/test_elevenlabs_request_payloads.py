@@ -32,7 +32,7 @@ class TestElevenLabsRequestPayloads(unittest.TestCase):
                 GENERATE_ASSETS.generate_elevenlabs_tts(
                     client=None,
                     voice_id="voice",
-                    model_id="eleven_v3",
+                    model_id="eleven_v4",
                     output_format="mp3_44100_128",
                     language_code="ja",
                     text="こんにちは",
@@ -45,6 +45,8 @@ class TestElevenLabsRequestPayloads(unittest.TestCase):
 
             payload = json.loads(request_log.read_text(encoding="utf-8"))
             self.assertEqual(payload["language_code"], "ja")
+            self.assertEqual(payload["model_id"], "eleven_v4")
+            self.assertEqual(set(payload["voice_settings"]), {"stability", "similarity_boost"})
 
     def test_standalone_tts_save_request_includes_japanese_language_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -72,6 +74,8 @@ class TestElevenLabsRequestPayloads(unittest.TestCase):
 
             payload = json.loads(request_log.read_text(encoding="utf-8"))
             self.assertEqual(payload["language_code"], "ja")
+            self.assertEqual(payload["model_id"], "eleven_v4")
+            self.assertEqual(set(payload["voice_settings"]), {"stability", "similarity_boost"})
 
 
 if __name__ == "__main__":

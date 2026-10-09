@@ -50,11 +50,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="ElevenLabs official SDK smoke test (manual).")
     parser.add_argument("--text", default="The first move is what sets everything in motion.")
     parser.add_argument("--voice-id", default="JOcmGzB8OFjY8MhjHHEf")
-    parser.add_argument("--model-id", default="eleven_v3")
+    parser.add_argument("--model-id", default="eleven_v4")
     parser.add_argument("--output-format", default="mp3_44100_128")
     parser.add_argument("--language-code", default="ja")
     parser.add_argument("--out", default="output/_smoke/elevenlabs_sdk_smoke.mp3")
     args = parser.parse_args()
+    repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from toc.providers.elevenlabs import normalize_elevenlabs_model_id
+
+    args.model_id = normalize_elevenlabs_model_id(args.model_id)
 
     _load_env_best_effort()
 

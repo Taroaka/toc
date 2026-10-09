@@ -1,12 +1,11 @@
 import asyncio
 import json
-from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from toc.research_author import build_research_prompt, validate_research_document, author_research
+from toc.research_author import build_research_prompt, author_research
 
 
 def document():
@@ -34,35 +33,11 @@ def test_prompt_has_exact_source_and_no_narrative_profile():
     assert '信頼度を固定値' in prompt
 
 
-def test_title_only_requires_retrieved_real_source_not_fake_tradition():
-    doc = document()
-    assert validate_research_document(doc, topic='作品名', source='作品名', retrieved_urls={'https://example.org/source'}) == []
-    assert 'research.external_source_not_retrieved' in validate_research_document(doc, topic='作品名', source='作品名', retrieved_urls=set())
-    doc['source_inventory'][0]['url'] = 'request-derived-tradition'
-    assert validate_research_document(doc, topic='作品名', source='作品名', retrieved_urls=set())
-
-
-@pytest.mark.parametrize('change', ['duplicate_event', 'missing_source', 'empty_story', 'empty_passages'])
-def test_research_structure_fails_closed(change):
-    doc = document()
-    if change == 'duplicate_event': doc['story_materials']['chronological_events'] *= 2
-    if change == 'missing_source': doc['story_materials']['chronological_events'][0]['sources'] = ['MISSING']
-    if change == 'empty_story': doc['story_materials']['canonical_story_dump'] = ''
-    if change == 'empty_passages': doc['source_passages'] = []
-    assert validate_research_document(doc, topic='作品名', source='作品名', retrieved_urls={'https://example.org/source'})
-
-
-def test_original_source_evidence_must_match_exact_input():
-    doc = document();doc['source_inventory'][0]['url'] = 'request:source'
-    assert validate_research_document(doc, topic='作品名', source='灯台を直す。', retrieved_urls=set()) == []
-    assert validate_research_document(doc, topic='作品名', source='別の内容。', retrieved_urls=set())
-
-
 def result(doc):
     return SimpleNamespace(payload={'result_json': json.dumps(doc)}, transcript=({'method': 'item/completed', 'params': {'item': {'type': 'webSearch', 'action': {'type': 'openPage', 'url': 'https://example.org/source'}}}},), provenance=SimpleNamespace(as_dict=lambda: {'model': 'test', 'thread_id': 'test'}))
 
 
-def test_author_publishes_validated_output_with_technical_duration_only(tmp_path):
+def test_author_publishes_output_with_technical_duration_only(tmp_path):
     turn = AsyncMock(return_value=result(document()))
     data = asyncio.run(author_research(run_dir=tmp_path, topic='作品名', source='作品名', target_duration_seconds=600, grounding='instructions', client_factory=lambda: None, turn_runner=turn))
     assert (tmp_path / 'research.md').is_file()
@@ -79,17 +54,25 @@ def test_author_failure_does_not_publish_synthetic_research(tmp_path):
     assert not (tmp_path / 'research.md').exists()
 
 
-def test_invalid_author_result_does_not_replace_existing_research(tmp_path):
-    path = tmp_path / 'research.md';path.write_text('previous authored source')
-    doc = document();doc['source_inventory'][0]['url'] = 'run-request'
-    with pytest.raises(RuntimeError, match='research'):
-        asyncio.run(author_research(run_dir=tmp_path, topic='作品名', source='作品名', target_duration_seconds=300, grounding='instructions', client_factory=lambda: None, turn_runner=AsyncMock(return_value=result(doc))))
-    assert path.read_text() == 'previous authored source'
-
-
-def test_claimed_urls_in_final_message_do_not_count_as_retrieval():
-    from toc.research_author import retrieved_source_urls
-    assert retrieved_source_urls([{'method': 'item/completed', 'params': {'item': {'type': 'agentMessage', 'text': 'https://example.org/source'}}}]) == set()
+@pytest.mark.parametrize('change', ['unretrieved_url', 'duplicate_event', 'missing_source', 'empty_story', 'empty_passages', 'wrong_topic', 'request_excerpt', 'missing_fields'])
+def test_author_publishes_without_research_validation(tmp_path, change):
+    doc = document()
+    if change == 'unretrieved_url': doc['source_inventory'][0]['url'] = 'https://example.org/unlogged'
+    if change == 'duplicate_event': doc['story_materials']['chronological_events'] *= 2
+    if change == 'missing_source': doc['story_materials']['chronological_events'][0]['sources'] = ['MISSING']
+    if change == 'empty_story': doc['story_materials']['canonical_story_dump'] = ''
+    if change == 'empty_passages': doc['source_passages'] = []
+    if change == 'wrong_topic': doc['topic'] = 'another topic'
+    if change == 'request_excerpt': doc['source_inventory'][0]['url'] = 'request:source'
+    if change == 'missing_fields': doc = {}
+    response = result(doc)
+    response.transcript = ()
+    data = asyncio.run(author_research(run_dir=tmp_path, topic='作品名', source='作品名', target_duration_seconds=300, grounding='instructions', client_factory=lambda: None, turn_runner=AsyncMock(return_value=response)))
+    assert {k: v for k, v in data.items() if k != 'metadata'} == doc
+    assert (tmp_path / 'research.md').is_file()
+    publication = json.loads((tmp_path / 'logs/authoring/research/publication.json').read_text())
+    assert publication['status'] == 'published'
+    assert not (tmp_path / 'logs/authoring/research/validation.json').exists()
 
 
 def test_research_client_enables_web_search_without_writes():
@@ -130,10 +113,3 @@ def test_real_grounding_reads_research_docs_without_story_preset(tmp_path):
     assert 'workflow/research-template.production.yaml' in grounding
     assert 'RUN_VARIANTS' not in grounding
     assert 'request-derived-tradition' not in grounding
-
-
-def test_wrong_topic_and_url_only_input_cannot_be_used_as_original_story():
-    doc = document();doc['topic'] = '別の作品'
-    assert 'research.topic_mismatch' in validate_research_document(doc, topic='作品名', source='作品名', retrieved_urls={'https://example.org/source'})
-    doc = document();doc['source_inventory'][0]['url'] = 'request:source';doc['source_passages'][0]['passage'] = 'https://example.org/source'
-    assert validate_research_document(doc, topic='作品名', source='https://example.org/source', retrieved_urls=set())

@@ -1,5 +1,15 @@
 # Script Creation System
 
+source_first_v2 の cut 設計は、story の authored `event_sequence` 順を保持する。
+各 visible beat は既定で1 cut。複数cutへ分解する場合は beat の `cut_transitions[]`
+に `transition_id`、`first_frame_brief`、`motion_brief`、`motion_end_state` を明示する。
+同じbeatの分割は連続して配置し、別beatへ進んだ後に前のbeatを再割当しない。
+`source_event_ids` は research の元IDを、`source_transition_id` は分割IDを
+script/manifest の `cut_contract.source_event_contract` まで保持する。
+coverage matrix は明示されたID参照から作り、語句一致・比例配分・固定beat位置で
+欠落を補完しない。`must_be_seen: false` のbeatはinventoryに残しcutを要求しない。
+尺が既存provider上限へ収まらない場合、定型動作を追加せず執筆側で必要な分割を作る。
+
 `docs/story-creation.md` が作る物語を、`docs/video-generation.md` が読める scene/cut、
 narration、provider handoff へ変換する。script stage は直接 authoring → ordinary structural
 validation → manifest materialization の順に進み、画像・音声・動画 provider は後続 stage が呼ぶ。
@@ -31,6 +41,12 @@ validation → manifest materialization の順に進み、画像・音声・動�
 - structure、IDs、references、selector closure、duration fields、manifest synchronization が
   ordinary validator を通る
 
+## ナレーションの語り口と読み
+
+執筆前に [標準の語り口・音声タグ・単語の修正](implementation/narration-prompting.md#標準の語り口音声タグ単語の修正) を読む。
+日本語の語りは、ですます調・落ち着いた温かい声・分かりやすい単語を既定にし、音声タグと読みをTTS本文へ反映する。
+runの `narration_style.json` があれば、承認された話者・語り口・用語修正を引き継ぐ。
+
 ## Source と creative boundary
 
 史実、数値、固有名詞、文献差分、伝承バリエーションは source reference とともに保持する。
@@ -40,9 +56,26 @@ selected source IDs を run artifact に保存する。
 
 ## p400 Cinematic Scene Design Contract
 
-p400 は story の各部分を、観客が映像で経験できる不可逆な scene へ翻訳する。時間を均等に
-割った説明段落は scene にならない。場所、情報、感情、因果、視覚価値のいずれかが変化し、
-次 scene の起点を生む必要がある。
+新規制作は [p400 Cinematic Authoring](implementation/p400-cinematic-authoring.md) を優先する。
+LLMが全編・前後sceneとp300の演出を読み、scene単位でcut列・カメラ・音・尺を執筆する。
+`cinematic_direction.json` がp400の演出の正本。コードは参照と状態の受渡しを検証・投影する。
+以下の旧形式の必須解釈や例文を、新経路の定型演出として補完しない。
+
+`source_first_v2` runでは [映像設計契約](implementation/visual-planning.md) を優先する。
+scene/event/stateはstoryから直接引き継ぎ、runtime sceneとsource sceneの対応を保存する。
+下記のdramatic question、value shift、causal turn等は作品で必要なときの設計項目であり、
+新規v2で全sceneに非空の葛藤・反転・不可逆な変化を追加する条件ではない。
+原作の状態を維持するsceneも許可する。source/ID/順序/reveal/handoff検証は引き続き必須。
+
+p400 は story の各部分を、観客が映像で経験できる行為と状態へ翻訳する。変化がある場合は
+その原因と結果を具体化し、変化しない場面はその持続を保つ。時間を均等に割るためだけに
+場面や感情の反転を増やさない。
+
+ナレーションでは既存の `audio_story_plan.open_loops[].payoff_type: intentional_unresolved` を
+尊重する。意図的に未解決の問いに、教訓・和解・恒久的な改心を補わない。人物が誠実に語る
+自己説明はその人物の発言として扱い、観察事実や意図的な嘘と混同しない。
+`scene_intent.visual_notes` は執筆背景として渡し、その指示文自体を読み上げない。
+silent、human_locked、原稿からspan/cut/TTSへの同期契約は維持する。
 
 ### 観客の理解と意味の引き継ぎ
 
@@ -131,8 +164,8 @@ scene_intent:
     p800_video: []
 ```
 
-The scene validator requires a non-empty question, visible value shift, causal turn, source references,
-concrete visual evidence, unique IDs, valid locations, and a valid next-scene handoff. Plan duration
+The scene validator checks source references, concrete visual evidence, unique IDs, valid locations,
+and a valid next-scene handoff. Questions, value shifts and causal turns are authored only when the scene needs them. Plan duration
 fields are advisory; duration arithmetic alone never invents a scene or cut.
 
 ### p410 Scene authoring
@@ -174,6 +207,11 @@ key; `setup`, `pressure`, `turn`, `payoff`, `threshold`, and `custom` are exampl
 required ladder. Provider fields such as camera, prompt, lens, or motion do not belong in this object.
 
 ### p420 Cut Blueprint
+
+人物を出さず空気感・余韻・scene接続を担うBロールは `cut_role: sub` とし、
+[人物を出さないBロールの設計](implementation/b-roll-design.md) に従う。
+mainで必須の出来事を成立させ、subの被写体・技法・音・前後の接続をcut設計時に確定する。
+末尾1〜2cutの固定枠にはせず、前scene末尾と次scene冒頭を一組として必要性を判断する。
 
 `p420` turns each scene event into renderable cuts. Cut count follows distinct visual obligations and
 must-see event beats, never a fixed seconds-per-cut formula. Keep one primary intent per cut; use a
@@ -258,6 +296,12 @@ to TTS and measures the generated audio.
 
 ### Full-run authoring
 
+ToC のナレーションは全編を通して第三者視点（三人称）に固定する。語り手は物語の外から
+人物・出来事・状況を語り、登場人物になりきった一人称や、視聴者を物語の当事者にする
+二人称へ切り替えない。登場人物の台詞・明示された引用内の人称は原文に従い、ナレーションの
+視点とは区別する。第三者視点でも、source の根拠、人物の知識境界、観客への開示順は守る。
+この方針を通し原稿、`narration_spans[]`、`narration`、`tts_text` に一貫して適用する。
+
 Write a continuous spoken draft first, then split it into `narration_spans[]` anchored to one or more
 cuts. Preserve canonical cut order. A visual-only cut may use an explicit silence contract with a reason
 and duration. Never add narration merely to fill target duration.
@@ -318,3 +362,19 @@ Older short-form templates may contain fields that are ignored by current genera
 source for new authoring. Current runs use the active slots and contracts in
 `docs/data-contracts.md`; old state entries are preserved as history and never synthesized into a
 new production slot.
+
+## 終幕の焦点と観客の余韻
+
+終幕では、出来事の後始末に加え、観客が最後に誰の何を感じて見終えるかを設計する。
+主人公の物語では、脇役の事情を整理した後に、主人公または中心となる関係へ感情の焦点を戻す。
+最後の主要cutで、冒頭から何が変わったかを表情、距離、触れ合い、行動などの具体的な画で受け取れるようにする。
+群像劇など別の人物を最後に置く構成は、その人物が結末の主題を担う理由を明示する。
+作品に合う納得と満足、感動を intended affect として狙い、観客の実際の感情を保証するとは書かない。
+
+- 最後の2〜3cutを続けて読み、中心人物や中心関係が脇役の説明に埋もれていないか確認する。
+- 結末に必要な出来事が成立した後は、語りで幸福や教訓を繰り返さず、画面と間、後工程の音楽に余地を残す。
+- 人物を見届けることが終幕の責務ならmainとして設計する。末尾に人物なしBロールを必ず置く規則にはしない。
+- 同じ寄りの画を3枚並べず、行動→応答→関係を見届ける画のように各cutの役割を分ける。
+- 作品が意図した未解決や悲劇も保持する。原作にない後日談を加える場合は、ユーザーの追加意図と創作範囲を記録する。
+
+音声のフロント試聴と最終合成は `docs/implementation/video-integration.md` の「ナレーション音量・試聴・合成の共通処理」に従う。Codex専用のtmpスクリプトへ音量・間の処理を閉じ込めず、`toc.narration_audio` を共通利用する。

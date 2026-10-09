@@ -6,12 +6,24 @@ from pathlib import Path
 import pytest
 
 from toc.story_author_runtime import (
+    DEFAULT_REPAIR_AUTHOR_MODEL,
+    DEFAULT_SCENE_AUTHOR_MODEL,
+    DEFAULT_STORY_AUTHOR_MODEL,
+    JsonSyntaxRepairReceipt,
     STORY_AUTHOR_TRANSPORT_SCHEMA,
     StoryAuthorRuntimeError,
     build_story_transport_prompt,
+    decode_json_object_with_repair,
     decode_story_transport_payload,
+    decode_story_transport_payload_with_receipt,
     run_structured_story_turn,
 )
+
+
+def test_story_author_roles_default_to_gpt6_model_family() -> None:
+    assert DEFAULT_STORY_AUTHOR_MODEL == "gpt-6-astra"
+    assert DEFAULT_SCENE_AUTHOR_MODEL == "gpt-6-astra"
+    assert DEFAULT_REPAIR_AUTHOR_MODEL == "gpt-6-luna"
 
 
 def test_flexible_story_schema_uses_closed_transport_envelope() -> None:
@@ -31,6 +43,83 @@ def test_flexible_story_schema_uses_closed_transport_envelope() -> None:
     assert "result_json" in prompt
     assert '"scene_plan"' in prompt
     assert decoded["rich_extension"] == {"x": 1}
+
+
+def test_transport_decoder_repairs_one_redundant_final_object_delimiter() -> None:
+    receipts: list[JsonSyntaxRepairReceipt] = []
+
+    decoded = decode_story_transport_payload(
+        {"result_json": '{"scene_plan": [], "title": "kept"} }'},
+        on_syntax_repair=receipts.append,
+    )
+
+    assert decoded == {"scene_plan": [], "title": "kept"}
+    assert len(receipts) == 1
+    assert receipts[0].repaired is True
+    assert receipts[0].rule == "one_redundant_closing_brace"
+    assert receipts[0].removed_suffix == " }"
+
+
+def test_transport_decoder_keeps_clean_decode_receipt_available() -> None:
+    decoded, receipt = decode_story_transport_payload_with_receipt(
+        {"result_json": '{"scene_plan": []}'}
+    )
+
+    assert decoded == {"scene_plan": []}
+    assert receipt == JsonSyntaxRepairReceipt.clean('{"scene_plan": []}')
+
+
+def test_json_object_helper_returns_a_clean_receipt_without_changing_text() -> None:
+    decoded, receipt = decode_json_object_with_repair('{"nested": {"x": 1}}')
+
+    assert decoded == {"nested": {"x": 1}}
+    assert receipt.repaired is False
+    assert receipt.original_text == receipt.normalized_text == '{"nested": {"x": 1}}'
+
+
+@pytest.mark.parametrize(
+    "result_json",
+    [
+        '{"a": 1}{"b": 2}',
+        '{"a": 1} prose',
+        '{"a": 1}}}',
+        '{"a": 1]}',
+        '{"a":',
+        '{"a": "unterminated}',
+        '{"a": 1, "a": 2}',
+        '{"nested": {"a": 1, "a": 2}}',
+        '{"value": NaN}',
+    ],
+)
+def test_transport_decoder_rejects_unbounded_or_ambiguous_json_repairs(
+    result_json: str,
+) -> None:
+    with pytest.raises(StoryAuthorRuntimeError):
+        decode_story_transport_payload({"result_json": result_json})
+
+
+def test_transport_decoder_preserves_non_object_error_boundary() -> None:
+    with pytest.raises(
+        StoryAuthorRuntimeError,
+        match="must decode to a JSON object",
+    ) as raised:
+        decode_story_transport_payload({"result_json": '[1, 2]'})
+
+    assert raised.value.diagnostic is not None
+    assert raised.value.diagnostic.code == "top_level_type"
+
+
+def test_invalid_json_error_exposes_structured_parser_diagnostic() -> None:
+    with pytest.raises(StoryAuthorRuntimeError) as raised:
+        decode_story_transport_payload({"result_json": '{"a": }'})
+
+    diagnostic = raised.value.diagnostic
+    assert diagnostic is not None
+    assert diagnostic.offset == 6
+    assert diagnostic.line == 1
+    assert diagnostic.column == 7
+    assert diagnostic.parser_message == "Expecting value"
+    assert raised.value.diagnostics == diagnostic.as_dict()
 
 
 class FakeClient:

@@ -1,0 +1,1 @@
+既存run内の候補は再コピーしない。候補のrevision/context/grounding/hashとdecodeを確認し、既存approve_audio_candidateで採用状態をそろえる。全runのreadinessが不足する場合はitem完了とstage進行中を分ける。全素材種別の今後の手順をroot guideと運用正本へ追加する。新しい自動バックグラウンド監視の実装ではなく、各担当エージェントが従う常設の制作規則。

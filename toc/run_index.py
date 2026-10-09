@@ -112,12 +112,11 @@ STAGES: tuple[StageSpec, ...] = (
                 "00": "research source-of-truth",
                 "10": "research grounding",
                 "20": "research authoring",
-                "30": "research validation",
             }
         ),
         state_keys=("stage.research.status",),
         source_of_truth="research.md",
-        validator="deterministic research validation",
+        validator="- (LLM-authored research; no p120 output validation)",
         handoff="research.md",
         request_target="-",
         outputs="research.md",
@@ -270,7 +269,7 @@ STAGES: tuple[StageSpec, ...] = (
     ),
     StageSpec(
         bucket="p800",
-        title="Video Stage",
+        title="Video / BGM / SE Stage",
         slots=_stage_slots(
             {
                 "00": "video generation plan / handoff",
@@ -279,16 +278,17 @@ STAGES: tuple[StageSpec, ...] = (
                 "30": "video generation requests / clip plan",
                 "40": "video clip outputs",
                 "50": "video output validation / exclusions",
+                "60": "approved video BGM / SE proposals, generation and mix settings",
             }
         ),
-        state_keys=("stage.video.status", "stage.video_generation.status"),
+        state_keys=("stage.video.status", "stage.video_generation.status", "stage.sound_design.status"),
         source_of_truth="video_generation plan / manifest handoff",
         validator="deterministic video request/output validation",
         handoff="video_generation_requests.md",
         request_target="video_generation_requests.md",
         outputs="assets/videos/**",
         default_owner="generator",
-        planned_artifacts=(("p830", "video_generation_requests.md"),),
+        planned_artifacts=(("p830", "video_generation_requests.md"), ("p860", "sound_design.json")),
     ),
     StageSpec(
         bucket="p900",
@@ -364,8 +364,8 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
     "p400": (
         SlotSpec(
             "p410",
-            "Scene Completion",
-            "resolve script grounding and author scene intent cards",
+            "Cinematic Scene Authoring",
+            "resolve script grounding and author scene direction with a contextual cut sequence",
             planned_artifacts=(
                 "logs/grounding/script.json",
                 "logs/grounding/script.readset.json",
@@ -456,6 +456,7 @@ SLOT_CONTRACTS: dict[str, tuple[SlotSpec, ...]] = {
         ),
         SlotSpec("p830", "Video Requests", "freeze video generation requests", planned_artifacts=("video_generation_requests.md",), default_requirement="optional"),
         SlotSpec("p840", "Video Generation", "generate video clips", default_requirement="optional"),
+        SlotSpec("p860", "BGM / SE", "approve current videos, propose/generate/select sounds and complete mix settings", planned_artifacts=("sound_design.json",), default_requirement="optional", state_keys=("stage.sound_design.status",)),
     ),
     "p900": (
         SlotSpec("p910", "Render Inputs", "freeze concat lists and render inputs", planned_artifacts=("video_clips.txt", "video_narration_list.txt"), default_requirement="optional"),
@@ -637,6 +638,7 @@ def classify_run_file(rel_path: str, *, run_dir: Path | None = None) -> Inventor
         return InventoryEntry(rel, "p620", "canonical", "production scene implementation manifest")
 
     exact: dict[str, tuple[str, str, str]] = {
+        "cinematic_direction.json": ("p410", "canonical", "LLM-authored cinematic direction and cut sequence"),
         "p000_index.md": ("p000", "canonical", "human-facing run navigation entry"),
         "research.md": ("p120", "canonical", "research source-of-truth"),
         "research_review.md": ("p950", "legacy", "historical review artifact (ignored by production)"),
@@ -671,6 +673,7 @@ def classify_run_file(rel_path: str, *, run_dir: Path | None = None) -> Inventor
         "narration_review.md": ("p950", "legacy", "historical review artifact (ignored by production)"),
         "logs/review/duration_scene.subagent_prompt.md": ("p740", "log", "duration validation prompt artifact"),
         "logs/review/duration_narration.subagent_prompt.md": ("p740", "log", "duration validation prompt artifact"),
+        "sound_design.json": ("p860", "canonical", "BGM / SE proposals, candidates, selection and mix"),
         "video_clips.txt": ("p910", "request", "render concat list"),
         "video_narration_list.txt": ("p910", "request", "render narration concat list"),
         "eval_report.json": ("p950", "legacy", "historical evaluation output (ignored by production)"),
@@ -698,6 +701,10 @@ def classify_run_file(rel_path: str, *, run_dir: Path | None = None) -> Inventor
         return InventoryEntry(rel, "p840", "output", "video clip output")
     if rel.startswith("assets/audio/"):
         return InventoryEntry(rel, "p730", "output", "audio output")
+    if rel.startswith("assets/sound/"):
+        return InventoryEntry(rel, "p860", "output", "BGM / SE candidate audio")
+    if rel.startswith("logs/sound_design/"):
+        return InventoryEntry(rel, "p860", "log", "sound generation request / result / archived plan")
     if rel.startswith("logs/providers/"):
         return InventoryEntry(rel, "p950", "log", "provider execution log")
     if rel.startswith("scratch/"):

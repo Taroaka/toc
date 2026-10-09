@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI広告制作"
+  short_description: "ToC作品とEC商品の広告を企画し、画像・動画制作と比較検証へつなげる"
+  default_prompt: "$ai-ad-creative この作品または商品から、目的に合う広告を作ってください。"

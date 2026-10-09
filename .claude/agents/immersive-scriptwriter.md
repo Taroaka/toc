@@ -36,7 +36,7 @@ model: inherit
 
 - **`script.md` を言語情報の正本**にする
 - `video_manifest.md` の `audio.narration.text` と `image_generation.prompt` は、`script.md` に書いた内容を具体化したものでなければならない
-- `script.md` の cut では `elevenlabs_prompt` を authoring source、`tts_text` を ElevenLabs v3 に送る final string として持てるようにする
+- `script.md` の cut では `elevenlabs_prompt` を authoring source、`tts_text` を ElevenLabs v4 に送る final string として持てるようにする
 - `video_manifest.md` 側で **新しい物語情報・新しい感情解釈・新しい見せ場** を勝手に足さない
 - `visual_value.md` がある場合、まず p300 visual planning 正本として読み、visual identity / scene visual value / anchor / reference strategy / asset candidates / regeneration risks を script と skeleton manifest に反映する
 - `visual_value.md.value_parts[]` がある場合だけ、その part を **中盤の視覚報酬** として優先的に取り込む

@@ -652,7 +652,7 @@ class ResumeSubprocessContractTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 TimeoutError,
-                "resume-from-p500 subprocess timed out",
+                "resume subprocess timed out",
             ):
                 asyncio.run(
                     image_gen_app._run_resume_subprocess_command(
@@ -768,7 +768,7 @@ while True:
             ):
                 with self.assertRaisesRegex(
                     TimeoutError,
-                    "resume-from-p500 subprocess timed out",
+                    "resume subprocess timed out",
                 ):
                     asyncio.run(
                         image_gen_app._run_resume_subprocess_command(
@@ -997,6 +997,7 @@ class ResumeJobWorkerTests(unittest.TestCase):
                 source="output/source_run",
             )
             with (
+                patch("server.image_gen_app._requires_authoring_resume", return_value=False),
                 patch("server.image_gen_app.ROOT", root),
                 patch(
                     "server.image_gen_app._run_p500_resume_subprocess",
@@ -1043,6 +1044,7 @@ class ResumeJobWorkerTests(unittest.TestCase):
             create_input.write_text("{}\n", encoding="utf-8")
             validate_p680 = Mock()
             with (
+                patch("server.image_gen_app._requires_authoring_resume", return_value=False),
                 patch("server.image_gen_app.ROOT", root),
                 patch(
                     "server.image_gen_app._run_p500_resume_subprocess",
@@ -1714,7 +1716,15 @@ cut
 
         self.assertEqual(final_state, original_state)
         self.assertEqual(set_job.await_args_list[-1].args[1]["status"], "failed")
-        append_state.assert_not_called()
+        append_state.assert_called_once()
+        failure_updates = append_state.call_args.args[1]
+        self.assertEqual(failure_updates["status"], "FAILED")
+        self.assertEqual(failure_updates["runtime.resume.p500.status"], "failed")
+        self.assertEqual(
+            failure_updates.get("runtime.stage"),
+            None,
+            "child semantic failure stage must remain authoritative",
+        )
         acquire_lease.assert_not_awaited()
         release_lease.assert_not_awaited()
 

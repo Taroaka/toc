@@ -75,6 +75,14 @@ class NarrationPromptProjectionRule:
 
 _RULES = (
     NarrationPromptProjectionRule(
+        "scene.scene_intent.visual_notes", "background", "respect_visual_decisions_without_speaking_design_notes",
+        "background_context", spoken_projection_override="must_not_surface",
+    ),
+    NarrationPromptProjectionRule(
+        "scene.scene_intent.reveal_contract", "reveal_constraint", "preserve_authored_reveal_boundaries",
+        "reveal_constraints",
+    ),
+    NarrationPromptProjectionRule(
         "manifest.video_metadata.time",
         "background",
         "constrain_world_knowledge_and_diction_without_forced_exposition",

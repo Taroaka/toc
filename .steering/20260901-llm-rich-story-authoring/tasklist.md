@@ -8,3 +8,4 @@
 - [x] Update story template, docs, grounding, and evaluator contracts.
 - [ ] Verify with two unrelated stories and frontless create.
 - [x] Run independent code review.
+- [x] Persist GPT-6 Astra / Sol / Luna role routing in repo memory and runtime defaults.

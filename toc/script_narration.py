@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from toc.providers.elevenlabs import DEFAULT_ELEVENLABS_MODEL_ID, normalize_elevenlabs_model_id
+
 
 SCRIPT_ELEVENLABS_DEFAULTS = {
     "provider": "elevenlabs",
-    "model_id": "eleven_v3",
-    "voice_name": "Shohei - Warm, Clear and Husky",
-    "voice_id": "8FuuqoKHuM48hIEwni5e",
-    "prompt_contract_version": "v3_tagged_context_v1",
-    "default_stability_profile": "creative",
+    "model_id": DEFAULT_ELEVENLABS_MODEL_ID,
+    "voice_name": "Jun - Calm, Clear and Husky",
+    "voice_id": "JOcmGzB8OFjY8MhjHHEf",
+    "prompt_contract_version": "v4_tagged_context_v1",
+    "default_stability_profile": "natural",
     "text_policy": "natural_japanese_plus_audio_tags",
 }
 
@@ -95,4 +97,5 @@ def resolve_script_metadata_elevenlabs(script_data: dict[str, Any]) -> dict[str,
         value = _as_text(elevenlabs.get(key))
         if value:
             merged[key] = value
+    merged["model_id"] = normalize_elevenlabs_model_id(merged.get("model_id"))
     return merged

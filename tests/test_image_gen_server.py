@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import hashlib
 import importlib.util
@@ -71,7 +72,7 @@ from toc.image_request_snapshot import (
 )
 
 
-PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+PNG_BYTES = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGMMqFjAwMDAxMDAwMDAAAAQugFsZnyF3gAAAABJRU5ErkJggg==')
 MP4_BYTES = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"
 REVIEWABLE_VIDEO_PROMPT = (
     "action: 主人公が画面奥へ一歩進み、右足を床につけて止まる。\n"
@@ -11414,7 +11415,7 @@ keep existing request
                         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("run-relative", response.text)
+        self.assertTrue(any(message in response.text for message in ("run-relative", "safe rooted file path")), response.text)
 
     def test_narration_items_reads_manifest_audio_and_video_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -11775,7 +11776,10 @@ scenes:
       - cut_id: 10-1
         video_generation:
           output: assets/scenes/scene10_cut1.mp4
-          duration_seconds: 4
+          duration_seconds: 6
+        render:
+          video_duration_seconds: 6
+          narration_offset_seconds: 1.5
         audio:
           narration:
             output: assets/audio/scene10_cut1.mp3
@@ -11789,8 +11793,13 @@ scenes:
                     patch("server.image_gen_app.ROOT", root),
                     patch("server.image_gen_app._prepare_render_video_clip", lambda _run_dir, source, _item: source),
                     patch("server.image_gen_app._prepare_render_narration", lambda _run_dir, source, _item: source),
-                    patch("server.image_gen_app._probe_media_duration_seconds", lambda path: 3.0 if path.suffix == ".mp3" else None),
+                    patch("server.image_gen_app._probe_media_duration_seconds", lambda path: 3.0 if path.suffix == ".mp3" else 6.0),
                 ):
+                    from server.sound_design_api import video_context
+                    from toc import sound_design
+                    sound_plan = sound_design.approve(video_context(run_dir), actor="test")
+                    sound_plan["status"] = "completed"
+                    sound_design.save(run_dir, sound_plan)
                     with TestClient(app) as client:
                         response = client.post(
                             "/api/image-gen/render-inputs/freeze",
@@ -11832,6 +11841,11 @@ scenes:
             data["scenes"][0]["cuts"] = [data["scenes"][0]["cuts"][0]]
             image_gen_app._write_manifest_data(manifest_path, original_text, data)
             mark_manifest_narration_ready(run_dir, silent={"scene10_cut1"})
+            manifest_path, original_text, data = image_gen_app._read_manifest_data(run_dir)
+            cut = data["scenes"][0]["cuts"][0]
+            cut.setdefault("video_generation", {}).update(output="assets/scenes/scene10_cut1.mp4", duration_seconds=4)
+            cut["render"] = {"video_duration_seconds": 4, "narration_offset_seconds": 0}
+            image_gen_app._write_manifest_data(manifest_path, original_text, data)
 
             def fake_write_silence(path: Path, _duration_seconds: float) -> None:
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -11843,8 +11857,13 @@ scenes:
                     patch("server.image_gen_app._write_silence_audio", fake_write_silence),
                     patch("server.image_gen_app._prepare_render_video_clip", lambda _run_dir, source, _item: source),
                     patch("server.image_gen_app._prepare_render_narration", lambda _run_dir, source, _item: source),
-                    patch("server.image_gen_app._probe_media_duration_seconds", lambda _path: None),
+                    patch("server.image_gen_app._probe_media_duration_seconds", lambda path: 4.0 if path.suffix == ".mp4" else None),
                 ):
+                    from server.sound_design_api import video_context
+                    from toc import sound_design
+                    sound_plan = sound_design.approve(video_context(run_dir), actor="test")
+                    sound_plan["status"] = "completed"
+                    sound_design.save(run_dir, sound_plan)
                     with TestClient(app) as client:
                         response = client.post(
                             "/api/image-gen/render-inputs/freeze",

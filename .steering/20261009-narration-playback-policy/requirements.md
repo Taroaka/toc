@@ -1,0 +1,1 @@
+フロント生成とCodex生成で同じ語り方・音量・間を再現する。ElevenLabsの元音声は保持し、試聴派生音声と最終合成のナレーションに-19 LUFS/-1.5 dBTP/LRA11の2-pass loudnormを共通適用する。最終mixのBGM/SEには語り用正規化を重ねない。無音は無音として扱う。既存の明示的な話者・voice settings・offsetを保持する。生成時にoffset未指定の有声cutは0.5秒を保存する。候補採用はrawへの既存bindingを維持。副作用のない説明ラベルをフロントに追加する。

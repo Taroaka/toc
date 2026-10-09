@@ -1806,7 +1806,7 @@ scenes:
         api_payload = MODULE._image_api_prompt_payload_for_scene(scene)
         api_prompt = api_payload["prompt"]
         self.assertEqual(api_payload["policy_version"], "image_api_prompt_v2")
-        self.assertEqual(api_payload["compiler_version"], "conditional_drawable_prompt_compiler_v3")
+        self.assertEqual(api_payload["compiler_version"], "conditional_drawable_prompt_compiler_v4")
         self.assertIn("[シーン]", api_prompt)
         self.assertIn("[場所と構図]", api_prompt)
         self.assertNotIn("[登場人物]", api_prompt)

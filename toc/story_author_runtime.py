@@ -20,9 +20,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+from .json_syntax_repair import (
+    JsonSyntaxDiagnostic,
+    JsonSyntaxRepairError,
+    JsonSyntaxRepairReceipt,
+    decode_json_object_with_repair,
+)
+
 
 DEFAULT_STORY_AUTHOR_MODEL = "gpt-6-astra"
 DEFAULT_SCENE_AUTHOR_MODEL = "gpt-6-astra"
+DEFAULT_REPAIR_AUTHOR_MODEL = "gpt-6-luna"
 DEFAULT_STORY_AUTHOR_TIMEOUT_SECONDS = 1200
 STORY_AUTHOR_PROVENANCE_SCHEMA = "story_author_runtime_provenance_v1"
 STORY_AUTHOR_TRANSPORT_SCHEMA: dict[str, Any] = {
@@ -35,6 +43,16 @@ STORY_AUTHOR_TRANSPORT_SCHEMA: dict[str, Any] = {
 
 class StoryAuthorRuntimeError(RuntimeError):
     """Raised when a structured story-author turn cannot be trusted."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostic: JsonSyntaxDiagnostic | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.diagnostic = diagnostic
+        self.diagnostics = diagnostic.as_dict() if diagnostic is not None else {}
 
 
 class StoryAuthorClient(Protocol):
@@ -179,7 +197,9 @@ def build_story_transport_prompt(
     )
 
 
-def decode_story_transport_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+def decode_story_transport_payload_with_receipt(
+    payload: Mapping[str, Any],
+) -> tuple[dict[str, Any], JsonSyntaxRepairReceipt]:
     if set(payload) != {"result_json"} or not isinstance(
         payload.get("result_json"), str
     ):
@@ -187,15 +207,29 @@ def decode_story_transport_payload(payload: Mapping[str, Any]) -> dict[str, Any]
             "story author transport must contain only result_json string"
         )
     try:
-        decoded = json.loads(str(payload["result_json"]))
-    except json.JSONDecodeError as exc:
-        raise StoryAuthorRuntimeError(
-            "story author result_json must contain valid JSON"
-        ) from exc
-    if not isinstance(decoded, dict):
-        raise StoryAuthorRuntimeError(
+        return decode_json_object_with_repair(str(payload["result_json"]))
+    except JsonSyntaxRepairError as exc:
+        message = (
             "story author result_json must decode to a JSON object"
+            if exc.diagnostic.code == "top_level_type"
+            else "story author result_json must contain valid JSON"
         )
+        raise StoryAuthorRuntimeError(
+            message,
+            diagnostic=exc.diagnostic,
+        ) from exc
+
+
+def decode_story_transport_payload(
+    payload: Mapping[str, Any],
+    *,
+    on_syntax_repair: Callable[[JsonSyntaxRepairReceipt], None] | None = None,
+) -> dict[str, Any]:
+    """Decode the inner transport object and report any bounded normalization."""
+
+    decoded, receipt = decode_story_transport_payload_with_receipt(payload)
+    if receipt.repaired and on_syntax_repair is not None:
+        on_syntax_repair(receipt)
     return decoded
 
 
@@ -416,9 +450,13 @@ async def run_structured_story_turn(
 
 __all__ = [
     "ClientFactory",
+    "DEFAULT_REPAIR_AUTHOR_MODEL",
     "DEFAULT_SCENE_AUTHOR_MODEL",
     "DEFAULT_STORY_AUTHOR_MODEL",
     "DEFAULT_STORY_AUTHOR_TIMEOUT_SECONDS",
+    "JsonSyntaxDiagnostic",
+    "JsonSyntaxRepairError",
+    "JsonSyntaxRepairReceipt",
     "STORY_AUTHOR_PROVENANCE_SCHEMA",
     "STORY_AUTHOR_TRANSPORT_SCHEMA",
     "StoryAuthorClient",
@@ -426,6 +464,8 @@ __all__ = [
     "StoryAuthorResult",
     "StoryAuthorRuntimeError",
     "build_story_transport_prompt",
+    "decode_json_object_with_repair",
     "decode_story_transport_payload",
+    "decode_story_transport_payload_with_receipt",
     "run_structured_story_turn",
 ]

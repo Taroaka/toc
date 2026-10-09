@@ -85,7 +85,7 @@ def main():
     parser.add_argument('--timeout-seconds', type=int, default=1200)
     args = parser.parse_args()
     asyncio.run(run(args))
-    print(json.dumps({'status': 'passed', 'output': str(args.output)}, ensure_ascii=False))
+    print(json.dumps({'status': 'published', 'output': str(args.output)}, ensure_ascii=False))
 
 
 if __name__ == '__main__':

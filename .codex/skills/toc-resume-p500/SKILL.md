@@ -1,6 +1,6 @@
 ---
 name: toc-resume-p500
-description: Resume a failed frontend-created ToC run from verified p650 or p500 while preserving valid artifacts and images.
+description: Resume a failed ToC run from verified authoring checkpoints, p500/p650, or a saved narration/video/render operation while preserving valid outputs.
 ---
 
 # ToC Adaptive Resume
@@ -15,9 +15,16 @@ Resolve the exact existing run, failure evidence, and requested mode: inspection
 | --- | --- |
 | Strict current p650 passes; failed/missing targets are safe scene outputs bound to current requests; no asset/reference repair is needed | `image_only`: preserve p500 assets and unaffected scene outputs; regenerate only validated targets. |
 | p650 is invalid or assets/references/requests need repair; fresh p400 structural readiness passes | `p500_subprocess`: preserve p100–p450, quarantine stale downstream files, append the invalidation event, and rematerialize. |
-| Active job, malformed/unsafe plan, contradictory state, or invalid p400 foundation | Resolve that prerequisite before mutation; a numeric stage or `done` label is not evidence. |
+| Missing/invalid p100–p400 artifacts with exact saved create input | `authoring_subprocess`: reuse bound authoring checkpoints, complete p450, then p500 plan/apply. |
+| Saved incomplete narration/video/render operation | `media_operation`: replay saved settings, reuse verified completed items; changed inputs require a current request. |
+| Active job, malformed/unsafe plan, or contradictory state | Resolve that prerequisite before mutation; a numeric stage or `done` label is not evidence. |
 
-Only p650 and p500 have supported continuation routes here. Do not invent a p550 or arbitrary-slot restart.
+Authoring and media continuation are also supported through the same resume API; see
+`docs/implementation/all-stage-resume.md`. For missing/invalid p100–p400 prerequisites,
+`authoring_subprocess` reuses matching validated stage receipts, completes p450, then
+continues through the existing p500 route. For a saved incomplete narration/video/render
+operation, `media_operation` replays its exact request and preserves completed items.
+Never infer success from file existence or bypass validators. Do not invent arbitrary-slot restarts.
 
 ## Execute once
 

@@ -48,6 +48,13 @@ ToCの制作方針として、次の2点を重視します。
 - Orchestration logging: `docs/implementation/orchestration-logging.md`
 - QA harness: `docs/implementation/qa-harness.md`
 
+## 音響の調査・制作判断
+
+- [物語・映画のBGM/SEと感情・理解・余韻](research/film-sound-emotion.md)
+- [p860 BGM・SEの設計](implementation/sound-design.md)
+- [音の意図とspotting手引き](../workflow/playbooks/sound-design/affect-and-spotting.md)
+- [spotting記入テンプレート](../workflow/sound-spotting-template.md)
+
 ## データ/運用
 - データライフサイクル: `docs/data-lifecycle.md`
 - データ契約（state/成果物テンプレ）: `docs/data-contracts.md`

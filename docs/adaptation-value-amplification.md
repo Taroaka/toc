@@ -1,5 +1,12 @@
 # 既存物語の価値増幅契約
 
+## 新規runのsource-first契約
+
+新規runのp300以降は [visual-planning.md](implementation/visual-planning.md) の
+`source_first_v2` を使う。下記の `adaptation_intent` / `scene_value_amplification` /
+`expressive_contract` の必須項目と全文投影は、既存v1 artifactの互換契約である。
+v2へ旧欄を埋め戻さない。storyの原作事実・source value・出来事・開示順の保持は継続する。
+
 既存物語を映像化するとき、原作の value、non-negotiable event、人物関係、結末を source IDs
 で保ち、scene/cut の performance、space、composition、edit、sound へ一方向に投影する。
 これは authoring と structural validation の契約であり、別の content judge は起動しない。

@@ -1,0 +1,3 @@
+- [x] Profile hot paths and fix backend with regressions (347 existing tests + 60 subtests; 9 focused tests)
+- [x] Frontend progressive display and deduplication (23 tests, build success)
+- [x] Reviews, performance checks and restart without interrupting generation

@@ -1,0 +1,1 @@
+共通toc/narration_audio.pyで2-pass正規化、無音対策、原音保持、atomicな派生ファイル出力を実装する。フロント音声URLはitemを指定してaudio-file endpointに試聴用派生音声を要求し、既存raw配信は維持する。試聴はcut単位、最終合成は連結した語りtrack全体を正規化するため、同じ目標でもgainは必ずしも同一ではない。render-video.shとsound_design.mix_audioはmix前の語りに同じ関数を使う。BGM/SE・完成mixed audioには自動正規化しない。API数値defaultはv4 stability .5 / similarity .75、明示値は保持。タグはcanonical原稿のauthoring責務であり生成時に無断追加しない。

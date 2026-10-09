@@ -49,7 +49,7 @@ active target map:
 
 ```text
 p100→p120  p200→p220  p300→p330  p400→p450  p500→p570
-p600→p680  p700→p750  p800→p840  p900→p920
+p600→p680  p700→p750  p800→p860  p900→p920
 ```
 
 実際の active slots は p110/p120、p210/p220、p310/p330、p410/p420/p440/p450、
@@ -236,3 +236,7 @@ python scripts/toc-state.py approve-hybridization \
 
 source variant、選択 actor、時刻、publication target、publish result は run artifact に保存する。
 
+
+## p860 BGM・SE
+
+動画生成後、フロントの「BGM・SE」で動画を承認し、候補案を編集・生成・試聴して採用する。音量・開始位置・fade・loopを保存し、設定を確定してから最終結合へ進む。追加音が不要なら「BGM・SEなしで確定」を選ぶ。[仕様](implementation/sound-design.md)。

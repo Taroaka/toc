@@ -1,5 +1,8 @@
 # 動画マニフェスト: テンプレート
 
+新規source_first_v2は `docs/implementation/visual-planning.md` を参照。下記amplification/expressive例はv1専用。
+v2はmetadataの版・source_visual_value bindingと、sceneのsource_story_scene_id・visual_notesをscriptから保持する。
+
 以下は単一の機械可読YAML例。sourceからscene/cut/audio/image/videoへ投影する。
 `manifest_phase: skeleton`は設計、`production`は実行用requestがmaterializeされた状態。
 既存物語ではコメントのadaptation markerを有効化し、source valueの参照を一方向に保持する。
@@ -299,3 +302,9 @@ validation:
 providerは保存済みのpayloadを読み、生成時に自由文から再構築しない。
 render_unitsは各scene内に置き、元cutの順序と時間を保持する。
 画像・音声の候補選択、試聴、編集は任意のユーザー操作として利用できる。
+
+新規p400の撮影拡張は `cinematic_direction.json.film_language` を正本とし、
+cutの `cinematic_contract.execution` とimageの `first_frame_visual_plan.film_language`へ投影する。
+`video_generation.native_audio` は `mode: off|natural_sound|dialogue_and_sound`、
+`sound_events: []`、`dialogue: []` を持つ。台詞のspeaker/source_quote/source_beat_idsは
+[撮影方針契約](../docs/implementation/cinematic-language.md)に従う。旧manifestの未指定はoffとして読む。

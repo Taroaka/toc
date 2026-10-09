@@ -159,6 +159,9 @@ upstream source digest、asset plan、request、reference bytes が変わった�
 requests と stale outputs を再 materialize する。valid asset は bytes/provenance が current の
 限り保持する。resume は state history を書き換えず、stale item だけを再生成する。
 
+既存画像の一部だけから状態差分を作るローカル補助操作は[制作補助ツール](production-tools.md)を参照。
+これは生成工程ではなく、元画像を保った派生PNG作成と、明示的な参照追加に限る。
+
 ## References
 
 - `docs/data-contracts.md`

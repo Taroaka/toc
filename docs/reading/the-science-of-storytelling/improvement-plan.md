@@ -8,6 +8,7 @@
 - [要件](../../../.steering/20260919-storytelling-improvement/requirements.md)
 - [現状の根拠と改善設計](../../../.steering/20260919-storytelling-improvement/design.md)
 - [実装順と受入ケース](../../../.steering/20260919-storytelling-improvement/tasks.md)
+- [実装結果・検証と未検証事項](../../../.steering/20260919-storytelling-improvement/validation.md)
 
 実装は、変更前の再現テスト → p300/p400のsource保持 → p100/p200の判断指針 →
 p700の未解決・語りの境界 → 素材/画像/動画 → 互換性と出力検証、の順に進める。
@@ -17,3 +18,8 @@ p700の未解決・語りの境界 → 素材/画像/動画 → 互換性と出�
 書籍の語彙を全scene必須のJSONキーに変えることは目的にしない。
 
 根拠資料: [追加読解](reread-findings.md)、[論点解説](concepts.md)、[工程別検討メモ](stage-notes.md)。
+
+
+2026-09-26の追加方針: p400もLLMが映画として演出を判断する構成へ更新。
+[追加要件と設計](../../../.steering/20260926-p400-cinematic-author/design.md)、
+[実装・検証記録](../../../.steering/20260926-p400-cinematic-author/validation.md) を参照。

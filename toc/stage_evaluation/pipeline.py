@@ -13,6 +13,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from toc.visual_planning_contract import planning_declared, validate_planning_source_files
+from toc.p400_authoring import ARTIFACT as CINEMATIC_ARTIFACT, direction_projection_file_issues
 from toc.adaptation_value_contract import (
     manifest_adaptation_issues,
     script_adaptation_issues,
@@ -63,8 +65,15 @@ def _scenes(data: dict[str, Any]) -> list[Any]:
     return as_list(data.get("scenes")) or as_list(nested_get(data, ["script", "scenes"], []))
 
 
+def _source_identifier(value: Any) -> str | None:
+    """Authored IDs are opaque strings; runtime selectors may be numeric."""
+    if isinstance(value, str):
+        return value.strip() or None
+    return as_dotted_str(value)
+
+
 def _scene_id(scene: Any, fallback: int) -> str:
-    return as_dotted_str(scene.get("scene_id")) if isinstance(scene, dict) and scene.get("scene_id") is not None else str(fallback)
+    return (_source_identifier(scene.get("scene_id")) or str(fallback)) if isinstance(scene, dict) else str(fallback)
 
 
 def _validate_unique_ids(
@@ -81,7 +90,7 @@ def _validate_unique_ids(
         if not isinstance(value, dict):
             missing.append(str(index))
             continue
-        identifier = as_dotted_str(value.get(id_key))
+        identifier = _source_identifier(value.get(id_key))
         if not identifier:
             missing.append(str(index))
             continue
@@ -144,76 +153,13 @@ def story_scene_coverage_ok(scenes: list[Any]) -> bool:
     return bool(scenes)
 
 
-def _research_structure_checks(
-    checks: list[dict[str, Any]],
-    data: dict[str, Any],
-) -> dict[str, int]:
-    sources = as_list(data.get("source_inventory") or data.get("sources"))
-    passages = as_list(data.get("source_passages"))
-    facts_value = data.get("facts")
-    facts = as_list(facts_value.get("items")) if isinstance(facts_value, dict) else as_list(facts_value)
-    story_materials = data.get("story_materials")
-    synopsis = nested_get(data, ["story_baseline", "canonical_synopsis", "short_summary"]) or nested_get(
-        data, ["story_baseline", "canonical_synopsis", "one_liner"]
-    )
-    events = as_list(nested_get(data, ["story_materials", "chronological_events"], []))
-    conflicts = data.get("conflicts")
-    handoff = data.get("handoff_to_story")
-
-    add_check(checks, "research.structured", bool(data), "research.md contains structured YAML output")
-    add_check(
-        checks,
-        "research.sources_type",
-        isinstance(data.get("source_inventory", data.get("sources")), list),
-        "research source inventory is a list",
-    )
-    add_check(
-        checks,
-        "research.story_materials_type",
-        isinstance(story_materials, dict) or non_empty(synopsis),
-        "research contains story material or a canonical synopsis",
-    )
-    add_check(
-        checks,
-        "research.passages_type",
-        isinstance(data.get("source_passages"), list) if "source_passages" in data else True,
-        "research source_passages is a list when declared",
-    )
-    add_check(
-        checks,
-        "research.facts_type",
-        isinstance(facts_value, (list, dict)) if facts_value is not None else True,
-        "research facts are a list or items mapping when declared",
-    )
-    add_check(
-        checks,
-        "research.conflicts_type",
-        isinstance(conflicts, (list, dict)) if conflicts is not None else True,
-        "research conflicts are a list or mapping when declared",
-    )
-    add_check(
-        checks,
-        "research.handoff_type",
-        isinstance(handoff, (dict, list, str)) if handoff is not None else True,
-        "research handoff_to_story has a serializable shape when declared",
-    )
-    return {
-        "sources": len(sources),
-        "passages": len(passages),
-        "facts": len(facts),
-        "events": len(events),
-    }
-
-
 def check_research(run_dir: Path, profile: str = "standard") -> tuple[dict[str, Any], dict[str, str]]:
+    """Report artifact presence only; p120 has no research output validation."""
     path = run_dir / "research.md"
     checks: list[dict[str, Any]] = []
     add_check(checks, "research.file_exists", path.is_file(), f"{path.name} exists")
-    if not path.is_file():
-        return make_stage("research", path.name, checks), {}
-    text, data = _document(path)
-    counts = _research_structure_checks(checks, data)
-    return make_stage("research", path.name, checks, details=counts), {}
+    return make_stage("research", path.name, checks,
+        details={"content_validation": "disabled"}), {}
 
 
 def _story_scenes(data: dict[str, Any]) -> list[Any]:
@@ -251,8 +197,8 @@ def check_story(run_dir: Path, profile: str = "standard") -> tuple[dict[str, Any
                     _validate_unique_ids(candidates, id_key="candidate_id", label="story.candidate", checks=checks)
             chosen = selection.get("chosen_candidate_id")
             if chosen is not None and candidates and isinstance(candidates, list):
-                candidate_ids = {as_dotted_str(item.get("candidate_id")) for item in candidates if isinstance(item, dict)}
-                add_check(checks, "story.choice_reference", as_dotted_str(chosen) in candidate_ids, "chosen_candidate_id references a declared candidate")
+                candidate_ids = {_source_identifier(item.get("candidate_id")) for item in candidates if isinstance(item, dict)}
+                add_check(checks, "story.choice_reference", _source_identifier(chosen) in candidate_ids, "chosen_candidate_id references a declared candidate")
 
     declared, valid = scene_time_of_day_contract_marker(data, artifact="story")
     if declared:
@@ -284,8 +230,9 @@ def _scene_contract_issues(scene: dict[str, Any], *, selector: str) -> list[str]
             if sequence is not None and not isinstance(sequence, list):
                 issues.append(f"{selector}:scene_event.event_sequence.type")
             if isinstance(sequence, list):
-                beat_ids = [as_dotted_str(item.get("beat_id")) for item in sequence if isinstance(item, dict)]
-                if any(not beat_id for beat_id in beat_ids) or len(set(beat_ids)) != len(beat_ids):
+                beat_ids = [item.get("beat_id") if isinstance(item, dict) else None for item in sequence]
+                if (any(not isinstance(beat_id, str) or not beat_id.strip() for beat_id in beat_ids)
+                        or len(set(str(beat_id).strip() for beat_id in beat_ids)) != len(beat_ids)):
                     issues.append(f"{selector}:scene_event.beat_ids")
             forbidden = scene_event.get("forbidden_event_changes")
             if forbidden is not None and not isinstance(forbidden, list):
@@ -390,6 +337,13 @@ def check_script_single(run_dir: Path, profile: str = "standard", *, target_slot
     if basis_declared:
         issues = scene_time_of_day_visual_basis_issues(data, artifact="script") or []
         add_check(checks, "script.scene_time_of_day_visual_basis", basis_valid and not issues, "declared script lighting basis has required fields" + (f" (issues: {','.join(issues[:8])})" if issues else ""))
+    if "cinematic_direction_contract" in as_dict(data.get("script_metadata")) or (run_dir / CINEMATIC_ARTIFACT).exists():
+        issues = direction_projection_file_issues(run_dir, data, "script_metadata")
+        add_check(checks, "script.cinematic_direction", not issues, "authored cinematic direction projection" + str(issues))
+    visual_value_data = _document(run_dir / "visual_value.md")[1]
+    if planning_declared(data, "script_metadata") or planning_declared(visual_value_data, "visual_value_metadata"):
+        issues = validate_planning_source_files(run_dir, data, "script_metadata")
+        add_check(checks, "script.visual_planning", not issues, "source-first planning provenance" + (f" (issues: {','.join(issues[:8])})" if issues else ""))
     if isinstance(data.get("script_metadata"), dict) and "adaptation_value_contract" in data["script_metadata"]:
         story_data = _document(run_dir / "story.md")[1]
         visual_value_data = _document(run_dir / "visual_value.md")[1]
@@ -497,7 +451,14 @@ def _manifest_checks(
                     invalid.append(f"scene{scene_id}:{key}.type")
             video = as_dict(node.get("video_generation"))
             duration = video.get("duration_seconds", node.get("duration_seconds"))
-            if duration is not None and (not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration <= 0 or duration > 15):
+            minimum, maximum = 1, 15
+            if as_dict(node.get("cut_contract")).get("cinematic_direction_contract") == "cinematic_direction_v1":
+                from toc.video_provider_capabilities import resolve_video_provider_capabilities
+                capabilities = resolve_video_provider_capabilities(tool=str(video.get("tool") or ""), model=str(video.get("model") or ""))
+                minimum, maximum = capabilities.duration_min_seconds, capabilities.duration_max_seconds
+                if not capabilities.supported:
+                    invalid.append(f"scene{scene_id}:unsupported_video_capabilities")
+            if duration is not None and (not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration < minimum or duration > maximum):
                 invalid.append(f"scene{scene_id}:duration_seconds")
             audio = as_dict(node.get("audio"))
             narration = audio.get("narration")
@@ -579,6 +540,13 @@ def check_manifest_single(
         add_check(checks, "manifest.target_duration_type", normalized is not None, "video_metadata.target_duration_seconds is a valid 300-1200 second value")
     story_data = _document(run_dir / "story.md")[1]
     script_data = _document(run_dir / "script.md")[1]
+    if "cinematic_direction_contract" in as_dict(data.get("video_metadata")) or (run_dir / CINEMATIC_ARTIFACT).exists():
+        issues = direction_projection_file_issues(run_dir, data, "video_metadata")
+        add_check(checks, "manifest.cinematic_direction", not issues, "authored cinematic direction projection" + str(issues))
+    if planning_declared(data, "video_metadata") or planning_declared(script_data or {}, "script_metadata"):
+        issues = validate_planning_source_files(run_dir, data, "video_metadata")
+        issues.extend(manifest_adaptation_issues(data, source_value_ids=adaptation_source_value_ids(story_data), script=script_data or None))
+        add_check(checks, "manifest.visual_planning", not issues, "source-first planning provenance" + (f" (issues: {','.join(issues[:8])})" if issues else ""))
     if isinstance(data.get("video_metadata"), dict) and "adaptation_value_contract" in data["video_metadata"]:
         issues = manifest_adaptation_issues(data, source_value_ids=adaptation_source_value_ids(story_data), script=script_data or None)
         add_check(checks, "manifest.adaptation_value_contract", not issues, "declared manifest adaptation contract is structurally consistent" + (f" (issues: {','.join(issues[:8])})" if issues else ""))

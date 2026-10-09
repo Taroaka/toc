@@ -378,16 +378,40 @@ _REQUIRED_REGISTRY_SOURCE_KEYS = (
 )
 
 
+_EXECUTION_RULES = tuple(
+    VideoPromptProjectionRule((f'cut.cut_contract.cinematic_contract.execution.{key}',),
+        'conditional', 'derive', transform, group)
+    for key, group, transform in (
+        ('film_language.fields.palette', 'continuity', 'render_effective_film_palette'),
+        ('film_language.fields.lighting', 'continuity', 'render_effective_film_lighting'),
+        ('film_language.fields.exposure', 'continuity', 'render_effective_film_exposure'),
+        ('film_language.fields.optics', 'continuity', 'render_effective_film_optics'),
+        ('film_language.fields.texture', 'continuity', 'render_effective_film_texture'),
+        ('film_language.fields.composition', 'continuity', 'render_effective_film_composition'),
+        ('light_continuity', 'continuity', 'preserve_authored_lighting_through_motion'),
+        ('focus', 'camera_motion', 'render_initial_focus_and_focus_change'),
+        ('performance', 'emotional_change', 'render_observable_performance'),
+        ('physics', 'primary_motion', 'render_contact_resistance_and_settling'),
+        ('geometry', 'start_state', 'render_metric_initial_shot_geometry'),
+    )
+) + (VideoPromptProjectionRule(
+    ('cut.cut_contract.cinematic_contract.execution.film_language.fields.camera',),
+    'conditional', 'must_not_surface', 'use_authored_cut_camera_movement',
+    exclusion_reason='film camera informs authoring; actual cut camera_motion owns execution'), VideoPromptProjectionRule(
+    ('cut.cut_contract.cinematic_contract.execution.native_audio', 'video_generation.native_audio'),
+    'conditional', 'derive', 'render_synchronized_audio', 'environment_motion'),)
+
+
 def projection_rules() -> tuple[VideoPromptProjectionRule, ...]:
-    return _RULES
+    return _RULES + _EXECUTION_RULES
 
 
 def video_projection_registry_catalog() -> list[dict[str, Any]]:
-    return [rule.as_dict() for rule in _RULES]
+    return [rule.as_dict() for rule in projection_rules()]
 
 
 def rule_for_source_key(source_key: str) -> VideoPromptProjectionRule | None:
-    return next((rule for rule in _RULES if source_key in rule.source_keys), None)
+    return next((rule for rule in projection_rules() if source_key in rule.source_keys), None)
 
 
 def video_projection_registry_issues() -> list[str]:
@@ -395,7 +419,7 @@ def video_projection_registry_issues() -> list[str]:
     if len(VIDEO_PROMPT_GROUP_ORDER) != len(set(VIDEO_PROMPT_GROUP_ORDER)):
         issues.append("duplicate_group_order")
     seen_keys: set[str] = set()
-    for rule in _RULES:
+    for rule in projection_rules():
         if not rule.source_keys:
             issues.append("rule_without_source_key")
         if rule.authoring_relevance not in _AUTHORING_RELEVANCE:
@@ -522,7 +546,9 @@ def build_video_prompt_projection(
             "cut.cut_contract.motion_contract.allowed_new_reveal_elements"
         )
 
-    for rule in _RULES:
+    execution_rules = tuple(rule for rule in _EXECUTION_RULES
+        if any(_is_present(_resolve(key, scopes)) for key in rule.source_keys))
+    for rule in (*_RULES, *execution_rules):
         present_sources = [
             (source_key, value)
             for source_key in rule.source_keys
@@ -620,6 +646,7 @@ def build_video_prompt_projection(
     )
     return {
         "registry_version": VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION,
+        **({'execution_projection_version': 'cinematic_execution_projection_v1'} if execution_rules else {}),
         "group_order": list(VIDEO_PROMPT_GROUP_ORDER),
         "groups": groups,
         "active_rules": active_rules,
@@ -644,6 +671,9 @@ def _select_rule_sources(
 
     if not present_sources or not rule.target_group:
         return present_sources, []
+    if rule.transform == 'render_synchronized_audio':
+        selected = [item for item in present_sources if item[0] == 'video_generation.native_audio'] or present_sources
+        return selected, [item for item in present_sources if item not in selected]
 
     canonical = [item for item in present_sources if item[0].startswith("cut.cut_contract.")]
     visual_plan = [

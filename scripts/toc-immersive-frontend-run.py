@@ -36,11 +36,21 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from toc.story_selection import selected_event_order
+from toc.production_repair import handoff_session
+from toc.production_diagnostics import AuthoringValidationError, diagnostic_subprocess_run
 from toc.harness import (
     append_state_snapshot as _append_state_snapshot,
     load_structured_document,
     parse_state_file as _parse_canonical_state,
 )
+from toc.source_scene_projection import source_first_profile, source_blueprint, source_scene_intent, source_scene_event
+from toc.authored_cut_projection import authored_cut_plan
+from toc.p400_authoring import ARTIFACT as CINEMATIC_ARTIFACT, CONTRACT as CINEMATIC_CONTRACT, load_direction, direction_projection_file_issues
+from toc.p400_projection import project_scene as project_cinematic_scene
+from toc.p420_assets import extend_asset_bibles
+from toc.b_roll import scene_boundary, materialize_b_roll
+from toc.visual_planning_contract import (VISUAL_PLANNING_CONTRACT, validate_visual_value_files, source_binding, planning_declared, decode_document)
 from toc.adaptation_value_contract import (
     ADAPTATION_VALUE_MARKER,
     source_value_ids as adaptation_source_value_ids,
@@ -83,7 +93,6 @@ from toc.run_root_binding import (
 from toc.stage_evaluator import check_manifest_single
 from toc.story_duration import build_duration_plan, normalize_target_duration
 from toc.story_authoring import build_research_registry, validate_story_document
-from toc.research_author import validate_research_document
 from scripts.world_walk_source import (
     PathIdentity,
     copy_regular_file_atomic_nofollow,
@@ -122,7 +131,7 @@ P650_SLOTS = (
     "p650",
 )
 P680_SLOTS = (*P650_SLOTS, "p660", "p670", "p680")
-AWAITING_ALLOWED = {"p330", "p570", "p680"}
+AWAITING_ALLOWED = {"p570", "p680"}
 CREATE_INPUT_SCHEMA_VERSION = "toc.create_input.v1"
 CREATE_INPUT_REL_PATH = Path("logs/orchestration/create_input.json")
 MIN_MATERIALIZATION_FREE_BYTES = 512 * 1024 * 1024
@@ -1060,7 +1069,7 @@ def _run_materialization_subprocess(
 ) -> subprocess.CompletedProcess[str]:
     active_root = _active_materialization_root(run_dir)
     if active_root is None:
-        return subprocess.run(command, **kwargs)
+        return diagnostic_subprocess_run(command, **kwargs)
     _verify_active_materialization_root(run_dir, active_root)
     subprocess_command = [os.fspath(argument) for argument in command]
     if not active_root[3]:
@@ -1084,7 +1093,7 @@ def _run_materialization_subprocess(
 
         kwargs["preexec_fn"] = enter_pinned_root
     try:
-        return subprocess.run(subprocess_command, **kwargs)
+        return diagnostic_subprocess_run(subprocess_command, **kwargs)
     finally:
         _verify_active_materialization_root(run_dir, active_root)
 
@@ -1251,7 +1260,10 @@ def _profile_from_research(profile: dict[str, Any], research: dict[str, Any]) ->
             str(item["event"]).strip(): str(item.get("event_id") or f"E{index:02d}").strip()
             for index, item in enumerate(event_records, start=1)
         }
-        projected["research_event_ids"] = list(projected["research_event_ids_by_text"].values())
+        projected["research_event_ids"] = [
+            str(item.get("event_id") or f"E{index:02d}").strip()
+            for index, item in enumerate(event_records, start=1)
+        ]
     canonical_dump = str(materials.get("canonical_story_dump") or "").strip()
     if canonical_dump:
         projected["summary"] = canonical_dump
@@ -1314,6 +1326,37 @@ def _profile_from_story(profile: dict[str, Any], story: dict[str, Any]) -> dict[
     scenes = [item for item in script.get("scenes", []) if isinstance(item, dict)]
     projected["story"] = story
     projected["story_scenes"] = scenes
+    # Keep the full research for evidence, but coverage and source-ledger IDs belong
+    # only to the story's adopted events. Otherwise p400 would force other versions back in.
+    research = profile.get('research')
+    if isinstance(research, dict):
+        registry = build_research_registry(research)
+        selected_ids = selected_event_order(story, registry)
+        if (story.get('selection') or {}).get('event_selection_contract'):
+            records = [registry['events'][eid] for eid in selected_ids]
+            projected['research_event_ids'] = selected_ids
+            projected['events'] = [str(record.get('event') or '').strip() for record in records]
+            projected['research_event_ids_by_text'] = {
+                text: eid for text, eid in zip(projected['events'], selected_ids)
+            }
+            projected['story_selection'] = deepcopy(story['selection'])
+            projected['summary'] = ' / '.join(projected['events'])
+            symbol_ids = set()
+            for scene in scenes:
+                basis = scene.get('source_basis', {})
+                if not isinstance(basis, dict):
+                    raise AuthoringValidationError('story.scene_source_basis_invalid: source_basis must be an object', owner_stage='p220')
+                ids = basis.get('symbol_ids', [])
+                if not isinstance(ids, list) or any(not isinstance(sid, str) for sid in ids):
+                    raise AuthoringValidationError('story.scene_symbol_ids_invalid: symbol_ids must be a list of IDs', owner_stage='p220')
+                symbol_ids.update(ids)
+            selected_symbols = [record for sid, record in registry['symbols'].items() if sid in symbol_ids and isinstance(record, dict)]
+            projected['motifs'] = [str(record.get('item') or '') for record in selected_symbols if record.get('item')]
+            primary_object = next((record for record in selected_symbols if record.get('kind') == 'object'), {})
+            projected['artifact_name'] = str(primary_object.get('item') or '')
+            projected['artifact_role'] = str(primary_object.get('meaning') or '')
+            projected['artifact_visual'] = projected['artifact_name']
+            projected['artifact_fixed_prompt'] = projected['artifact_name']
     source_contract = story.get("adaptation_source_contract")
     if isinstance(source_contract, dict) and source_contract:
         projected["adaptation_source_contract"] = deepcopy(source_contract)
@@ -1425,7 +1468,7 @@ def _profile_from_story(profile: dict[str, Any], story: dict[str, Any]) -> dict[
         for scene, value in zip(scenes, resized(profile.get("scene_segment_roles"), "全体"))
     ]
     if profile.get("research"):
-        artifact = str(profile.get("artifact_name") or "").strip()
+        artifact = str(projected.get("artifact_name") or "").strip()
         projected["artifact_scene_indices"] = [
             index for index, scene in enumerate(scenes, start=1)
             if artifact and artifact in json.dumps(scene, ensure_ascii=False)
@@ -1443,61 +1486,6 @@ def _positive_story_duration_seconds(value: Any) -> float | None:
     if not math.isfinite(seconds) or seconds <= 0:
         return None
     return seconds
-
-
-def _research_duration_contract_errors(
-    research: dict[str, Any],
-    *,
-    target_duration_seconds: int,
-) -> list[str]:
-    """Ensure researched source material preserves the requested duration plan."""
-
-    plan = build_duration_plan(target_duration_seconds)
-    metadata = research.get("metadata") if isinstance(research.get("metadata"), dict) else {}
-    errors: list[str] = []
-    raw_target = metadata.get("target_duration_seconds")
-    if raw_target is None:
-        normalized_target = None
-    else:
-        try:
-            normalized_target = normalize_target_duration(raw_target)
-        except ValueError:
-            normalized_target = None
-    if normalized_target != plan.target_seconds:
-        errors.append(
-            "metadata.target_duration_seconds must preserve the requested target "
-            f"({normalized_target!r}!={plan.target_seconds})"
-        )
-
-    duration_plan = metadata.get("duration_plan") if isinstance(metadata.get("duration_plan"), dict) else {}
-    expected_plan = plan.to_dict()
-    for key, expected in expected_plan.items():
-        raw_value = duration_plan.get(key)
-        if raw_value is None or isinstance(raw_value, bool):
-            actual: float | None = None
-        else:
-            try:
-                actual = float(raw_value)
-            except (TypeError, ValueError):
-                actual = None
-        if actual is None or not math.isfinite(actual) or actual != float(expected):
-            errors.append(f"metadata.duration_plan.{key} must equal {expected} (got {raw_value!r})")
-    return errors
-
-
-def _validate_research_duration_contract(
-    research: dict[str, Any],
-    *,
-    target_duration_seconds: int,
-) -> None:
-    errors = _research_duration_contract_errors(
-        research,
-        target_duration_seconds=target_duration_seconds,
-    )
-    if errors:
-        raise RuntimeError(
-            "research duration contract failed before story authoring: " + "; ".join(errors)
-        )
 
 
 def _story_duration_contract_errors(
@@ -1582,7 +1570,7 @@ def _validate_story_duration_contract(
         target_duration_seconds=target_duration_seconds,
     )
     if errors:
-        raise RuntimeError(
+        raise AuthoringValidationError(
             "story duration contract failed before cut materialization: " + "; ".join(errors)
         )
 
@@ -2883,6 +2871,12 @@ def _visible_behavior_from_cut(
     object_ids: list[str],
     focal_character_name: str = "",
 ) -> dict[str, str]:
+    if source_first_profile(profile):
+        authored = cut_plan.get("visible_character_state") or {}
+        return {"face": str(authored.get("expression") or ""), "gaze": str(authored.get("gaze") or ""),
+                "posture": str(authored.get("posture") or cut_blueprint.get("first_frame_brief") or ""),
+                "hands": str(authored.get("hands") or ""), "feet": str(authored.get("feet") or ""),
+                "distance": str(authored.get("distance") or "")}
     evidence = str(cut_blueprint.get("visual_beat") or cut_blueprint.get("first_frame_brief") or "").strip()
     cut_function = str(cut_blueprint.get("cut_function") or "").strip()
     action_completion_state = str(
@@ -3319,6 +3313,8 @@ def _scene_state_progression_plan_for_scaffold(
         "巡",
     )
     progression_mode = "sequential_state_progression" if any(keyword in joined for keyword in sequential_keywords) else "suspended_moment"
+    if scene_event.get('authored_scene_id'):
+        progression_mode = 'sequential_state_progression' if len(cut_plans) > 1 else 'suspended_moment'
     mode_reason = (
         "scene内で場所、身体、小道具の状態が前cutの結果を受けて前進するため、各cutのfirst frameは開始前に戻さない"
         if progression_mode == "sequential_state_progression"
@@ -3342,7 +3338,7 @@ def _scene_state_progression_plan_for_scaffold(
         return [
             str(beat.get("beat_id") or "")
             for index, beat in enumerate(event_sequence)
-            if index > max_index and str(beat.get("beat_function") or "") in {"turn", "payoff"}
+            if index > max_index and (scene_event.get('authored_scene_id') or str(beat.get("beat_function") or "") in {"turn", "payoff"})
         ]
 
     cut_progression_map: list[dict[str, Any]] = []
@@ -3422,6 +3418,9 @@ def _cut_character_emotion_transition_for_scaffold(
     cut_number: int,
     cut_count: int,
 ) -> dict[str, Any]:
+    if source_first_profile(profile):
+        authored = primary_event_beat.get("cut_character_emotion_transition")
+        return deepcopy(authored) if isinstance(authored, dict) else {}
     function = str(primary_event_beat.get("beat_function") or cut_blueprint.get("cut_function") or "")
     transition_mode = {
         "setup": "hold_pressure",
@@ -3479,6 +3478,9 @@ def _cut_film_grammar_contract_for_scaffold(
     focal_character_id: str,
     supporting_character_ids: list[str],
 ) -> dict[str, Any]:
+    if source_first_profile(profile):
+        authored = primary_event_beat.get("cut_film_grammar_contract")
+        return deepcopy(authored) if isinstance(authored, dict) else {}
     next_selector = re.sub(r"cut\d+$", f"cut{cut_number + 1:02d}", selector) if cut_number < cut_count else ""
     previous_selector = re.sub(r"cut\d+$", f"cut{cut_number - 1:02d}", selector) if cut_number > 1 else ""
     function = str(primary_event_beat.get("beat_function") or cut_blueprint.get("cut_function") or "")
@@ -4555,6 +4557,8 @@ def _apply_story_scene_to_blueprint(
     """Overlay only authored story meaning onto downstream cut inputs."""
 
     authored_scene = _story_scene(profile, idx)
+    if source_first_profile(profile):
+        return source_blueprint(authored_scene)
     if not authored_scene:
         return blueprint
     merged = dict(blueprint)
@@ -4629,6 +4633,8 @@ def _scene_blueprint(
     location_name: str,
     include_artifact: bool,
 ) -> dict[str, Any]:
+    if source_first_profile(profile):
+        return source_blueprint(_story_scene(profile, idx))
     protagonist = str(profile.get("protagonist_name") or profile.get("topic_label") or "主要人物")
     artifact = str(profile.get("artifact_name") or "物語上の証拠")
     source_events = _scene_source_events(profile, idx)
@@ -4677,6 +4683,26 @@ def _canonical_event_coverage_matrix(
     profile: dict[str, Any],
     script_scenes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if source_first_profile(profile):
+        rows = []
+        for position, event in enumerate(_scene_acceptance_source_ledger(profile)['events'], start=1):
+            assigned_scenes, assigned_beats = [], []
+            for scene in script_scenes or []:
+                matched = [beat['beat_id'] for beat in scene.get('scene_event', {}).get('event_sequence', [])
+                           if event['event_id'] in beat.get('source_event_ids', [])]
+                if matched:
+                    assigned_scenes.append(scene['scene_id'])
+                    assigned_beats.extend(matched)
+            if not assigned_beats:
+                raise ValueError(f"research event has no authored beat: {event['event_id']}")
+            rows.append(dict(source_event_id=event['event_id'], source_event_summary=event['summary'],
+                canonical_order_index=position, assigned_scene_ids=assigned_scenes,
+                assigned_event_beat_ids=assigned_beats, required=True, must_appear_as='scene',
+                importance='source_declared', omission_reason='', adaptation_change_reason='',
+                human_approval_required=False))
+        return {'policy_version': 'canonical_event_coverage_matrix_v1',
+                'source': ['research.story_materials.chronological_events', 'scene_event.event_sequence'],
+                'source_story_events': rows}
     events = [str(event).strip() for event in profile.get("events", []) if str(event).strip()]
     scene_count = max(1, len(profile.get("scene_titles") or []))
     scene_by_id = {
@@ -4864,7 +4890,7 @@ def _scene_generation_for_scene(
         "story_scope": {
             "protagonist": protagonist,
             "artifact": artifact,
-            "theme": "尊厳、越境、時間制限、証明を scene 単位で成立させる",
+            "theme": deepcopy(profile.get("story", {}).get("story_structure", {}).get("theme", {})) if source_first_profile(profile) else "尊厳、越境、時間制限、証明を scene 単位で成立させる",
             "run_variant": profile.get("run_variant", {}),
             "scene_titles": profile.get("scene_titles", []),
         },
@@ -4909,6 +4935,10 @@ def _scene_generation_for_scene(
             "story_terms": blueprint["story_terms"],
         },
     }
+    if source_first_profile(profile):
+        scene_authoring_context["source_story_scene"] = deepcopy(_story_scene(profile, idx))
+        scene_authoring_context["visual_planning"] = deepcopy(profile["visual_planning"])
+        scene_authoring_context["scene_count_policy"]["maximize_meaningful_scene_count"] = False
     prompt = "\n".join(
         [
             f"物語「{topic}」の scene{scene_id}「{title}」を設計する。",
@@ -5063,6 +5093,7 @@ def _mixed_affect_design_for_cut(
     is_terminal_scene: bool,
     visual_beat: str,
     narration: str,
+    source_first: bool = False,
 ) -> dict[str, Any]:
     base = {
         "mode": "none",
@@ -5083,6 +5114,8 @@ def _mixed_affect_design_for_cut(
             "視覚・語り・音/リズム・handoff の支えがない",
         ],
     }
+    if source_first:
+        return base
     function = str(cut_function or "")
     terminal_cut = is_terminal_scene and cut_number == cut_count
     if function not in {"pressure", "turn", "payoff", "reaction"} and not terminal_cut:
@@ -5538,6 +5571,8 @@ def _adaptation_contract_from_profile(profile: dict[str, Any]) -> dict[str, Any]
     existing = profile.get("adaptation_source_contract")
     if isinstance(existing, dict) and existing:
         return deepcopy(existing)
+    if source_first_profile(profile):
+        return {}
     return _adaptation_source_contract_for_profile(profile)
 
 
@@ -5685,6 +5720,8 @@ def _scene_intent_for_cut_design(
     profile: dict[str, Any],
     include_artifact: bool,
 ) -> dict[str, Any]:
+    if source_first_profile(profile):
+        return source_scene_intent(_story_scene(profile, idx), profile, location_spec)
     is_terminal = idx == len(profile["scene_titles"])
     canonical_index = _canonical_scene_index(profile, idx)
     artifact_has_been_revealed = idx >= _artifact_first_scene_index(profile)
@@ -6524,6 +6561,8 @@ def _scene_event_for_cut_design(
     handoff remain owned by story.md and are overlaid after enrichment.
     """
 
+    if source_first_profile(profile):
+        return source_scene_event(_story_scene(profile, idx), runtime_scene_id=_runtime_scene_id(idx), location_name=location_name)
     projected = _legacy_scene_event_for_cut_design(
         title=title,
         idx=idx,
@@ -6752,6 +6791,12 @@ def _scene_cut_coverage_plan(
     profile: dict[str, Any],
     include_artifact: bool,
 ) -> dict[str, Any]:
+    if source_first_profile(profile) and scene_event.get('authored_scene_id'):
+        return authored_cut_plan(scene_event, scene_id=_runtime_scene_id(idx),
+            location_name=location_name, protagonist=profile['protagonist_name'],
+            character_names={c['character_id']: c.get('name', c['character_id'])
+                for c in profile.get('research', {}).get('story_materials', {}).get('characters', [])
+                if isinstance(c, dict) and c.get('character_id')})
     protagonist = profile["protagonist_name"]
     artifact = profile["artifact_name"]
     source_event_sequence = [
@@ -8307,14 +8352,14 @@ def _validate_next_cut_last_frame_boundary(
     """Validate an authored last-frame/next-first-frame spatial boundary."""
 
     if not isinstance(next_cut_plan, dict):
-        raise RuntimeError(
+        raise AuthoringValidationError(
             f"{selector}: next-cut last-frame binding requires a next cut"
         )
     departure = str(current_cut_plan.get("background") or "").strip()
     destination = str(next_cut_plan.get("background") or "").strip()
     route = [str(value).strip() for value in route_locations if str(value).strip()]
     if not destination or destination not in route:
-        raise RuntimeError(
+        raise AuthoringValidationError(
             f"{selector}: next-cut destination is not declared in scene route: "
             f"{destination or '<empty>'}"
         )
@@ -8322,7 +8367,7 @@ def _validate_next_cut_last_frame_boundary(
         current_cut_plan.get("motion_end_state") or ""
     ).strip()
     if not actual_end_state:
-        raise RuntimeError(
+        raise AuthoringValidationError(
             f"{selector}: next-cut boundary requires a concrete motion end state"
         )
     next_first_frame_text = " / ".join(
@@ -8342,22 +8387,22 @@ def _validate_next_cut_last_frame_boundary(
             if str(item).strip()
         }
         if destination not in allowed_destinations:
-            raise RuntimeError(
+            raise AuthoringValidationError(
                 f"{selector}: cross-location boundary lacks exact obligation "
                 f"authorization for destination: {destination}"
             )
         if destination not in actual_end_state:
-            raise RuntimeError(
+            raise AuthoringValidationError(
                 f"{selector}: motion end state does not reach destination: "
                 f"{destination}"
             )
         if destination not in next_first_frame_text:
-            raise RuntimeError(
+            raise AuthoringValidationError(
                 f"{selector}: next first frame does not agree with destination: "
                 f"{destination}"
             )
     if actual_end_state not in next_first_frame_text:
-        raise RuntimeError(
+        raise AuthoringValidationError(
             f"{selector}: next first frame does not agree with actual motion "
             "end state"
         )
@@ -8381,7 +8426,7 @@ def _validate_adjacent_cut_motion_is_distinct(
         current_motion = str(current.get("motion_brief") or "").strip()
         current_end = str(current.get("motion_end_state") or "").strip()
         if previous_motion == current_motion and previous_end == current_end:
-            raise RuntimeError(
+            raise AuthoringValidationError(
                 f"scene{scene_id} adjacent cuts replay identical motion: "
                 f"cut{index:02d} -> cut{index + 1:02d}; "
                 "author distinct exact obligation start/motion/end states or "
@@ -8401,6 +8446,77 @@ def _author_research_with_codex(
          "--topic", topic, "--source-file", str(source_path),
          "--output", str(run_dir / "research.md"),
          "--target-duration-seconds", str(target_duration_seconds)],
+        cwd=REPO_ROOT, check=True, capture_output=True, text=True,
+    )
+
+
+def _finish_authoring_stop(run_dir: Path, stop_slot: str, now: str) -> None:
+    slots = {"p100": ("p110", "p120"), "p200": ("p210", "p220"), "p300": ("p310", "p330"), "p400": ("p410", "p420", "p440", "p450")}
+    outputs = {"p100": ["research.md"], "p200": ["story.md"], "p300": ["visual_value.md"], "p400": ["script.md", "video_manifest.md"]}
+    updates = {"timestamp": now, "status": stop_slot.upper(), "runtime.stop_slot": stop_slot}
+    progress = ["| timestamp | bucket | supervisor | event | stop_slot | result | note |", "|---|---|---|---|---|---|---|"]
+    for bucket, bucket_slots in slots.items():
+        result = {"bucket": bucket, "status": "done", "completed_slots": list(bucket_slots),
+            "required_artifacts": [{"path": path, "exists": (run_dir / path).is_file()} for path in outputs[bucket]],
+            "state_keys": {f"slot.{slot}.status": "done" for slot in bucket_slots},
+            "next_bucket": None if bucket_slots[-1] == stop_slot else "next"}
+        _write_run_text_nofollow(run_dir, run_dir / f"logs/orchestration/{bucket}.supervisor_result.json", json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+        progress.extend([f"| {now} | {bucket} | {bucket} owner | invoked | {stop_slot} | - | authoring |",
+                         f"| {now} | {bucket} | {bucket} owner | returned | {stop_slot} | {bucket}.supervisor_result.json | complete |"])
+        updates[f"orchestration.{bucket}.supervisor.call_status"] = "returned"
+        updates.update(result["state_keys"])
+        if bucket_slots[-1] == stop_slot:
+            break
+    _write_run_text_nofollow(run_dir, run_dir / "logs/orchestration/l2_supervisor_progress.md", "\n".join(progress) + "\n")
+    append_state_snapshot(run_dir / "state.txt", updates)
+    write_run_index(run_dir)
+
+
+def _cinematic_resources(profile: dict[str, Any]) -> dict[str, Any]:
+    """Expose existing asset identities to the director, without inventing assets."""
+    # Resolve the base only from upstream source, never from its own expansion.
+    profile = {key: value for key, value in profile.items() if key != "cinematic_direction"}
+    protagonist = profile["protagonist_asset_id"]
+    characters = {protagonist: {"name": profile["protagonist_name"],
+        "references": [f"assets/characters/{protagonist}.png"],
+        "appearance_contract": _protagonist_appearance_contract(profile),
+        "appearance_continuity": {"costume_state": _protagonist_appearance_contract(profile)["occasion_or_state"]}}}
+    characters.update({s["character_id"]: {"name": s["name"], "references": list(s["reference_images"]),
+        "appearance_contract": deepcopy(s.get("appearance_contract") or {}),
+        "appearance_continuity": deepcopy(s.get("appearance_continuity") or {})}
+        for s in _supporting_character_asset_specs(profile)})
+    objects = {s["object_id"]: {"name": s["name"], "references": list(s["reference_images"])}
+        for s in _supporting_object_asset_specs(profile)}
+    if profile.get("artifact_name"):
+        aid = profile["artifact_asset_id"]
+        objects[aid] = {"name": profile["artifact_name"], "references": [f"assets/{profile['artifact_output_dir']}/{aid}.png"]}
+    locations = {s["asset_id"]: {"name": s["name"], "references": [s["output"]]}
+        for s in _location_asset_specs(profile)}
+    scene_assets = {}
+    for idx, source_scene in enumerate(profile.get("story_scenes") or [], 1):
+        roles = {str(role) for beat in source_scene.get("event_sequence", [])
+            for role in (beat.get("required_roles") or beat.get("participants") or beat.get("character_ids") or [])}
+        allowed_characters = {_scene_acceptance_role_character_id(profile, scene_index=idx, role_id=role) for role in roles}
+        allowed_objects = [profile["artifact_asset_id"]] if _scene_uses_artifact(profile, idx) and profile.get("artifact_name") else []
+        scene_assets[str(source_scene["scene_id"])] = {
+            "character_ids": sorted(allowed_characters.intersection(characters)),
+            "object_ids": allowed_objects,
+            "location_ids": [spec["asset_id"] for spec in _location_specs_for_scene_sequence(profile, idx)]}
+    return {"characters": characters, "objects": objects, "locations": locations, "scene_assets": scene_assets}
+
+
+def _author_cinematic_direction_with_codex(*, run_dir: Path, resources: dict[str, Any]) -> None:
+    ensure_directory_relative_nofollow(run_dir, Path("logs/authoring/p400"))
+    _write_run_text_nofollow(run_dir, run_dir / "logs/authoring/p400/resources.json", json.dumps(resources, ensure_ascii=False))
+    _run_materialization_subprocess(run_dir,
+        [sys.executable, str(REPO_ROOT / "scripts/author-cinematic-direction-with-codex.py"), "--run-dir", str(run_dir)],
+        cwd=REPO_ROOT, check=True, capture_output=True, text=True)
+
+
+def _author_visual_value_with_codex(*, run_dir: Path) -> None:
+    _run_materialization_subprocess(
+        run_dir,
+        [sys.executable, str(REPO_ROOT / "scripts/author-visual-value-with-codex.py"), "--run-dir", str(run_dir)],
         cwd=REPO_ROOT, check=True, capture_output=True, text=True,
     )
 
@@ -8626,6 +8742,7 @@ def _materialize_world_walk_source_references(
     destination_root_identity: PathIdentity | None = None,
     source_reference_lease: WorldWalkSourceReferenceLease | None = None,
     source_story_sha256: str | None = None,
+    reuse_verified: bool = False,
 ) -> list[str]:
     expected_source_identity = (
         source_root_identity
@@ -8665,6 +8782,15 @@ def _materialize_world_walk_source_references(
             output_relative = (
                 Path("assets") / "source_references" / relative
             )
+            if reuse_verified:
+                try:
+                    existing = read_regular_file_nofollow(run_dir, output_relative,
+                        expected_root_identity=expected_destination_identity)
+                except FileNotFoundError:
+                    existing = None
+                if existing is not None and hashlib.sha256(existing).hexdigest() == expected_sha256:
+                    references.append(output_relative.as_posix())
+                    continue
             copied_sha256 = copy_regular_file_atomic_nofollow(
                 source_root=source_run,
                 source_relative=source_relative,
@@ -8860,6 +8986,12 @@ def _scene_acceptance_role_character_id(
         )
     if direct is not None:
         return str(direct["character_id"])
+    added_characters = (profile.get("cinematic_direction") or {}).get("resources", {}).get("characters", {})
+    requested_matches = [aid for aid, resource in added_characters.items() if normalized in resource.get("source_role_ids", [])]
+    if len(requested_matches) == 1:
+        return requested_matches[0]
+    if len(requested_matches) > 1:
+        raise RuntimeError("ambiguous p420 source role: " + normalized)
     # Unknown roles are still represented by a stable participant ID so the
     # contract cannot silently claim coverage without a visible participant.
     safe_role = re.sub(r"[^A-Za-z0-9_-]+", "-", normalized).strip("-") or "unknown"
@@ -8873,7 +9005,8 @@ def _scene_acceptance_source_ledger(profile: dict[str, Any]) -> dict[str, Any]:
         "schema_version": "scene_acceptance_source_ledger_v1",
         "events": [
             {
-                "event_id": f"source_event_{event_index:02d}",
+                "event_id": (profile["research_event_ids"][event_index - 1]
+                    if source_first_profile(profile) else f"source_event_{event_index:02d}"),
                 "summary": str(event).strip(),
             }
             for event_index, event in enumerate(profile.get("events", []), start=1)
@@ -8885,6 +9018,9 @@ def _scene_acceptance_source_ledger(profile: dict[str, Any]) -> dict[str, Any]:
         "scene_value_amplifications": deepcopy(
             profile.get("scene_value_amplifications") or {}
         ),
+        "visual_planning": deepcopy(profile.get("visual_planning") or {}),
+        "source_story": deepcopy(profile.get("story") or {}),
+        **({"cinematic_direction": deepcopy(profile["cinematic_direction"])} if profile.get("cinematic_direction") else {}),
     }
 
 
@@ -8926,6 +9062,9 @@ def _build_scene_set_authoring_contract(
     ]
     source_artifacts = _scene_acceptance_source_artifacts(profile)
     source_ledger = _scene_acceptance_source_ledger(profile)
+    source_ids = [entry['event_id'] for entry in source_ledger['events']]
+    if len(source_ids) != len(set(source_ids)):
+        raise ValueError('duplicate research event IDs')
     source_digest = _scene_acceptance_source_binding_digest(
         source_artifacts["authoring_source_ledger"]
     )
@@ -8970,16 +9109,16 @@ def _build_scene_set_authoring_contract(
             "artifact": "authoring_source_ledger",
             "artifact_sha256": source_digest,
             "pointer": f"/events/{event_index - 1}",
-            "expected_id": f"source_event_{event_index:02d}",
+            "expected_id": source_ids[event_index - 1],
         }
         for event_index, _event in enumerate(source_events, start=1)
     ]
     event_id_by_text = {
-        event: f"source_event_{event_index:02d}"
+        event: source_ids[event_index - 1]
         for event_index, event in enumerate(source_events, start=1)
     }
     source_ref_by_event_id = {
-        f"source_event_{event_index:02d}": f"source-event-{event_index:02d}"
+        source_ids[event_index - 1]: f"source-event-{event_index:02d}"
         for event_index, _event in enumerate(source_events, start=1)
     }
 
@@ -8992,17 +9131,25 @@ def _build_scene_set_authoring_contract(
             for event in _scene_source_events(profile, int(record["scene_index"]))
             if event in event_id_by_text
         ]
+        if source_first_profile(profile):
+            event_ids = list(dict.fromkeys(
+                event_id for beat in record['scene_event']['event_sequence']
+                for event_id in beat.get('source_event_ids', [])))
+            if not event_ids or any(value not in source_ids for value in event_ids):
+                raise ValueError(f'scene {scene_id}: missing or unknown research event IDs')
         scene_source_event_ids[scene_id] = list(dict.fromkeys(event_ids))
         for event_id in event_ids:
             candidate_scene_ids_by_event_id.setdefault(event_id, []).append(scene_id)
     owner_scene_by_event_id: dict[str, int] = {}
     previous_owner_scene_id = int(scene_records[0]["scene_id"])
     for event_index, _event in enumerate(source_events, start=1):
-        event_id = f"source_event_{event_index:02d}"
+        event_id = source_ids[event_index - 1]
         candidate_scene_ids = candidate_scene_ids_by_event_id.get(event_id, [])
         if candidate_scene_ids:
             proposed_scene_id = min(candidate_scene_ids)
         else:
+            if source_first_profile(profile):
+                raise ValueError(f'research event has no authored scene: {event_id}')
             estimated_index = min(
                 len(scene_records),
                 max(
@@ -9019,6 +9166,8 @@ def _build_scene_set_authoring_contract(
         # Keep source-event ownership monotonic across runtime scenes so a
         # later fact is not assigned to an earlier runtime scene.
         owner_scene_id = max(previous_owner_scene_id, proposed_scene_id)
+        if source_first_profile(profile) and owner_scene_id != proposed_scene_id:
+            raise ValueError(f'authored research event order is reversed: {event_id}')
         owner_scene_by_event_id[event_id] = owner_scene_id
         previous_owner_scene_id = owner_scene_id
 
@@ -9063,12 +9212,13 @@ def _build_scene_set_authoring_contract(
             for event_id, owner_scene_id in owner_scene_by_event_id.items()
             if owner_scene_id == scene_id
         ]
-        owned_event_ids.sort(
-            key=lambda value: int(value.rsplit("_", 1)[-1])
-        )
+        owned_event_ids.sort(key=source_ids.index)
         assigned_event_ids_by_beat = {beat_id: [] for beat_id in beat_ids}
         for owned_index, event_id in enumerate(owned_event_ids):
             preferred_index = min(len(beat_ids) - 1, 2 + owned_index)
+            if source_first_profile(profile):
+                preferred_index = next(i for i, beat in enumerate(event_sequence)
+                    if event_id in beat.get('source_event_ids', []))
             selected_beat_id = beat_ids[preferred_index]
             assigned_event_ids_by_beat[selected_beat_id].append(event_id)
             event_beat_owner[event_id] = selected_beat_id
@@ -9080,7 +9230,7 @@ def _build_scene_set_authoring_contract(
         non_replaceable_elements: list[dict[str, Any]] = []
         fallback_source_event_ids = scene_source_event_ids.get(scene_id) or owned_event_ids
         if not fallback_source_event_ids and source_events:
-            fallback_source_event_ids = ["source_event_01"]
+            fallback_source_event_ids = source_ids[:1]
         fallback_source_ref_ids = [
             source_ref_by_event_id[event_id]
             for event_id in fallback_source_event_ids
@@ -9088,6 +9238,9 @@ def _build_scene_set_authoring_contract(
         ]
         for beat_index, beat in enumerate(event_sequence, start=1):
             beat_id = str(beat["beat_id"]).strip()
+            if source_first_profile(profile):
+                fallback_source_ref_ids = [source_ref_by_event_id[e]
+                    for e in beat['source_event_ids']]
             evidence_id = f"evidence-scene{scene_id}-beat-{beat_index:02d}"
             element_id = f"element-scene{scene_id}-beat-{beat_index:02d}"
             required_evidence = [
@@ -9248,11 +9401,9 @@ def _build_scene_set_authoring_contract(
                     }
                     for role_id in role_binding_beats
                 ],
-                "reveal_state_before": {
-                    "artifact-primary": reveal_state_before
-                },
+                "reveal_state_before": ({"artifact-primary": reveal_state_before} if first_artifact_scene_id is not None else {}),
                 "allowed_reveal_transition_ids": allowed_reveal_transition_ids,
-                "reveal_state_after": {"artifact-primary": reveal_state_after},
+                "reveal_state_after": ({"artifact-primary": reveal_state_after} if first_artifact_scene_id is not None else {}),
                 "time_location_transition": {
                     "time_of_day": time_of_day,
                     "continuity_from_previous": (
@@ -9289,7 +9440,7 @@ def _build_scene_set_authoring_contract(
             "source_ref_ids": [source_ref_by_event_id[event_id]],
         }
         for event_index, _event in enumerate(source_events, start=1)
-        for event_id in [f"source_event_{event_index:02d}"]
+        for event_id in [source_ids[event_index - 1]]
     ]
     handoff_chain = [
         {
@@ -9368,7 +9519,7 @@ def _build_scene_set_authoring_contract(
         source_artifacts=source_artifacts,
     )
     if not validation.valid:
-        raise RuntimeError(
+        raise AuthoringValidationError(
             "scene-set authoring contract is invalid: "
             + ", ".join(validation.reason_keys)
         )
@@ -9548,7 +9699,7 @@ def _run_scene_acceptance_preflight(
     if not report["preflight_digest"]:
         raise RuntimeError("scene-set preflight did not produce a digest")
     if not validation.valid:
-        raise RuntimeError(
+        raise AuthoringValidationError(
             "scene-set authoring preflight failed: "
             + ", ".join(validation.reason_keys)
         )
@@ -9564,13 +9715,18 @@ def _require_current_scene_acceptance_before_publish(
 ) -> None:
     """Fail closed before canonical script/manifest or requests are written."""
 
+    if profile.get("cinematic_direction"):
+        for doc, key in ((script, "script_metadata"), (manifest, "video_metadata")):
+            errors = direction_projection_file_issues(run_dir, doc, key)
+            if errors:
+                raise AuthoringValidationError("cinematic projection invalid: " + "; ".join(errors))
     source_artifacts = _scene_acceptance_source_artifacts(profile)
     validation = validate_scene_set_authoring_contract(
         script,
         source_artifacts=source_artifacts,
     )
     if not validation.valid:
-        raise RuntimeError(
+        raise AuthoringValidationError(
             "scene acceptance contract is not publishable: "
             + ", ".join(validation.reason_keys)
         )
@@ -9693,6 +9849,33 @@ def _build_script_and_manifest(
     source_run: Path | None = None,
     source_references: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    # Resume/rebuild must retain the stored planning version, never silently fall back to v1.
+    visual_path = run_dir / "visual_value.md"
+    if visual_path.exists() or visual_path.is_symlink():
+        visual_bytes = read_regular_file_nofollow(run_dir, "visual_value.md")
+        stored_visual = decode_document(visual_bytes)
+        if planning_declared(stored_visual, "visual_value_metadata"):
+            errors = validate_visual_value_files(run_dir, stored_visual)
+            if errors:
+                raise RuntimeError("visual planning source invalid: " + ", ".join(errors))
+            source_story = decode_document(read_regular_file_nofollow(run_dir, "story.md"))
+            profile = _profile_from_story(profile, source_story)
+            profile["visual_planning"] = stored_visual
+            profile["visual_value_binding"] = source_binding("visual_value.md", visual_bytes)
+        elif source_first_profile(profile):
+            raise RuntimeError("visual planning version differs from the stored source")
+    elif source_first_profile(profile):
+        raise RuntimeError("source-first visual planning file is missing")
+    cinematic_path = run_dir / CINEMATIC_ARTIFACT
+    if cinematic_path.exists() or cinematic_path.is_symlink():
+        profile["cinematic_direction"] = load_direction(run_dir, _cinematic_resources(profile))
+        profile["cinematic_binding"] = source_binding(CINEMATIC_ARTIFACT, read_regular_file_nofollow(run_dir, CINEMATIC_ARTIFACT))
+    elif profile.get("cinematic_required") or _parse_canonical_state(run_dir / "state.txt").get("p400.cinematic_direction_contract"):
+        raise RuntimeError("cinematic direction is required before cut materialization")
+    elif (run_dir / "script.md").is_file():
+        saved_script = decode_document(read_regular_file_nofollow(run_dir, "script.md"))
+        if "cinematic_direction_contract" in saved_script.get("script_metadata", {}):
+            raise RuntimeError("stored cinematic direction is missing; refusing a legacy fallback")
     script_scenes: list[dict[str, Any]] = []
     manifest_scenes: list[dict[str, Any]] = []
     selectors: list[str] = []
@@ -9787,6 +9970,9 @@ def _build_script_and_manifest(
             profile=profile,
             include_artifact=include_artifact,
         )
+        if profile.get("cinematic_direction"):
+            scene_intent["cinematic_direction"] = {key: deepcopy(value)
+                for key, value in profile["cinematic_direction"]["scenes"][idx - 1].items() if key != "cuts"}
         scene_intent["story_event_obligations"] = (
             _story_event_obligations_from_scene_event(scene_event)
         )
@@ -9855,6 +10041,33 @@ def _build_script_and_manifest(
     }
     total_duration_seconds = 0
     for idx, title in enumerate(profile["scene_titles"], start=1):
+        if profile.get("cinematic_direction"):
+            directed = profile["cinematic_direction"]["scenes"][idx - 1]
+            scene_id = _runtime_scene_id(idx)
+            record = authoring_record_by_scene_id[scene_id]
+            previous_selector = "" if idx == 1 else f"scene{_runtime_scene_id(idx-1)}_cut{len(profile['cinematic_direction']['scenes'][idx-2]['cuts']):02d}"
+            next_selector = f"scene{_runtime_scene_id(idx+1)}_cut01" if idx < len(profile["scene_titles"]) else ""
+            draft = acceptance_draft_by_scene_id[scene_id]
+            binding = {"generation_id": scene_set_authoring_contract["generation_id"],
+                "contract_digest": scene_set_authoring_contract["contract_digest"],
+                "scene_slice_digest": draft["scene_slice_digest"], "preflight_digest": authoring_preflight["preflight_digest"]}
+            script_scene, manifest_scene = project_cinematic_scene(directed,
+                source_scene=_story_scene(profile, idx), scene_id=scene_id,
+                resources=profile["cinematic_direction"]["resources"],
+                scene_intent=record["scene_intent"], scene_event=record["scene_event"],
+                scene_generation=record["scene_generation"], acceptance_draft=draft,
+                acceptance_binding=binding, previous_selector=previous_selector,
+                next_selector=next_selector, story_time=str(profile.get("story_time") or ""),
+                film_language=profile['cinematic_direction'].get('film_language'))
+            script_scenes.append(script_scene)
+            manifest_scenes.append(manifest_scene)
+            selectors.extend(c["selector"] for c in manifest_scene["cuts"])
+            total_duration_seconds += manifest_scene["estimated_duration_seconds"]
+            scene_event_inputs.append(deepcopy(record))
+            scene_event_outputs.append({"scene_id": scene_id, "scene_event": deepcopy(record["scene_event"]),
+                "cinematic_direction": deepcopy(directed)})
+            scene_generation_prompts.append({"scene_id": scene_id, "scene_generation": deepcopy(record["scene_generation"])})
+            continue
         time_of_day = _scene_time_of_day(profile, idx)
         time_of_day_visual_basis = _scene_time_of_day_visual_basis(profile, idx)
         include_artifact = _scene_uses_artifact(profile, idx)
@@ -10083,9 +10296,10 @@ def _build_script_and_manifest(
             if idx - 1 < len(scene_targets)
             else len(cut_plans) * 8
         )
+        boundary_cuts = scene_boundary(profile, _story_scene(profile, idx))
         cut_duration_seconds = _allocate_scene_cut_durations(
             scene_target_seconds=scene_target_seconds,
-            cut_count=len(cut_plans),
+            cut_count=len(cut_plans) + len(boundary_cuts),
         )
         scene_duration_seconds = sum(cut_duration_seconds)
         total_duration_seconds += scene_duration_seconds
@@ -10675,6 +10889,11 @@ def _build_script_and_manifest(
                     f"視線が{motion_attention_target}へ定まる"
                 )
             )
+            if source_first_profile(profile):
+                visible_start_state["emotional_state"] = str(primary_event_beat.get("emotional_state") or "")
+                emotional_change = str(cut_plan.get("emotional_change") or primary_event_beat.get("emotional_change") or "")
+                environment_motion = str(cut_plan.get("environment_motion") or primary_event_beat.get("environment_motion") or "")
+                camera_motion = str(cut_plan.get("camera_motion") or primary_event_beat.get("camera_motion") or "static_camera")
             motion_start_affordance = {
                 "movable_subject": focal_character_name,
                 "movement_vector": cut_plan["screen_direction"],
@@ -10722,6 +10941,7 @@ def _build_script_and_manifest(
                 is_terminal_scene=is_terminal_scene,
                 visual_beat=visual_beat,
                 narration=narration,
+                source_first=source_first_profile(profile),
             )
             source_non_replaceable_elements = [
                 element
@@ -10730,9 +10950,14 @@ def _build_script_and_manifest(
                 for element in beat["story_grounding"].get("non_replaceable_elements", [])
                 if isinstance(element, dict)
             ]
+            if source_first_profile(profile):
+                explicit_affect = primary_event_beat.get("mixed_affect_design")
+                if isinstance(explicit_affect, dict):
+                    mixed_affect_design = deepcopy(explicit_affect)
             cut_contract = {
+                **({"visual_planning_contract": VISUAL_PLANNING_CONTRACT} if source_first_profile(profile) else {}),
                 "schema_version": "3.0",
-                "expressive_contract": _cut_expressive_contract_for_scaffold(
+                **({} if source_first_profile(profile) else {"expressive_contract": _cut_expressive_contract_for_scaffold(
                     scene_id=scene_id,
                     scene_amplification=scene_intent["scene_value_amplification"],
                     cut_function=str(cut_blueprint["cut_function"]),
@@ -10740,7 +10965,7 @@ def _build_script_and_manifest(
                     visual_beat=visual_beat,
                     motion_brief=str(cut_blueprint["motion_brief"]),
                     motion_end_state=str(cut_blueprint["motion_end_state"]),
-                ),
+                )}),
                 "cut_state_progression": {
                     "policy_version": "cut_state_progression_v1",
                     "source_scene_progression_plan": "scene_state_progression_plan",
@@ -10759,6 +10984,10 @@ def _build_script_and_manifest(
                 "source_event_contract": {
                     "primary_event_beat_id": primary_event_beat_id,
                     "source_event_beat_ids": source_event_beat_ids,
+                    **({
+                        "source_event_ids": deepcopy(cut_plan.get("source_event_ids", [])),
+                        "source_transition_id": cut_plan["source_transition_id"],
+                    } if "source_transition_id" in cut_plan else {}),
                     "event_beat_function": event_beat_function,
                     "event_time_position": event_time_position,
                     "source_event_summary": str(
@@ -10930,10 +11159,10 @@ def _build_script_and_manifest(
                     "visual_evidence": cut_blueprint["visual_evidence"],
                     "required_roles": cut_blueprint["required_roles"],
                     "anti_redundancy_key": cut_blueprint["anti_redundancy_key"],
-                    "emotional_micro_shift": {
+                    "emotional_micro_shift": (deepcopy(primary_event_beat.get("emotional_micro_shift") or {}) if source_first_profile(profile) else {
                         "from": str(primary_event_beat.get("emotional_pressure") or "sceneの圧力"),
                         "to": str(cut_plan.get("audience_knowledge_delta") or cut_blueprint["dramatic_job"]),
-                    },
+                    }),
                     "mixed_affect_design": mixed_affect_design,
                     "reveal_constraints": {
                         "inherited_from_scene": scene_intent.get("reveal_constraints", []),
@@ -11244,6 +11473,41 @@ def _build_script_and_manifest(
                     "implementation_trace": {"status": "verified", "source_request_ids": []},
                 }
             )
+        for boundary_index, boundary_spec in enumerate(boundary_cuts):
+            cut_number = len(cuts) + 1
+            selector = f"scene{scene_id}_cut{cut_number:02d}"
+            boundary_location = next((s for s in scene_location_specs if s['name'] == boundary_spec['location']), None)
+            if boundary_location is None or boundary_spec['location'] != location_sequence[-1]:
+                raise ValueError('b_roll.location_must_be_scene_end')
+            script_sub, manifest_sub = materialize_b_roll(
+                boundary_spec, selector=selector, cut_id=f"{cut_number:02d}", location=boundary_location,
+                duration=cut_duration_seconds[len(cut_plans) + boundary_index],
+                story_time=str(profile.get('story_time') or ''), time_of_day=time_of_day,
+                previous_selector=cuts[-1]['selector'],
+            )
+            manifest_sub['video_generation']['duration_exception'] = _duration_exception_for_cut(manifest_sub['duration_seconds'])
+            inherited_outgoing = deepcopy(cuts[-1]['cut_contract']['cut_handoff']['delivers_to_next'])
+            for collection, sub in ((cuts, script_sub), (manifest_cuts, manifest_sub)):
+                outgoing = collection[-1]['cut_contract']['cut_handoff']['delivers_to_next']
+                outgoing.update({'anchor_type': 'none', 'expected_next_cut_selector': selector,
+                    'visible_or_audible_form': boundary_spec['first_frame'], 'binds_video_last_frame_to_next_first_frame': False})
+                sub['cut_contract']['cut_handoff']['delivers_to_next'] = deepcopy(inherited_outgoing)
+                collection.append(sub)
+            selectors.append(selector)
+            scene_shot_records.append({'selector': selector, 'shot_role': boundary_spec['technique'],
+                'shot_scale': 'wide', 'a_roll_or_b_roll': 'b_roll'})
+            assignment = {'cut_index': cut_number, 'cut_selector': selector, 'obligation_id': f'b_roll_{boundary_index + 1}',
+                'obligation_ids': [f'b_roll_{boundary_index + 1}'], 'cut_function': 'atmosphere', 'source': 'boundary_b_roll',
+                'event_assignment': {'source_event_contract': deepcopy(manifest_sub['cut_contract']['source_event_contract'])},
+                'target_beat': boundary_spec['first_frame']}
+            scene_cut_coverage_plan['cut_assignments'].append(assignment)
+            scene_cut_coverage_plan['scene_obligations'].append({
+                'obligation_id': assignment['obligation_id'], 'source': 'boundary_b_roll',
+                'evidence': boundary_spec['first_frame'], 'assigned_cut_ids': [selector]})
+            for inventory in scene_cut_coverage_plan['event_beat_inventory']:
+                if inventory['beat_id'] == boundary_spec['source_event_beat_id']:
+                    inventory['assigned_cut_ids'].append(selector)
+            scene_cut_coverage_plan['selected_cut_count'] = len(cuts)
         scene_shot_mix_plan = {
             "policy_version": "scene_shot_mix_v1",
             "source": "image_generation.api_prompt_payload.shot_design_contract",
@@ -11312,7 +11576,7 @@ def _build_script_and_manifest(
                 previous_cut=manifest_cuts[cut_index - 1] if cut_index > 0 else None,
                 next_cut=manifest_cuts[cut_index + 1] if cut_index + 1 < len(manifest_cuts) else None,
             )
-        script_scenes.append({"scene_id": scene_id, "canonical_scene_index": _canonical_scene_index(profile, idx), "phase": _phase_for_scene(profile, idx), "time_of_day": time_of_day, "time_of_day_visual_basis": time_of_day_visual_basis, "location_mode": "sequence" if len(location_sequence) > 1 else "single", "location_sequence": location_sequence, "location_segments": location_segments, "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "research_refs": _downstream_scene_research_refs(idx, _scene_source_events(profile, idx), profile), "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "scene_generation": scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_acceptance_draft": deepcopy(acceptance_draft_by_scene_id[scene_id]), "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "cuts": cuts})
+        script_scenes.append({"source_story_scene_id": str(_story_scene(profile, idx).get("scene_id", "")), "scene_id": scene_id, "canonical_scene_index": _canonical_scene_index(profile, idx), "phase": _phase_for_scene(profile, idx), "time_of_day": time_of_day, "time_of_day_visual_basis": time_of_day_visual_basis, "location_mode": "sequence" if len(location_sequence) > 1 else "single", "location_sequence": location_sequence, "location_segments": location_segments, "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "research_refs": _downstream_scene_research_refs(idx, _scene_source_events(profile, idx), profile), "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "scene_generation": scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_acceptance_draft": deepcopy(acceptance_draft_by_scene_id[scene_id]), "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "cuts": cuts})
         manifest_scene_generation = deepcopy(scene_generation)
         prompt_packet = manifest_scene_generation.pop(
             "scene_acceptance_prompt_packet",
@@ -11333,7 +11597,7 @@ def _build_script_and_manifest(
                     "scene_slice_digest"
                 ),
             }
-        manifest_scenes.append({"scene_id": scene_id, "canonical_scene_index": _canonical_scene_index(profile, idx), "time_of_day": time_of_day, "time_of_day_visual_basis": time_of_day_visual_basis, "location_mode": "sequence" if len(location_sequence) > 1 else "single", "location_sequence": location_sequence, "location_segments": location_segments, "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "research_refs": _downstream_scene_research_refs(idx, _scene_source_events(profile, idx), profile), "scene_generation": manifest_scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_acceptance_binding": {"generation_id": scene_set_authoring_contract["generation_id"], "contract_digest": scene_set_authoring_contract["contract_digest"], "scene_slice_digest": acceptance_draft_by_scene_id[scene_id]["scene_slice_digest"], "preflight_digest": authoring_preflight["preflight_digest"]}, "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "cuts": manifest_cuts})
+        manifest_scenes.append({"source_story_scene_id": str(_story_scene(profile, idx).get("scene_id", "")), "scene_id": scene_id, "canonical_scene_index": _canonical_scene_index(profile, idx), "time_of_day": time_of_day, "time_of_day_visual_basis": time_of_day_visual_basis, "location_mode": "sequence" if len(location_sequence) > 1 else "single", "location_sequence": location_sequence, "location_segments": location_segments, "importance": "medium", "target_duration_seconds": scene_target_seconds, "estimated_duration_seconds": scene_duration_seconds, "research_refs": _downstream_scene_research_refs(idx, _scene_source_events(profile, idx), profile), "scene_generation": manifest_scene_generation, "scene_intent": scene_intent, "scene_event": scene_event, "scene_acceptance_binding": {"generation_id": scene_set_authoring_contract["generation_id"], "contract_digest": scene_set_authoring_contract["contract_digest"], "scene_slice_digest": acceptance_draft_by_scene_id[scene_id]["scene_slice_digest"], "preflight_digest": authoring_preflight["preflight_digest"]}, "scene_character_state_timeline": scene_character_state_timeline, "scene_film_coverage_plan": scene_film_coverage_plan, "scene_state_progression_plan": scene_state_progression_plan, "semantic_contract": scene_semantic_contract, "scene_cut_coverage_plan": scene_cut_coverage_plan, "scene_shot_mix_plan": scene_shot_mix_plan, "handoff_to_next_scene": scene_intent["handoff_to_next_scene"], "terminal_resolution": scene_intent["terminal_resolution"], "cuts": manifest_cuts})
         scene_event_outputs.append(
             {
                 "scene_id": scene_id,
@@ -11413,6 +11677,11 @@ def _build_script_and_manifest(
         "scenes": script_scenes,
     }
     script["script_metadata"]["adaptation_value_contract"] = ADAPTATION_VALUE_MARKER
+    if source_first_profile(profile):
+        script["script_metadata"]["visual_planning_contract"] = VISUAL_PLANNING_CONTRACT
+        script["script_metadata"]["source_visual_value"] = deepcopy(profile["visual_value_binding"])
+        script["evaluation_contract"] = deepcopy(profile.get("story", {}).get("adaptation_source_contract", {}))
+
     script["script_metadata"]["time"] = str(profile.get("story_time") or "").strip()
     script["script_metadata"]["scene_time_of_day_contract"] = SCENE_TIME_OF_DAY_CONTRACT
     script["script_metadata"]["scene_time_of_day_visual_basis_contract"] = SCENE_TIME_OF_DAY_VISUAL_BASIS_CONTRACT
@@ -11500,6 +11769,8 @@ def _build_script_and_manifest(
             "reuse_contract": {"mode": "neutral_anchor"},
         }
     ] if profile["artifact_name"] else []
+    if source_first_profile(profile) and object_bible:
+        object_bible[0]["cinematic"] = {"role": profile["artifact_role"], "visual_subject": profile["artifact_visual"]}
     for spec in _supporting_object_asset_specs(profile):
         object_bible.append(
             {
@@ -11533,6 +11804,18 @@ def _build_script_and_manifest(
         },
     }
     manifest["video_metadata"]["adaptation_value_contract"] = ADAPTATION_VALUE_MARKER
+    if source_first_profile(profile):
+        manifest["video_metadata"]["visual_planning_contract"] = VISUAL_PLANNING_CONTRACT
+        manifest["video_metadata"]["source_visual_value"] = deepcopy(profile["visual_value_binding"])
+
+    if profile.get("cinematic_direction"):
+        extend_asset_bibles(manifest, profile["cinematic_direction"])
+        for document in (script, manifest):
+            document["asset_resolutions"] = deepcopy(profile["cinematic_direction"].get("asset_resolutions", []))
+    if profile.get("cinematic_direction"):
+        for document, metadata in ((script, "script_metadata"), (manifest, "video_metadata")):
+            document[metadata]["cinematic_direction_contract"] = CINEMATIC_CONTRACT
+            document[metadata]["source_cinematic_direction"] = deepcopy(profile["cinematic_binding"])
     manifest["video_metadata"]["time"] = str(profile.get("story_time") or "").strip()
     _bind_experience_metadata(
         manifest,
@@ -11723,7 +12006,7 @@ def _require_fresh_p400_readiness(run_dir: Path) -> None:
     ]
     if not bool(stage_result.get("passed")) or failed:
         detail = ", ".join(failed[:8]) or "manifest structural validation failed"
-        raise RuntimeError(f"p400 manifest structure is invalid: {detail}")
+        raise AuthoringValidationError(f"p400 manifest structure is invalid: {detail}")
 
 
 def _write_orchestration(
@@ -11829,8 +12112,8 @@ def _build_asset_artifacts_from_manifest(
         "characters": [],
         "story_specific_items": [],
         "locations": [],
-        "setpieces": [profile["artifact_name"], *[str(spec["name"]) for spec in _supporting_object_asset_specs(profile)]],
-        "reusable_stills": ["時間制限を示す象徴的な光"],
+        "setpieces": [],
+        "reusable_stills": [],
     }
 
     for entry in assets.get("character_bible", []) or []:
@@ -11859,6 +12142,7 @@ def _build_asset_artifacts_from_manifest(
         if not asset_id or not output or not selectors:
             continue
         coverage["story_specific_items"].append(asset_id)
+        coverage["setpieces"].append(str((entry.get("review_aliases") or [asset_id])[0]))
         role = str((entry.get("cinematic") or {}).get("role") or profile["artifact_role"])
         subject = str((entry.get("cinematic") or {}).get("visual_subject") or profile["artifact_visual"])
         fixed_prompts = [str(item) for item in entry.get("fixed_prompts") or [] if str(item).strip()]
@@ -11888,13 +12172,53 @@ def _build_asset_artifacts_from_manifest(
         inventory_items.append({"item_id": asset_id, "category": "locations", "source_script_selectors": selectors, "story_purpose": f"{location_name}の空間・光・質感を固定する", "reusable_reason": "同じ場所のcutで背景と空気感を保つ", "recommended_asset_type": "location_reference"})
         plan_entries.append({"asset_id": asset_id, "asset_type": "location_reference", "source_script_selectors": selectors, "story_purpose": f"{location_name}の空間構造と固定素材を保つ", "fixed_prompts": fixed_prompts, "generation_prompt": str(entry.get("generation_prompt") or "").strip(), "reuse_contract": deepcopy(entry.get("reuse_contract") or {"mode": "neutral_anchor"}), "visual_spec": {"subject": location_subject, "style": "photorealistic live-action cinematic location still", "forbidden": ["文字", "ロゴ", "人物主役", "アニメ"]}, "generation_plan": {"execution_lane": "bootstrap_builtin", "bootstrap_allowed": True, "required_views": ["wide"], "reference_inputs": [], "output": output}})
 
+    by_id = {entry.get(key): entry for group, key in (("character_bible", "character_id"), ("object_bible", "object_id"), ("location_bible", "location_id"))
+        for entry in assets.get(group, []) or [] if isinstance(entry, dict)}
+    for collection in (inventory_items, plan_entries):
+        for item in collection:
+            source_entry = by_id.get(item.get("asset_id") or item.get("item_id"), {})
+            for key in ("source_identity", "source_evidence"):
+                if key in source_entry:
+                    item[key] = deepcopy(source_entry[key])
     if not plan_entries:
         raise RuntimeError("manifest did not yield any reusable asset plan entries")
     inventory = {"asset_inventory": {"source_artifacts": ["story.md", "script.md", "video_manifest.md"], "coverage_scope": coverage, "items": inventory_items}}
     plan = {"assets": plan_entries}
+    if source_first_profile(profile):
+        plan["visual_planning_context"] = {
+            "source_visual_value": deepcopy(profile["visual_value_binding"]),
+            "global_visual_identity": deepcopy(profile["visual_planning"].get("global_visual_identity", {})),
+            "continuity_notes": deepcopy(profile["visual_planning"].get("continuity_notes", [])),
+        }
+        inventory["asset_inventory"]["source_artifacts"].append("visual_value.md")
     return inventory, plan
 
 
+def _repair_materialization(function):
+    """Return late compiler/materializer errors to their author in the same run."""
+    from functools import wraps
+    import inspect
+    signature = inspect.signature(function)
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        call = signature.bind(*args, **kwargs)
+        call.apply_defaults()
+        while True:
+            try:
+                return function(*call.args, **call.kwargs)
+            except AuthoringValidationError as exc:
+                run_dir = call.arguments['run_dir']
+                owner = exc.owner_stage
+                if owner not in {'p220', 'p330', 'p420'}:
+                    raise
+                name = {'p220': 'story.md', 'p330': 'visual_value.md', 'p420': CINEMATIC_ARTIFACT}[owner]
+                candidate = read_regular_file_nofollow(run_dir, name).decode()
+                handoff_session(run_dir, owner).feedback('handoff', {name: candidate}, [str(exc)])
+                call.arguments['resume_authoring'] = True
+    return wrapped
+
+
+@_repair_materialization
 def materialize_run(
     topic: str,
     source: str,
@@ -11912,7 +12236,21 @@ def materialize_run(
     ) = None,
     world_walk_source_story_sha256: str | None = None,
     research_author_runner: Callable[..., None] | None = None,
+    visual_value_author_runner: Callable[..., None] | None = None,
+    cinematic_author_runner: Callable[..., None] | None = None,
+    resume_authoring: bool = False,
 ) -> None:
+    from toc.stage_checkpoints import StageCheckpoints
+    from toc.authoring_resume import read_create_input
+
+    if resume_authoring:
+        saved = read_create_input(run_dir)
+        expected_source_run = source_run.relative_to(REPO_ROOT).as_posix() if source_run else None
+        if any(saved[key] != value for key, value in {
+            "topic": topic, "source": source, "experience": experience,
+            "source_run": expected_source_run, "target_duration_seconds": target_duration_seconds,
+        }.items()):
+            raise ValueError("authoring resume must use the saved exact create input")
     # Keep accepting the legacy switch while the server/client migration
     # completes.  Creation is deliberately single-path and never records or
     # branches on this value.
@@ -11927,6 +12265,8 @@ def materialize_run(
         source_root_identity=world_walk_source_identity,
         expected_source_sha256=world_walk_source_story_sha256,
     )
+    if resume_authoring and source != saved["source"]:
+        raise ValueError("world-walk source changed from the saved create input")
     if experience == "world_walk" and source_run is not None:
         if world_walk_source_identity is None:
             world_walk_source_identity = directory_identity_nofollow(
@@ -11958,6 +12298,12 @@ def materialize_run(
         ("run_status.json", b"{}\n"),
         ("p000_index.md", b""),
     ):
+        if resume_authoring:
+            try:
+                read_regular_file_nofollow(run_dir, reserved_path, expected_root_identity=materialization_root_identity)
+                continue
+            except FileNotFoundError:
+                pass
         write_regular_file_exclusive_nofollow(
             destination_root=run_dir,
             destination_relative=reserved_path,
@@ -11966,27 +12312,16 @@ def materialize_run(
                 materialization_root_identity
             ),
         )
-    source_references = (
-        _materialize_world_walk_source_references(
-            source_run,
-            run_dir,
-            source_root_identity=world_walk_source_identity,
-            destination_root_identity=materialization_root_identity,
-            source_reference_lease=world_walk_source_reference_lease,
-            source_story_sha256=world_walk_source_story_sha256,
+    if not resume_authoring:
+        _write_create_input_contract(
+            run_dir=run_dir,
+            topic=topic,
+            source=source,
+            experience=experience,
+            source_run=source_run,
+            target_duration_seconds=target_duration_seconds,
+            expected_run_identity=materialization_root_identity,
         )
-        if experience == "world_walk" and source_run is not None
-        else []
-    )
-    _write_create_input_contract(
-        run_dir=run_dir,
-        topic=topic,
-        source=source,
-        experience=experience,
-        source_run=source_run,
-        target_duration_seconds=target_duration_seconds,
-        expected_run_identity=materialization_root_identity,
-    )
     if (
         experience == "world_walk"
         and source_run is not None
@@ -12018,6 +12353,12 @@ def materialize_run(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
+        if resume_authoring:
+            previous_lease = json.loads(read_regular_file_nofollow(run_dir,
+                "logs/orchestration/world_walk_source_reference_lease.json",
+                expected_root_identity=materialization_root_identity))
+            if previous_lease != lease_payload:
+                raise ValueError("world-walk source reference lease changed since the original request")
         _write_run_text_nofollow(
             run_dir,
             (
@@ -12034,6 +12375,103 @@ def materialize_run(
             )
             + "\n",
         )
+    source_references = (
+        _materialize_world_walk_source_references(
+            source_run,
+            run_dir,
+            source_root_identity=world_walk_source_identity,
+            destination_root_identity=materialization_root_identity,
+            source_reference_lease=world_walk_source_reference_lease,
+            source_story_sha256=world_walk_source_story_sha256,
+            reuse_verified=resume_authoring,
+        )
+        if experience == "world_walk" and source_run is not None
+        else []
+    )
+    checkpoints = StageCheckpoints(run_dir, {
+        "topic": topic, "source": source, "target_duration_seconds": target_duration_seconds,
+        "experience": experience, "contract_version": 1,
+    })
+
+    def validate_reusable_authoring(stage):
+        errors = []
+        if stage == 'research':
+            return
+        if stage == 'story':
+            data = load_structured_document(run_dir / 'story.md')[1]
+            errors = validate_story_document(data, build_research_registry(researched_source))
+            errors += _story_duration_contract_errors(data, target_duration_seconds=target_duration_seconds)
+            errors += _story_time_of_day_contract_errors(data)
+        elif stage == 'visual_value':
+            errors = validate_visual_value_files(run_dir)
+        else:
+            load_direction(run_dir, _cinematic_resources(profile))
+        if errors:
+            raise AuthoringValidationError('; '.join(errors),
+                owner_stage={'story': 'p220', 'visual_value': 'p330', 'cinematic': 'p420'}[stage])
+
+    def author_stage(stage, inputs, outputs, action, *, force=False):
+        reusable = not force and resume_authoring and checkpoints.reusable(stage, inputs, outputs)
+        if stage != 'research' and handoff_session(run_dir, {'story': 'p220', 'visual_value': 'p330', 'cinematic': 'p420'}[stage]).pending('handoff'):
+            reusable = False
+        if reusable:
+            try:
+                validate_reusable_authoring(stage)
+            except (RuntimeError, ValueError, TypeError, KeyError):
+                reusable = False
+        if reusable:
+            append_state_snapshot(run_dir / "state.txt", {
+                f"runtime.resume.{stage}.status": "reused",
+            })
+            return
+        checkpoints.start(stage, inputs, outputs)
+        slot = {"research": "p120", "story": "p220", "visual_value": "p310", "cinematic": "p410"}[stage]
+        append_state_snapshot(run_dir / "state.txt", {
+            f"slot.{slot}.status": "in_progress", "runtime.stage": f"{stage}_authoring",
+        })
+        previous = {}
+        for name in outputs:
+            try:
+                previous[name] = read_regular_file_nofollow(run_dir, name)
+            except FileNotFoundError:
+                previous[name] = None
+        def restore():
+            for name, raw in previous.items():
+                if raw is not None:
+                    write_regular_file_nofollow(destination_root=run_dir, destination_relative=name,
+                        data=raw, expected_destination_root_identity=materialization_root_identity)
+                else:
+                    try:
+                        candidate = read_regular_file_nofollow(run_dir, name)
+                    except FileNotFoundError:
+                        continue
+                    unlink_regular_file_verified_nofollow(root=run_dir, relative_path=name,
+                        expected_root_identity=materialization_root_identity,
+                        expected_sha256=hashlib.sha256(candidate).hexdigest())
+        session = handoff_session(run_dir, {'story': 'p220', 'visual_value': 'p330', 'cinematic': 'p420'}[stage]) if stage != 'research' else None
+        try:
+            while True:
+                if session:
+                    session.claim('handoff')
+                action()
+                try:
+                    validate_reusable_authoring(stage)
+                except AuthoringValidationError as exc:
+                    candidate = {name: read_regular_file_nofollow(run_dir, name).decode() for name in outputs}
+                    session.feedback('handoff', candidate, [str(exc)])
+                    restore()
+                    continue
+                if session:
+                    session.complete('handoff')
+                break
+        except Exception as exc:
+            restore()
+            append_state_snapshot(run_dir / 'state.txt', {
+                'status': 'FAILED', f'slot.{slot}.status': 'failed',
+                'runtime.stage': f'{stage}_authoring_failed', 'last_error': str(exc)[:2000],
+            })
+            raise
+
     profile = _story_profile(topic, source, variant_seed=run_dir.name)
     duration_plan = build_duration_plan(target_duration_seconds).to_dict()
     profile["duration_plan"] = duration_plan
@@ -12050,6 +12488,9 @@ def materialize_run(
             "timestamp": now,
             "topic": topic,
             "status": "AUTHORING",
+            "last_error": "",
+            "runtime.create_job.status": "running",
+            "runtime.create_job.error_code": "",
             "runtime.stage": "research_authoring",
             "runtime.target_video_seconds": str(duration_plan["target_seconds"]),
             "runtime.duration_gate.minimum_seconds": str(int(duration_plan["minimum_effective_seconds"])),
@@ -12075,10 +12516,11 @@ def materialize_run(
         },
     )
     try:
-        (research_author_runner or _author_research_with_codex)(
-            run_dir=run_dir, topic=topic, source=source,
-            target_duration_seconds=target_duration_seconds,
-        )
+        author_stage("research", [], ["research.md"], lambda:
+            (research_author_runner or _author_research_with_codex)(
+                run_dir=run_dir, topic=topic, source=source,
+                target_duration_seconds=target_duration_seconds,
+            ))
     except Exception as exc:
         append_state_snapshot(run_dir / "state.txt", {
             "runtime.stage": "research_authoring_failed",
@@ -12087,40 +12529,15 @@ def materialize_run(
         })
         raise
     _research_text, researched_source = load_structured_document(run_dir / "research.md")
-    if not researched_source:
-        raise RuntimeError("research.md is not a structured document")
-    research_errors = validate_research_document(researched_source, topic=topic, source=source)
-    if research_errors:
-        append_state_snapshot(run_dir / "state.txt", {
-            "runtime.stage": "research_contract_failed", "slot.p120.status": "failed",
-            "last_error": ", ".join(research_errors),
-        })
-        raise RuntimeError("research contract failed: " + ", ".join(research_errors))
-    try:
-        _validate_research_duration_contract(
-            researched_source,
-            target_duration_seconds=target_duration_seconds,
-        )
-    except RuntimeError as exc:
-        append_state_snapshot(
-            run_dir / "state.txt",
-            {
-                "timestamp": _now_iso(),
-                "runtime.stage": "research_duration_contract_failed",
-                "research.duration_contract.status": "failed",
-                "last_error": str(exc)[:2000],
-            },
-        )
-        raise
     append_state_snapshot(
         run_dir / "state.txt",
         {
             "timestamp": _now_iso(),
-            "research.duration_contract.status": "passed",
             "slot.p110.status": "done",
             "slot.p120.status": "done",
         },
     )
+    checkpoints.complete("research", [], ["research.md"])
     profile = _profile_from_research(profile, researched_source)
     append_state_snapshot(
         run_dir / "state.txt",
@@ -12131,18 +12548,17 @@ def materialize_run(
             "slot.p200.note": "Story Architect / Scene Author is grounding story.md in researched source material",
         },
     )
-    (story_author_runner or _author_story_with_codex)(
-        run_dir=run_dir,
-        topic=topic,
-        target_duration_seconds=target_duration_seconds,
-    )
+    author_stage("story", ["research.md"], ["story.md"], lambda:
+        (story_author_runner or _author_story_with_codex)(
+            run_dir=run_dir, topic=topic, target_duration_seconds=target_duration_seconds,
+        ))
     append_state_snapshot(
         run_dir / "state.txt",
         {
             "timestamp": _now_iso(),
             "runtime.stage": "story_authored",
             "slot.p200.status": "authored",
-            "slot.p200.note": "LLM-authored story.md passed deterministic research and handoff validation",
+            "slot.p200.note": "LLM-authored story.md is ready for story validation",
         },
     )
     _story_text, authored_story = load_structured_document(run_dir / "story.md")
@@ -12209,101 +12625,86 @@ def materialize_run(
             "story.time_of_day_contract.status": "passed",
         },
     )
+    checkpoints.complete("story", ["research.md"], ["story.md"])
     authored_adaptation_contract = authored_story.get("adaptation_source_contract")
     if isinstance(authored_adaptation_contract, dict) and authored_adaptation_contract:
         profile["adaptation_source_contract"] = deepcopy(authored_adaptation_contract)
     profile = _profile_from_story(profile, authored_story)
     protagonist_asset = profile["protagonist_asset_id"]
     artifact_asset = profile["artifact_asset_id"]
-    visual = {
-        "visual_value_metadata": {
-            "topic": topic,
-            "source_story": str(run_dir / "story.md"),
-            "created_at": now,
-            "adaptation_value_contract": ADAPTATION_VALUE_MARKER,
-        },
-        "duration_plan": duration_plan,
-        "adaptation_intent": _adaptation_intent_for_profile(profile),
-        "global_visual_identity": {"format": "実写シネマティック", "palette": ["深い生活影", "月白", "金色", "象徴物の反射"], "no_onscreen_text": "画面内テキスト、字幕、ロゴ、ウォーターマークなし"},
-        "scene_visual_values": [
-            {
-                "scene_selector": _runtime_scene_id(idx),
-                "value": f"{title}の感情を、{'・'.join(profile['motifs'])}の触感で伝える",
-                "anchor": title,
-                "scene_value_amplification": _scene_value_amplification_for_profile(
-                    profile=profile,
-                    idx=idx,
-                    title=title,
-                ),
-            }
-            for idx, title in enumerate(profile["scene_titles"], start=1)
-        ],
-        "asset_bible_candidates": {"characters": [protagonist_asset, *[str(spec["character_id"]) for spec in _supporting_character_asset_specs(profile)]], "objects": [artifact_asset, *[str(spec["object_id"]) for spec in _supporting_object_asset_specs(profile)]], "locations": [spec["asset_id"] for spec in _location_asset_specs(profile)], "setpieces": [profile["artifact_name"], *[str(spec["name"]) for spec in _supporting_object_asset_specs(profile)]], "reusable_stills": ["時間制限を示す象徴的な光"]},
-        "anchor_cut_candidates": [{"selector": "scene10_cut01", "reason": "主人公の顔と衣装を固定する"}],
-        "reference_strategy": {"p500": f"{profile['protagonist_name']}全身参照と{profile['artifact_name']}を先に生成する", "p600": "各cutは参照画像を使い、同じ顔・象徴物・質感を保つ"},
-        "regeneration_risks": [{"risk": "衣装や顔がcutごとに変わる", "mitigation": "character referenceを全cutに指定する"}],
-        "handoff_to_p400_p500_p600_p700": {"p400_script": "scene設計から必要なcut数を逆算して構成する", "p500_asset": f"{protagonist_asset} と {artifact_asset} を必須参照にする", "p600_scene_implementation": "各cutにscene_contractと画像promptを持たせる", "p700_narration": "画像確定後に語りを同期する"},
-    }
-    _write_run_text_nofollow(
-        run_dir,
-        run_dir / "visual_value.md",
-        _md_yaml(
-            f"視覚化価値設計（{profile['topic_label']}）",
-            visual,
-        ),
-    )
-    _visual_text, authored_visual_value = load_structured_document(
-        run_dir / "visual_value.md"
-    )
-    if not authored_visual_value:
-        raise RuntimeError("visual_value.md is not a structured document")
-    visual_adaptation_issues = visual_value_adaptation_issues(
-        authored_visual_value,
-        source_value_ids=adaptation_source_value_ids(authored_story),
-    )
-    if visual_adaptation_issues:
-        raise RuntimeError(
-            "visual_value adaptation contract is invalid: "
-            + ", ".join(visual_adaptation_issues[:12])
-        )
-    authored_intent = authored_visual_value.get("adaptation_intent")
-    if isinstance(authored_intent, dict) and authored_intent:
-        profile["adaptation_intent"] = deepcopy(authored_intent)
-    profile["scene_value_amplifications"] = {
-        str(scene_value.get("scene_selector") or scene_value.get("scene_id")): deepcopy(
-            scene_value["scene_value_amplification"]
-        )
-        for scene_value in authored_visual_value.get("scene_visual_values", [])
-        if isinstance(scene_value, dict)
-        and isinstance(scene_value.get("scene_value_amplification"), dict)
-        and scene_value.get("scene_selector") is not None
-    }
+    append_state_snapshot(run_dir / "state.txt", {
+        "timestamp": _now_iso(), "runtime.stage": "visual_value_authoring", "slot.p310.status": "running",
+    })
     try:
-        script, manifest, selectors = _build_script_and_manifest(
-            topic,
-            run_dir,
-            now,
-            profile,
-            experience=experience,
-            source_run=source_run,
-            source_references=source_references,
-        )
+        author_stage("visual_value", ["research.md", "story.md"], ["visual_value.md"], lambda:
+            (visual_value_author_runner or _author_visual_value_with_codex)(run_dir=run_dir))
+        visual_errors = validate_visual_value_files(run_dir)
+        if visual_errors:
+            raise RuntimeError("visual value contract invalid: " + ", ".join(visual_errors))
+        visual_bytes = read_regular_file_nofollow(run_dir, "visual_value.md", expected_root_identity=materialization_root_identity)
+        authored_visual_value = decode_document(visual_bytes)
     except Exception as exc:
-        _write_cut_design_failure_log(
-            run_dir,
-            now=now,
-            topic=topic,
-            phase="build_script_and_manifest",
-            profile=profile,
-            exc=exc,
-        )
+        append_state_snapshot(run_dir / "state.txt", {
+            "runtime.stage": "visual_value_authoring_failed", "slot.p310.status": "failed",
+            "slot.p330.status": "pending", "last_error": str(exc)[:2000],
+        })
         raise
-    _require_current_scene_acceptance_before_publish(
-        script,
-        manifest,
-        profile=profile,
-        run_dir=run_dir,
-    )
+    checkpoints.complete("visual_value", ["research.md", "story.md"], ["visual_value.md"])
+    profile["visual_planning"] = authored_visual_value
+    profile["visual_value_binding"] = source_binding("visual_value.md", visual_bytes)
+    append_state_snapshot(run_dir / "state.txt", {
+        "timestamp": _now_iso(), "runtime.stage": "visual_value_authored",
+        "slot.p310.status": "done", "slot.p330.status": "done", "stage.visual_value.status": "authored",
+    })
+    if stop_target == "p330":
+        _finish_authoring_stop(run_dir, stop_target, now)
+        return
+    append_state_snapshot(run_dir / "state.txt", {"runtime.stage": "cinematic_authoring", "slot.p410.status": "in_progress",
+        "p400.cinematic_direction_contract": CINEMATIC_CONTRACT})
+    try:
+        author_stage("cinematic", ["research.md", "story.md", "visual_value.md"], [CINEMATIC_ARTIFACT], lambda:
+            (cinematic_author_runner or _author_cinematic_direction_with_codex)(run_dir=run_dir, resources=_cinematic_resources(profile)))
+        profile["cinematic_direction"] = load_direction(run_dir, _cinematic_resources(profile))
+        profile["cinematic_binding"] = source_binding(CINEMATIC_ARTIFACT, read_regular_file_nofollow(run_dir, CINEMATIC_ARTIFACT))
+        profile["cinematic_required"] = True
+    except Exception as exc:
+        append_state_snapshot(run_dir / "state.txt", {"runtime.stage": "cinematic_authoring_failed",
+            "slot.p410.status": "failed", "slot.p420.status": "pending", "last_error": str(exc)[:2000]})
+        raise
+    checkpoints.complete("cinematic", ["research.md", "story.md", "visual_value.md"], [CINEMATIC_ARTIFACT])
+    append_state_snapshot(run_dir / "state.txt", {"runtime.stage": "cinematic_projection",
+        "slot.p410.status": "done", "slot.p420.status": "in_progress"})
+    while True:
+        try:
+            script, manifest, selectors = _build_script_and_manifest(topic, run_dir, now, profile,
+                experience=experience, source_run=source_run, source_references=source_references)
+            if stop_target == 'p450':
+                manifest['manifest_phase'] = 'skeleton'
+            _require_current_scene_acceptance_before_publish(script, manifest, profile=profile, run_dir=run_dir)
+            break
+        except AuthoringValidationError as exc:
+            owner = exc.owner_stage
+            if owner not in {'p330', 'p420'}:
+                raise
+            candidate_name = 'visual_value.md' if owner == 'p330' else CINEMATIC_ARTIFACT
+            session = handoff_session(run_dir, owner)
+            session.feedback('handoff', {candidate_name: read_regular_file_nofollow(run_dir, candidate_name).decode()}, [str(exc)])
+            if owner == 'p330':
+                author_stage('visual_value', ['research.md', 'story.md'], ['visual_value.md'], lambda:
+                    (visual_value_author_runner or _author_visual_value_with_codex)(run_dir=run_dir), force=True)
+                visual_bytes = read_regular_file_nofollow(run_dir, 'visual_value.md')
+                profile['visual_planning'] = decode_document(visual_bytes)
+                profile['visual_value_binding'] = source_binding('visual_value.md', visual_bytes)
+                checkpoints.complete('visual_value', ['research.md', 'story.md'], ['visual_value.md'])
+            author_stage('cinematic', ['research.md', 'story.md', 'visual_value.md'], [CINEMATIC_ARTIFACT], lambda:
+                (cinematic_author_runner or _author_cinematic_direction_with_codex)(run_dir=run_dir, resources=_cinematic_resources(profile)), force=True)
+            profile['cinematic_direction'] = load_direction(run_dir, _cinematic_resources(profile))
+            profile['cinematic_binding'] = source_binding(CINEMATIC_ARTIFACT, read_regular_file_nofollow(run_dir, CINEMATIC_ARTIFACT))
+            checkpoints.complete('cinematic', ['research.md', 'story.md', 'visual_value.md'], [CINEMATIC_ARTIFACT])
+        except Exception as exc:
+            _write_cut_design_failure_log(run_dir, now=now, topic=topic,
+                phase='build_script_and_manifest', profile=profile, exc=exc)
+            raise
     generation_id = str(
         script["scene_set_authoring_contract"]["generation_id"]
     )
@@ -12558,6 +12959,9 @@ def materialize_run(
             ) from publish_error
         raise
     write_publish_journal("published")
+    if stop_target == "p450":
+        _finish_authoring_stop(run_dir, stop_target, now)
+        return
     asset_inventory, asset_plan = _build_asset_artifacts_from_manifest(profile=profile, manifest=manifest)
     if experience == "world_walk":
         _apply_world_walk_asset_generation_contract(
@@ -12674,7 +13078,7 @@ async def generate_images(run_dir: Path, stop_target: str) -> None:
         image_gen_app._validate_pre_asset_provider_gate(run_dir)
         await image_gen_app._generate_request_outputs(run_dir=run_dir, kind="asset")
         try:
-            image_gen_app._validate_generated_outputs(run_dir, "asset")
+            await image_gen_app._validate_or_repair_image_outputs(run_dir, lambda: image_gen_app._validate_generated_outputs(run_dir, "asset"))
         except Exception as exc:
             failed_check_ids = getattr(
                 exc,
@@ -12731,7 +13135,8 @@ def validate(run_dir: Path, stop_target: str) -> None:
     if stop_target == "p650":
         image_gen_app._validate_p650_run(run_id)
     else:
-        image_gen_app._validate_frontend_create_run(run_id, strict_visual_quality=True)
+        asyncio.run(image_gen_app._validate_or_repair_image_outputs(run_dir,
+            lambda: image_gen_app._validate_frontend_create_run(run_id, strict_visual_quality=True)))
 
 
 def _require_materialization_free_space(run_dir: Path) -> None:
@@ -12751,8 +13156,6 @@ def _require_materialization_free_space(run_dir: Path) -> None:
 # They only project authored source data; no review step is restored.
 _profile_from_reviewed_research = _profile_from_research
 _profile_from_reviewed_story = _profile_from_story
-_reviewed_research_duration_contract_errors = _research_duration_contract_errors
-_validate_reviewed_research_duration_contract = _validate_research_duration_contract
 _reviewed_story_duration_contract_errors = _story_duration_contract_errors
 _validate_reviewed_story_duration_contract = _validate_story_duration_contract
 _reviewed_story_time_of_day_contract_errors = _story_time_of_day_contract_errors
@@ -12763,6 +13166,7 @@ _apply_reviewed_story_scene_to_blueprint = _apply_story_scene_to_blueprint
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the ToC immersive frontend create workflow to p650/p680.")
+    parser.add_argument("--resume-authoring", action="store_true", help="Reuse verified authoring stages in an existing run; stop at p450.")
     parser.add_argument("--topic", required=True)
     parser.add_argument("--source", default="")
     parser.add_argument("--run-dir", required=True)
@@ -12784,7 +13188,7 @@ def main() -> None:
         default=None,
         help="Server-owned run descriptor carrying the active directory lease.",
     )
-    parser.add_argument("--stop-target", choices=["p650", "p680"], default="p680")
+    parser.add_argument("--stop-target", choices=["p330", "p450", "p650", "p680"], default="p680")
     parser.add_argument(
         "--experience",
         choices=["cinematic_story", "world_walk"],
@@ -12805,6 +13209,24 @@ def main() -> None:
     parser.add_argument("--materialize-only", action="store_true", help="Write text artifacts only; do not generate images or validate media.")
     parser.add_argument("--skip-validation", action="store_true")
     args = parser.parse_args()
+    if args.resume_authoring:
+        from toc.authoring_resume import read_create_input
+        resume_dir = Path(args.run_dir)
+        _run_id_from_dir(resume_dir)
+        resume_identity = directory_identity_nofollow(resume_dir)
+        if (args.expected_run_device is None) != (args.expected_run_inode is None):
+            parser.error("both expected run identity values are required")
+        if args.expected_run_device is not None and resume_identity != (args.expected_run_device, args.expected_run_inode):
+            parser.error("resume run identity changed before reading saved input")
+        with _run_materialization_lock(resume_dir, expected_identity=resume_identity,
+                inherited_descriptor=os.dup(args.inherited_run_fd) if args.inherited_run_fd is not None else None):
+            saved = read_create_input(resume_dir, expected_identity=resume_identity)
+        args.expected_run_device, args.expected_run_inode = resume_identity
+        args.topic = saved["topic"]
+        args.source = saved["source"]
+        args.experience = saved["experience"]
+        args.source_run = saved["source_run"]
+        args.target_duration_seconds = saved["target_duration_seconds"]
 
     if (args.expected_run_device is None) != (
         args.expected_run_inode is None
@@ -12879,16 +13301,23 @@ def main() -> None:
     else:
         if args.source_run:
             parser.error("--source-run is only valid for --experience world_walk")
-        source = args.source.strip() or args.topic
+        source = args.source if args.resume_authoring else (args.source.strip() or args.topic)
     expected_run_identity = (
         (args.expected_run_device, args.expected_run_inode)
         if args.expected_run_device is not None
         else None
     )
-    run_dir = _validated_fresh_cli_run_dir(
-        args.run_dir,
-        expected_identity=expected_run_identity,
-    )
+    if args.resume_authoring:
+        if args.stop_target != "p450":
+            parser.error("--resume-authoring requires --stop-target p450; continue via the p500 resume route")
+        run_dir = Path(args.run_dir)
+        _run_id_from_dir(run_dir)
+        directory_identity_nofollow(run_dir)
+    else:
+        run_dir = _validated_fresh_cli_run_dir(
+            args.run_dir,
+            expected_identity=expected_run_identity,
+        )
     try:
         run_dir_identity = directory_identity_nofollow(run_dir)
     except (OSError, ValueError) as exc:
@@ -12915,6 +13344,7 @@ def main() -> None:
             materialize_stop_target,
             target_duration_seconds=target_duration_seconds,
             review_mode=args.review_mode,
+            resume_authoring=args.resume_authoring,
             experience=args.experience,
             source_run=source_run,
             world_walk_source_identity=world_walk_source_identity,
@@ -12926,6 +13356,10 @@ def main() -> None:
                 world_walk_source_story_sha256
             ),
         )
+        if args.stop_target in {"p330", "p450"}:
+            print(f"Run dir: {run_dir.resolve()}")
+            print(f"Stop target: {args.stop_target}")
+            return
         prepare_grounding(run_dir)
         if not args.materialize_only:
             asyncio.run(generate_images(run_dir, args.stop_target))

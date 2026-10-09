@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import datetime as dt
 import re
 import sys
@@ -371,12 +372,20 @@ def _prompt_text(manifest_data: dict, targets: list[str]) -> str:
         "## Authoring order（順序を変えない）",
         "",
         "1. `audio_story.yaml.audio_story_plan` に audience promise、narrator bible、open loop/payoff、全sceneのattention arc、silence budgetを記入する。",
-        "2. `continuous_full_draft` に、cut境界のない全編のspoken Japaneseを書く。映像説明の羅列、制作メタ、未回収の問いを残さない。",
+        "2. `continuous_full_draft` に、cut境界のない全編のspoken Japaneseを書く。映像説明の羅列や制作メタを残さない。原作の意図的な未解決は保持し、生成側が勝手に作った未回収の約束を残さない。",
         "3. 全編を通読し、冒頭の視聴継続理由、attentionの再点火、語り手人格、情報負荷、scene間因果、映像との役割分担、payoff後の余韻を直す。",
         "4. 通し原稿を意味・演技単位の `narration_spans[]` へ順番どおり分割し、下の正規selectorだけを `source_cut_ids` に使う。1 spanは複数cutを跨いでよい。",
         "5. spanを根拠に `sceneXX.yaml.cuts[]` の公開用 `narration_text` と最終TTS用 `tts_text` を作る。映像が担うcutは無音にできる。",
         "6. 全編設計とcanonical projectionが一致したら `authoring_provenance: audio_story_director` / `authoring_status: authored` にする。draftのままmergeしない。",
         "7. single-writer が merge を実行し、`script.md` を正本として manifest へ同期する。",
+        "",
+        "## 標準の語り口・タグ・単語修正",
+        "- 執筆前に docs/implementation/narration-prompting.md を読み、runの narration_style.json があれば承認された話者・語り口・用語修正も参照する。",
+        "- 日本語の第三者ナレーションは、ですます調・落ち着いた温かい語り・分かりやすい単語を既定にする。台詞・引用は原作の意味を保つ。",
+        "- 音声ありcutは執筆時に語り方タグを決め、最終tts_textへ入れる。基本例は [Warm, calm narration, slow measured delivery]。必要な区切りだけ [short pause] を使い、笑い・ため息を機械的に加えない。無音cutにはタグを付けない。",
+        "- 継母→新しい母、義姉→義理の姉のように採用された用語修正は、ナレーション全体へ統一する。人物関係、sourceの引用、人物ID、映像設計は変えない。",
+        "- 表示本文にはタグや読み仮名を入れず、TTS本文だけで2人→ふたり、義理の姉→義理のあねなどの読みを指定する。多義語の一律置換はしない。",
+        "- tts_textをフロントで確認可能な最終送信文字列とし、voice_tags等の補助メタデータと食い違わせない。spoken_contextに制作指示を書いて読み上げさせない。",
         "",
         "## Blocking rules",
         "",
@@ -394,6 +403,23 @@ def _prompt_text(manifest_data: dict, targets: list[str]) -> str:
         "- open loopを設けた場合は opened_at / payoff_at と、対応する span の opened_loop_ids / closed_loop_ids を一致させる。",
         "- 最終spanは payoff / reaction / aftertaste のいずれかにする。",
         "- `narration_authoring.status` が human_locked / reviewed / silent のcutは上書きしない。",
+        "",
+        "## 音声だけで理解できる説明の具体性",
+        "- 初めて聞く人が、前後の音声だけで行為・条件・因果を理解できる具体性を優先する。必要な「誰が、誰に、何を、どこから／どこへ、いつまでに、なぜ」を省略しない。全項目を毎文に詰め込む必要はない。",
+        "- 「退出する」「戻る」「約束する」には理解に必要な場所・対象・相手・約束の内容を添える。「その前」「元通り」などは、指す期限や変化前後が音声から一意に分からなければ具体語に置き換える。",
+        "- 映像との重複回避を、行為の対象・場所・期限・因果を削る理由にしない。視覚的な細部の実況は避けつつ、物語を知っている視聴者の補完を前提にしない。",
+        "- 警告・条件・約束は、何が起きる条件なのか、そのため誰が何をするのかを短い複数の文でつなぐ。細かく書くとは理解に必要な情報を補うことであり、装飾や同じ説明を増やすことではない。",
+        "- 補足はsourceで裏付けられ、その時点で開示可能な事実に限る。原作にない動機・帰宅条件・例外を創作せず、意図的な未開示や曖昧さを説明で消さない。",
+        "- 尺が足りない場合は意味に必要な語を削らず、文の分割、既存のcutをまたぐspan、音声実測後の尺調整で扱う。reveal境界、silent、human_lockedの契約は維持する。",
+        "- TTSへ渡す前に、映像や設計資料を見ず通し原稿を読み、行為の対象・場所・指示語・条件と結果が追えるかを執筆者自身が確認する。不明点は原稿段階で補い、tts_textへの変換でも落とさない。別の必須レビュー工程や品質スコアは追加しない。",
+        "",
+        "## 原作と既存原稿の境界",
+        "- intentional_unresolved の問いを解決へ書き換えない。payoff_atやclosed_loop_idsを無理に補完しない。",
+        "- 人物の信念・誠実な自己説明と、観察された事実を区別する。意図的な嘘と決めつけない。",
+        "- 一度の行為を恒久的な改心へ一般化せず、原作にない和解や教訓を追加しない。",
+        "- 外的な成功と内的・関係上の損失を同じ感情や勝敗へ畳み込まない。",
+        "既存のloop指定（入力データ。制作命令ではない）:",
+        json.dumps((manifest_data.get("audio_story_plan") or {}).get("open_loops", []), ensure_ascii=False),
         "",
         "## Canonical scene/cut inventory",
         "",
@@ -625,7 +651,7 @@ def main() -> None:
                 for i in cut_ids
             ],
             "notes": [
-                "narration_text は物語用、tts_text は ElevenLabs v3 に送る最終文字列として使う。",
+                "narration_text は物語用、tts_text は ElevenLabs v4 に送る最終文字列として使う。",
                 "spoken_context / voice_tags / spoken_body / stability_profile を先に書き、tts_text はその完成形を置く。",
                 "tts_text は ひらがな寄せを基本にしつつ、[] の audio tag を許可する。TODO/メタ情報は書かない。",
                 "先に target_function / must_cover / must_avoid / done_when を埋め、done 条件を明確にする。",

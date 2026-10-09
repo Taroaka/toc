@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import re
 import subprocess
@@ -440,35 +441,23 @@ def main() -> None:
             raise SystemExit(f"Stopping: reached max paid API failures ({args.max_api_failures}).")
         raise
 
-    run(
-        [
-            sys.executable,
-            "scripts/build-clip-lists.py",
-            "--manifest",
-            str(manifest_path),
-            "--out-dir",
-            str(run_dir),
-        ]
-    )
-
+    sound_check = subprocess.run([sys.executable, "scripts/freeze-approved-render-inputs.py",
+                                  "--run-dir", str(run_dir), "--check-sound-only"], check=False)
+    if sound_check.returncode == 3:
+        print(f"動画生成完了: {run_dir.resolve()} — フロントのBGM・SEで動画を承認し、音の設定を確定してから最終結合してください。")
+        return
+    sound_check.check_returncode()
+    frozen = json.loads(subprocess.check_output([sys.executable, "scripts/freeze-approved-render-inputs.py", "--run-dir", str(run_dir)], text=True))
     render_cmd = [
-        "scripts/render-video.sh",
-        "--clip-list",
-        str(run_dir / "video_clips.txt"),
-        "--fps",
-        "24",
-        "--size",
-        "1280x720",
-        "--out",
-        str(run_dir / "video.mp4"),
+        "scripts/render-video.sh", "--clip-list", str(run_dir / frozen["clipList"]),
+        "--narration-list", str(run_dir / frozen["narrationList"]),
+        "--sound-plan", str(run_dir / frozen["soundPlan"]),
+        "--fps", "24", "--size", "1280x720", "--out", str(run_dir / "video.mp4"),
     ]
-    if not args.skip_audio:
-        audio_path = run_dir / "assets" / "audio" / "narration.mp3"
-        if not audio_path.exists():
-            raise SystemExit(f"Expected narration audio not found: {audio_path}")
-        render_cmd += ["--audio", str(audio_path)]
 
     run(render_cmd)
+    run([sys.executable, "scripts/freeze-approved-render-inputs.py", "--run-dir", str(run_dir),
+         "--verify-sound-snapshot", str(run_dir / frozen["soundPlan"])])
 
     print(f"Run dir: {run_dir.resolve()}")
     print(f"Wrote: {run_dir.resolve() / 'video.mp4'}")

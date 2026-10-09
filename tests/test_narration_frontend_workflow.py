@@ -287,10 +287,16 @@ def test_generation_rejects_output_path_traversal_before_provider_call() -> None
     assert rejected.status_code == 400
 
 
-def test_generation_success_creates_candidate_without_audio_or_human_approval() -> None:
+@pytest.mark.parametrize("explicit_offset", [None, 0.0, 1.0])
+def test_generation_success_creates_candidate_without_audio_or_human_approval(explicit_offset) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         run_dir = _write_run(root)
+
+        if explicit_offset is not None:
+            data = _manifest(run_dir)
+            data["scenes"][0]["cuts"][0]["render"] = {"narration_offset_seconds": explicit_offset}
+            (run_dir / "video_manifest.md").write_text("```yaml\n" + yaml.safe_dump(data, allow_unicode=True) + "```\n")
 
         async def fake_generate(run: Path, req: image_gen_app.NarrationGenerateItem) -> dict[str, Any]:
             output = image_gen_app.resolve_run_relative(run, str(req.output))
@@ -410,6 +416,28 @@ def test_elevenlabs_generation_uses_the_frozen_effective_delivery() -> None:
     assert tts_calls[0]["pronunciation_dictionary_locators"][0]["pronunciation_dictionary_id"] == "dict-1"
     assert tts_calls[0]["previous_text"] == "ひとつ前の語りです。"
     assert tts_calls[0]["next_text"] == "次の語りです。"
+
+
+def test_effective_delivery_snapshot_matches_v4_voice_settings() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        alias_path = Path(tmp) / "aliases.tsv"
+        alias_path.write_text("surface\treading\n", encoding="utf-8")
+        delivery = image_gen_app._effective_narration_delivery(
+            {
+                "model_id": "eleven_v3",
+                "voice_settings": {
+                    "stability": 0.35,
+                    "similarity_boost": 0.75,
+                    "style": 0.4,
+                    "speed": 1.1,
+                    "use_speaker_boost": True,
+                },
+                "pronunciation_alias_file": str(alias_path),
+            }
+        )
+
+    assert delivery["model_id"] == "eleven_v4"
+    assert delivery["voice_settings"] == {"stability": 0.35, "similarity_boost": 0.75}
 
 
 def test_tts_context_uses_adjacent_cut_text_in_the_same_generation_group() -> None:
@@ -538,6 +566,7 @@ def test_draft_preview_stays_current_when_same_text_is_locked_during_generation(
                     },
                 )
 
+        assert _manifest(run_dir)["scenes"][0]["cuts"][0]["render"]["narration_offset_seconds"] == (.5 if explicit_offset is None else explicit_offset)
         narration = _manifest(run_dir)["scenes"][0]["cuts"][0]["audio"]["narration"]
 
     assert generated["item"]["status"] == "candidate"
@@ -1084,6 +1113,7 @@ def test_render_freeze_uses_render_unit_video_and_canonical_per_cut_audio() -> N
                 ],
             }
         ]
+        data["scenes"][0]["cuts"][0]["render"] = {"video_duration_seconds": 4, "narration_offset_seconds": 1}
         image_gen_app._write_manifest_data(manifest_path, original, data)
         for relative, content in (
             ("assets/audio/scene1_cut1.mp3", b"audio-1"),
@@ -1112,8 +1142,13 @@ def test_render_freeze_uses_render_unit_video_and_canonical_per_cut_audio() -> N
         ), patch(
             "server.image_gen_app._prepare_render_narration", side_effect=prepare_audio
         ), patch(
-            "server.image_gen_app._probe_media_duration_seconds", return_value=2.0
+            "server.image_gen_app._probe_media_duration_seconds", side_effect=lambda path: 10.0 if path.suffix == ".mp4" else 2.0
         ):
+            from server.sound_design_api import video_context
+            from toc import sound_design
+            sound_plan = sound_design.approve(video_context(run_dir), actor="test")
+            sound_plan["status"] = "completed"
+            sound_design.save(run_dir, sound_plan)
             with TestClient(app) as client:
                 response = client.post(
                     "/api/image-gen/render-inputs/freeze",

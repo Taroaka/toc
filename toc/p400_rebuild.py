@@ -120,6 +120,7 @@ _RESERVED_CANDIDATE_PATHS = {
 _ALLOWED_CANDIDATE_EXACT = {
     *REQUIRED_CANDIDATE_PATHS,
     "logs/authoring/scene_acceptance/source_ledger.json",
+    "cinematic_direction.json",
 }
 _ALLOWED_CANDIDATE_PATTERNS = (
     re.compile(r"^logs/authoring/scene_acceptance/scenes/[A-Za-z0-9_.+\-]+\.json$"),
@@ -332,6 +333,9 @@ def _module_revision() -> str:
     trusted_paths = (
         Path(__file__).resolve(),
         repo_root / "toc" / "scene_acceptance_contract.py",
+        repo_root / "toc" / "p400_authoring.py",
+        repo_root / "toc" / "p400_projection.py",
+        repo_root / "toc" / "p420_assets.py",
         repo_root / "scripts" / "toc-immersive-frontend-run.py",
     )
     try:
@@ -516,6 +520,34 @@ def _validate_candidate_semantics(
     manifest = _parse_candidate_document(
         artifacts["video_manifest.md"], label="video_manifest.md"
     )
+    from toc.p400_authoring import CONTRACT, ARTIFACT, validate_direction, projection_issues
+    from toc.visual_planning_contract import source_binding
+    marker = script.get("script_metadata", {}).get("cinematic_direction_contract")
+    old_script = context.previous_artifacts.get("script.md")
+    old_marker = (_parse_candidate_document(old_script, label="previous script").get("script_metadata", {}).get("cinematic_direction_contract")
+                  if old_script and b"cinematic_direction_contract" in old_script else None)
+    manifest_marker = manifest.get("video_metadata", {}).get("cinematic_direction_contract")
+    if marker is not None or manifest_marker is not None or old_marker is not None or ARTIFACT in artifacts:
+        if marker != CONTRACT or manifest_marker != CONTRACT or ARTIFACT not in artifacts:
+            raise P400RebuildError("cinematic rebuild requires matching direction and both projections")
+        direction = _candidate_json(artifacts[ARTIFACT], label=ARTIFACT)
+        story = _parse_candidate_document(context.source_bytes["story.md"], label="story.md")
+        issues = validate_direction(direction, story, direction.get("base_resources", direction.get("resources", {})),
+            _parse_candidate_document(context.source_bytes["research.md"], label="research.md"))
+        expected_sources = {name: source_binding(f"{name}.md", context.source_bytes[f"{name}.md"])
+            for name in ("research", "story", "visual_value")}
+        if direction.get("metadata", {}).get("source_bindings") != expected_sources:
+            issues.append("cinematic source bindings are stale")
+        preferences_binding = direction.get('metadata', {}).get('cinematic_preferences_binding')
+        if preferences_binding is not None and preferences_binding != source_binding(
+                'cinematic_preferences.md', context.source_bytes.get('cinematic_preferences.md', b'')):
+            issues.append('cinematic preferences binding is stale')
+        for document, key in ((script, "script_metadata"), (manifest, "video_metadata")):
+            issues.extend(projection_issues(document, key, direction, story))
+            if document[key].get("source_cinematic_direction") != source_binding(ARTIFACT, artifacts[ARTIFACT]):
+                issues.append("cinematic projection binding is stale")
+        if issues:
+            raise P400RebuildError("cinematic candidate invalid: " + "; ".join(issues))
     contract = _candidate_json(
         artifacts["logs/authoring/scene_acceptance/contract.json"],
         label="contract.json",
@@ -1129,6 +1161,10 @@ def prepare_p400_rebuild(
         }
         for relative in PRESERVED_SOURCE_PATHS
     )
+    preferences_record = _fingerprint(resolved, 'cinematic_preferences.md', identity=identity)
+    source_records = (*source_records, preferences_record)
+    if preferences_record['exists']:
+        source_bytes['cinematic_preferences.md'] = _read(resolved, 'cinematic_preferences.md', identity=identity)
     state_record = _fingerprint(resolved, "state.txt", identity=identity)
     if not state_record["exists"]:
         raise P400RebuildError("state.txt is required for p400 rebuild")
@@ -1142,7 +1178,7 @@ def prepare_p400_rebuild(
         run_dir=resolved,
         generation_id=generation,
         source_bytes=source_bytes,
-        source_sha256={record["path"]: record["sha256"] for record in source_records},
+        source_sha256={record["path"]: record.get("sha256") or '' for record in source_records},
         state_before=dict(state_before),
         previous_artifacts=previous,
     )

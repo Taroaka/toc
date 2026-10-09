@@ -10,6 +10,9 @@
 - Structural validation still fails closed for malformed data, missing references, invalid
   selectors, mismatched request/provider data, missing files, decode failures, and provenance
   drift.
+- p120 research publishes LLM output without content, retrieval-evidence, reference, or
+  duration validation. Runtime decoding and safe file operations still apply; the generic
+  structural-validation workflow below does not add a p120 output gate.
 - Candidate selection, listening, image editing, narration editing, and other user choices are
   optional product actions. Hybridizing contradictory source material and publishing are explicit
   user decisions and are kept separate from generation.
@@ -104,10 +107,48 @@ slot contract is authoring, materialization, generation, and ordinary validation
 
 ## Required Workflow
 
+### GPT-6 model routing memory
+
+このリポジトリでは、Codex / app-server / production authoring のモデルを
+`gpt-6-astra`、`gpt-6-sol`、`gpt-6-luna` の GPT-6 ファミリで構成する。
+これは継続的なユーザー希望として扱い、新しい workflow・agent・runtime を追加するときも
+同じ役割分担を既定にする。
+
+- `gpt-6-astra`: 「最高の物語を作る」ためのメインモデル。research 全体、
+  物語の因果、scene の意味、長い依存関係、canonical artifact の最終判断を所有する
+- `gpt-6-luna`: 枝の作業を刈り取る高速サブエージェント。対象 key が限定された修復、
+  抽出、分類、独立検証、大量の反復処理を担当する
+- `gpt-6-sol`: ToC では常用しない。Luna では狭すぎるが、Astra に canonical な
+  全体判断をさせるほどではない、例外的な中間タスクだけに使う
+- 物語生成の既定構成は Story Architect=`gpt-6-astra`、Scene Author=`gpt-6-astra`、
+  bounded key-level Repair Author=`gpt-6-luna` とする。Sol は既定の物語生成経路に入れない
+- runtime ごとの上書きは許可するが、明示的な理由なしに GPT-5.x 等へ silent fallback しない。
+  指定モデルを利用できない場合は、別世代へ自動降格せず実行時エラーとして扱う
+
+Luna の枝作業は親エージェントとコンテキスト分離する。
+
+- 子エージェントは `model=gpt-6-luna` かつ `fork_turns=none` で起動し、親の会話履歴を
+  継承せず、必要最小限の task contract、参照 path、出力 schema だけで開始する
+- 枝だけに与えた入力本文・詳細コンテキスト・途中 transcript は親の会話コンテキストへ
+  コピーまたは再展開しない
+- 親が回収するのは、完了状態、許可された差分、最小限の根拠、次の判断に必要な
+  短い要約だけとする
+- 枝は canonical artifact を所有せず、一時出力または限定パッチだけを作り、Astra の親が
+  採用可否と最終統合を決める
+
+これは親エージェントの会話コンテキストを肥大化させないための運用契約であり、
+プロバイダ側の保存・ログ削除を保証するデータポリシーではない。
+
+公式 OpenAI model ID をそのまま使い、`astra` / `sol` / `luna` の独自短縮 ID は
+永続設定や provenance へ保存しない。
+
 ### Astra subagent policy
 
-Astra（`gpt-6-astra`）使用時は、サブエージェントを使わずメインエージェントが単独で作業する。
-サブエージェントを使う場合は、起動・再開する前にユーザーの明示的な許可を取ること。
+Astra（`gpt-6-astra`）のメインエージェントは canonical な全体作業と最終統合を単独で所有し、
+親の会話履歴を複製するコンテキスト継承型サブエージェントは使わない。
+上記の context-isolated Luna branch は、枝作業を高速に刈り取るための明示的に許可された例外とする。
+Luna 以外のサブエージェント、または上記の分離契約を外れる委譲を使う場合は、
+起動・再開する前にユーザーの明示的な許可を取ること。
 タスクの複雑さ、レビューの必要性、一般的な並列作業の許可を、この事前許可の代わりにしない。
 このルールは、以下の並列作業に関する記述にも優先する。
 
@@ -143,6 +184,13 @@ scripts/ai/session-bootstrap.sh
 For a guide, prompt, or operations-rule change, preserve the requested goal, success criteria,
 scope, evidence, and decision rule. Keep general rules free of title-specific people, places,
 objects, or scene events; story-specific facts belong in `research.md` and run artifacts.
+
+### 特定の物語を優遇しないコード方針
+
+- 特定の物語だけを有利にするコードは禁止する。作品別の分岐、専用 profile、固定の scene / cut / 人物 / 道具の対応表、prompt の専用補強を実装しない。
+- 物語名をコードの識別子・文字列リテラル・定数・判定条件に直接記述することは禁止する。物語名や作品固有の事実は、入力データ・`research.md`・run artifact から読み取り、全作品に共通する処理で扱う。
+- コメント内で説明のために物語名を例示することは許可する。ただし、その例を実行時の特例・既定値・生成指示へ転用しない。
+- コードレビューではこの方針を確認し、違反があれば削除または汎用化してから完了とする。
 
 ## Agent Stage Design Docs
 
@@ -197,3 +245,7 @@ python scripts/validate-pointer-docs.py
 
 `improve_claude_code/` is a separate operations layer. Its details are in
 `docs/implementation/assistant-tooling.md`.
+
+## Codexスレッドの素材採用
+
+ユーザーが画像・動画・音声・SE・BGMを「良い」「OK」「合格」「反映してよい」と採用したら、対象を特定し、物語runのフォルダへ保存してmanifest/候補選択/音素材配置の正式参照へ反映する。tmpやスレッド専用領域だけに残さない。既にrun内なら重複コピーは不要。完了したitemと工程をstateへ追記し、全体が未完なら部分完了として残す。既存合格素材を不要に再生成しない。詳細は `docs/orchestration-and-ops.md` の「Codexスレッドで採用された素材の正式反映」に従う。

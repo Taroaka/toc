@@ -10,7 +10,45 @@ from toc.http import request_bytes
 
 DEFAULT_ELEVENLABS_VOICE_ID = "JOcmGzB8OFjY8MhjHHEf"  # Jun - Calm, Clear and Husky (ja)
 DEFAULT_ELEVENLABS_LANGUAGE_CODE = "ja"
+DEFAULT_ELEVENLABS_MODEL_ID = "eleven_v4"
 ELEVENLABS_PRONUNCIATION_DICTIONARY_LOCATORS_ENV = "ELEVENLABS_PRONUNCIATION_DICTIONARY_LOCATORS"
+
+
+def normalize_elevenlabs_model_id(value: Any) -> str:
+    """Return the current model for an ElevenLabs model selection.
+
+    Existing manifests may still carry the former expressive model ID. Keep
+    those inputs readable while ensuring every request reaches the v4 API
+    model during the migration.
+    """
+
+    model_id = str(value or "").strip()
+    if not model_id:
+        return DEFAULT_ELEVENLABS_MODEL_ID
+    if model_id.lower() == "eleven_v3":
+        return DEFAULT_ELEVENLABS_MODEL_ID
+    return model_id
+
+
+def normalize_elevenlabs_voice_settings(value: Any, *, model_id: str) -> dict[str, Any]:
+    """Keep request settings compatible with the selected model.
+
+    Eleven v4 exposes Stability and Similarity only. Older saved narration
+    records can still contain the legacy style/speed/speaker-boost fields, so
+    strip those fields at the provider boundary instead of sending an invalid
+    v4 payload.
+    """
+
+    settings = dict(value) if isinstance(value, dict) else {}
+    if normalize_elevenlabs_model_id(model_id) == DEFAULT_ELEVENLABS_MODEL_ID:
+        settings = {"stability": 0.5, "similarity_boost": 0.75, **settings}
+    if normalize_elevenlabs_model_id(model_id) == DEFAULT_ELEVENLABS_MODEL_ID:
+        return {
+            key: settings[key]
+            for key in ("stability", "similarity_boost")
+            if key in settings
+        }
+    return settings
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -96,7 +134,7 @@ class ElevenLabsConfig:
     api_key: str
     api_base: str = "https://api.elevenlabs.io/v1"
     voice_id: str = DEFAULT_ELEVENLABS_VOICE_ID
-    model_id: str = "eleven_v3"
+    model_id: str = DEFAULT_ELEVENLABS_MODEL_ID
     output_format: str = "mp3_44100_128"
     language_code: str = DEFAULT_ELEVENLABS_LANGUAGE_CODE
     pronunciation_dictionary_locators: tuple[dict[str, str], ...] = ()
@@ -127,7 +165,9 @@ class ElevenLabsConfig:
             api_key=key,
             api_base=api_base or _env("ELEVENLABS_API_BASE", "https://api.elevenlabs.io/v1") or "",
             voice_id=v_id,
-            model_id=model_id or _env("ELEVENLABS_MODEL_ID", "eleven_v3") or "",
+            model_id=normalize_elevenlabs_model_id(
+                model_id or _env("ELEVENLABS_MODEL_ID", DEFAULT_ELEVENLABS_MODEL_ID)
+            ),
             output_format=output_format or _env("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128") or "",
             language_code=language_code or _env("ELEVENLABS_LANGUAGE_CODE", DEFAULT_ELEVENLABS_LANGUAGE_CODE) or "",
             pronunciation_dictionary_locators=parse_pronunciation_dictionary_locators(locators_source),
@@ -164,7 +204,7 @@ class ElevenLabsClient:
         timeout_seconds: float = 180.0,
     ) -> bytes:
         v_id = voice_id or self.config.voice_id
-        m_id = model_id or self.config.model_id
+        m_id = normalize_elevenlabs_model_id(model_id or self.config.model_id)
         fmt = output_format or self.config.output_format
         lang = (
             language_code if language_code is not None else self.config.language_code
@@ -187,8 +227,11 @@ class ElevenLabsClient:
         )
         if locators:
             payload["pronunciation_dictionary_locators"] = list(locators)
-        if voice_settings is not None:
-            payload["voice_settings"] = voice_settings
+        if voice_settings is not None or m_id == DEFAULT_ELEVENLABS_MODEL_ID:
+            payload["voice_settings"] = normalize_elevenlabs_voice_settings(
+                voice_settings,
+                model_id=m_id,
+            )
         if previous_text:
             payload["previous_text"] = previous_text
         if next_text:

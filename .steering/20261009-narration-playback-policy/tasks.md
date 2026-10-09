@@ -1,0 +1,7 @@
+- [x] 現行フロント・TTS・renderの適用範囲を調査
+- [x] 未対応の回帰テスト3件が失敗することを確認
+- [x] 共通2-pass loudnorm、無音処理、原音保持と派生cacheを実装
+- [x] フロント試聴と通常render／sound-plan合成へ接続
+- [x] v4の数値既定、natural profile、未指定lead-inを共通化
+- [x] 設計書・UI説明へ適用範囲と例外を反映
+- [x] 対象回帰テストとフロントbuild、live試聴APIを検証

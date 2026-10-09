@@ -1,0 +1,2 @@
+# Design
+Add explicit continue_waiting=false request opt-in. With strict p680 verified and p710 pending/not_started, select narration_start and stopTarget p710. Under the retained resume lease, create a durable narration_drafts operation with replace=false and invoke the existing replay path. Failures retain that operation for retry. Frontend recognizes only the supported p710 boundary and sends the opt-in; active operations remain disabled.

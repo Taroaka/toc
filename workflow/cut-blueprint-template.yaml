@@ -1,3 +1,7 @@
+# source_first_v2: see docs/implementation/visual-planning.md.
+# Legacy scene_value_amplification / expressive_contract samples below apply only to v1.
+# v2 uses metadata visual_planning_contract and source_visual_value {path, sha256},
+# plus source_story_scene_id and scene_intent.visual_notes (empty allowed).
 # Cut Blueprint Template v3.0
 # p420 authoring → structural validation → p450 manifest materialization
 

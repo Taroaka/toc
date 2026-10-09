@@ -2,7 +2,7 @@
 
 `script.md` から asset/image/narration/video request を作り、生成、合成、ordinary output checks
 を一つの流れで定義する。production order は
-`script → skeleton manifest → asset → scene image → narration/TTS → duration → video → render`。
+`script → skeleton manifest → asset → scene image → narration/TTS → duration → video → BGM/SE (p860) → render`。
 
 ## 1. Canonical boundaries
 
@@ -24,6 +24,7 @@ script.md
   → production manifest / image requests / stills
   → narration text / TTS / measured audio
   → motion requests / clips
+  → user video approval / p860 BGM and SE proposals, generation, selection, mix settings
   → stream normalization / render
   → ordinary QA data
 ```
@@ -50,6 +51,9 @@ New stills are generated for continuity anchors or explicit image requests. Exis
 be reused when their bytes and provenance match.
 
 ## 4. Audio Story authoring
+
+原稿の具体性は [Narration Prompt Projection](narration-prompting.md#音声だけで理解できる説明の具体性) に従う。
+場所・対象・期限・因果の省略を原稿段階で補い、TTS用の表記変換でも意味を保持する。
 
 cut is an editing unit; narration span may cover one or more cuts. Write a continuous full-run spoken
 draft, then split it into ordered `narration_spans[]` anchored to cuts. A visual-only cut may use:
@@ -146,6 +150,9 @@ split the render unit while preserving source cut IDs and one primary intent.
 
 Before final concat:
 
+- require current video approval and completed p860 sound settings (or explicit no-sound choice)
+- freeze selected BGM/SE bytes and settings; mix them with narration via `--sound-plan`
+
 - build clip and narration lists from active canonical selectors in order
 - choose render-unit duration once; do not double-count source cuts
 - normalize video size/fps/pixel format and audio codec/sample rate/channel layout
@@ -160,6 +167,9 @@ Candidate selection, listening, image editing, narration editing, and explicit c
 optional. Store actor, timestamp, selectors, and selected revision under `human_choice.*`, then rerun
 structural, request, file, and provenance checks.
 
+最終結合前の動画一式のユーザー承認とp860 BGM・SEの設定確定は必須。
+音を加えない場合もp860で明示的に確定する。
+
 Hybridizing contradictory source variants requires an explicit user choice and selected source IDs.
 Publishing is a separate explicit user action and stores destination, actor, timestamp, and result.
 
@@ -167,6 +177,7 @@ Publishing is a separate explicit user action and stores destination, actor, tim
 
 - Image: Codex built-in image generation (`codex_builtin_image` / `gpt-image-2`)
 - Video: Kling 3.0, Kling Omni, or Seedance according to request capabilities
+- Higgsfield public video API: Seedance 2.5 image-to-video / reference-to-video。入力の組合せ、音声と再開は[API契約](../vendor/higgsfield.md)に従う。
 - TTS: ElevenLabs
 - provider-facing prompts are Japanese by default and contain visible content, not production metadata
 - local placeholder or unrelated output is never copied to a canonical destination
@@ -179,3 +190,51 @@ Publishing is a separate explicit user action and stores destination, actor, tim
 - `docs/implementation/video-prompting.md`
 - `workflow/video-manifest-template.md`
 
+
+## ナレーション開始位置とcutの間
+
+音声ありcutに先頭の間を設ける場合は `render.narration_offset_seconds` に明示する。現在の標準は0.5秒。
+必要な動画尺は `ceil(音声実測秒数 + narration_offset_seconds)` 以上とし、丸め余りは末尾の間になる。
+合成時は音声をoffset分遅らせ、音声本体を切らずに動画尺まで末尾を埋める。
+`duration_padding_seconds` は動画尺の余裕であり、先頭無音の指定ではない。
+従来CLIのmain 1秒/sub 0.5秒/linger 1.5秒のpaddingも、先頭の間とは別物である。
+フロントのナレーションカードは、元音声から作る試聴用派生ファイルにoffsetと末尾の間を反映する。元ファイルの直接再生・単純連結にはoffsetは入らない。
+原稿・読み・話者が変わった後は旧音声の秒数を確定尺として流用せず、再生成した音声を実測する。
+providerの上限を超える場合はcutまたはrender unitの分割を行い、音声を切り捨てて収めない。
+
+## BGM・SE
+
+p860の詳細は [Sound Design](sound-design.md) を参照。BGM・SEは同じ工程内で作成し、p910で確定した音声snapshotをp920が合成する。
+
+
+## ナレーション音量・試聴・合成の共通処理
+
+`toc/narration_audio.py` の `POLICY`（`narration_audio_v1`）を音量調整の正本とする。
+一時スクリプト独自の音量フィルターを追加せず、同モジュールをフロント・CLI・最終合成で呼ぶ。
+
+| 項目 | 標準値 | 適用箇所 |
+| --- | --- | --- |
+| Integrated loudness | -19 LUFS目標 | 試聴のcut音声／最終合成の連結ナレーションtrack |
+| True peak | -1.5 dBTP目標 | 同上 |
+| Loudness range | LRA 11 | 同上 |
+| 方法 | ffmpeg loudnorm 2-pass、linear=trueを要求 | 実測値を第2passへ渡す |
+| 派生音声sample rate | 44.1kHz | preview MP3・master WAV |
+| 試聴MP3 bitrate | 192kbps | provider原音の128kbpsとは別 |
+| 有声cutの開始位置 | 未指定なら0.5秒 | 生成準備時にmanifestへ保存。明示0秒などは維持 |
+
+- ElevenLabs出力はrawのまま候補として保存し、hash・revision・採用記録の対象にする。正規化で原音を上書きしない。
+- フロントの `audio-file?preview_item=<selector>` はitemに所属する音声だけを派生試聴へ変換する。開始位置・cut尺はmanifestから読み、実測音声＋offset未満へ切り詰めない。元音声hash・policy・offset・尺でcacheを分け、出力hashも検証する。失敗時は加工済みと偽ってrawへfallbackしない。
+- フロントのカードでは「-19 LUFS目標へ音量調整・cutの間を反映・元音声保持」を表示する。個別cut試聴と全編masterは同じ目標であり、測定対象の長さが違うため同一gain/波形ではない。
+- `scripts/render-video.sh` は通常のナレーションを連結後に正規化してからBGMと合成する。`--sound-plan` は `toc.sound_design.mix_audio` 内で同じ共通処理を語りtrackへ適用してからSE/BGM/動画音声をmixする。
+- `--audio` で既に完成したmixを渡した場合は、この語り用正規化をかけない。BGM・SE・動画の原音は各trackの明示設定を維持する。最終mix全体が-19 LUFSになるという保証ではない。
+- 完全な無音のLUFSは有限値にならないため、無音のまま尺/形式だけを処理する。声にEQ、リバーブ、ピッチ変更、速度変更を自動追加しない。
+- `.mp3.json` / `.wav.json` にpolicy、測定値、offset、尺、出力hashを保存する。loudnormはlinear指定でも入力条件によってdynamicへfallbackする場合があり、常に固定gainとは表現しない。
+- 数値は目標値。エンコード誤差を含めた実測が必要で、音量調整だけをもって聴感の合格とはしない。
+
+CLIでの共通処理:
+
+```bash
+python -m toc.narration_audio --source narration_list.txt --concat --out narration_master.wav
+```
+
+認証APIを呼ばない回帰検証は `tests/test_narration_audio_policy.py`。原音保持、目標LUFS、先頭の間、無音、フロント経由の派生cacheを実ファイルで検証する。

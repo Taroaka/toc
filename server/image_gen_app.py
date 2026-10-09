@@ -94,6 +94,8 @@ from toc.asset_prompt_compiler import (
     asset_prompt_source_digest,
     compile_asset_prompt,
 )
+from toc.production_repair import RepairSession
+from toc.production_diagnostics import MediaOutputError
 from toc.image_prompt_compiler import compile_image_api_prompt_v2
 from toc.video_prompt_compiler import (
     VIDEO_API_PROMPT_POLICY_VERSION,
@@ -641,6 +643,7 @@ class RegeneratePromptsRequest(BaseModel):
 class CreateRunRequest(BaseModel):
     title: str = Field(min_length=1, max_length=120)
     source: str | None = Field(default=None, max_length=4000)
+    cinematic_preferences: str | None = Field(default=None, max_length=12000)
     generate_images: bool = True
     stop_target: str = Field(default="p680", pattern="^(p650|p680)$")
     target_duration_seconds: int = Field(default=300, ge=300, le=1200, strict=True)
@@ -650,6 +653,7 @@ class CreateRunRequest(BaseModel):
 class CreateStoryboardRunRequest(BaseModel):
     title: str = Field(min_length=1, max_length=120)
     source: str | None = Field(default=None, max_length=4000)
+    cinematic_preferences: str | None = Field(default=None, max_length=12000)
     stop_target: Literal["p680"] = "p680"
     target_duration_seconds: int = Field(default=300, ge=300, le=1200, strict=True)
     review_mode: Literal["standard", "preapproved"] = "standard"
@@ -663,7 +667,9 @@ class CreateWorldWalkRunRequest(BaseModel):
 
 
 class ResumeRunRequest(BaseModel):
+    continue_waiting: bool = False
     stop_target: str = Field(default="p680", pattern="^(p680)$")
+    operation_id: str | None = Field(default=None, pattern="^[0-9a-f]{32}$")
 
 
 class FrontendReviewItem(BaseModel):
@@ -675,13 +681,15 @@ class FrontendReviewItem(BaseModel):
     selected_candidate_path: str | None = Field(default=None, max_length=500)
     existing_image: str | None = Field(default=None, max_length=500)
     video_prompt: str | None = Field(default=None, max_length=40000)
-    video_quality: str | None = Field(default=None, pattern="^(720p|1080p|4K)$")
-    video_aspect_ratio: str | None = Field(default=None, pattern="^(16:9|9:16|1:1|4:3)$")
+    video_quality: str | None = Field(default=None, pattern="^(480p|720p|1080p|4K)$")
+    video_aspect_ratio: str | None = Field(default=None, pattern="^(16:9|9:16|1:1|4:3|3:4|21:9)$")
     video_duration_seconds: int | None = Field(default=None, ge=1, le=VIDEO_GENERATION_DURATION_MAX_SECONDS)
     video_first_reference: str | None = Field(default=None, max_length=500)
     video_last_reference: str | None = Field(default=None, max_length=500)
     video_references: list[str] = Field(default_factory=list, max_length=32)
-    video_tool: str | None = Field(default=None, pattern="^(kling_3_0|kling_3_0_omni|seedance)$")
+    video_tool: str | None = Field(default=None, pattern="^(kling_3_0|kling_3_0_omni|seedance|higgsfield)$")
+    video_input_mode: str | None = Field(default=None, pattern='^(image_to_video|reference_images)$')
+    video_native_audio_mode: str | None = Field(default=None, pattern='^(off|natural_sound|dialogue_and_sound)$')
     narration_text: str | None = Field(default=None, max_length=40000)
     narration_tts_text: str | None = Field(default=None, max_length=40000)
     narration_output: str | None = Field(default=None, max_length=500)
@@ -743,10 +751,10 @@ class VideoGenerateItem(BaseModel):
     last_reference: str | None = Field(default=None, max_length=500)
     references: list[str] = Field(default_factory=list, max_length=32)
     negative_prompt: str | None = Field(default=None, max_length=40000)
-    quality: str = Field(default="1080p", pattern="^(720p|1080p|4K)$")
-    aspect_ratio: str = Field(default="16:9", pattern="^(16:9|9:16|1:1|4:3)$")
+    quality: str = Field(default="1080p", pattern="^(480p|720p|1080p|4K)$")
+    aspect_ratio: str = Field(default="16:9", pattern="^(16:9|9:16|1:1|4:3|3:4|21:9)$")
     duration_seconds: int = Field(default=8, ge=1, le=VIDEO_GENERATION_DURATION_MAX_SECONDS)
-    tool: str = Field(default="kling_3_0", pattern="^(kling_3_0|kling_3_0_omni|seedance)$")
+    tool: str = Field(default="kling_3_0", pattern="^(kling_3_0|kling_3_0_omni|seedance|higgsfield)$")
     candidate_count: int = Field(default=3, ge=1, le=8)
     prompt_policy_version: str | None = Field(default=None, max_length=100)
     prompt_compiler_version: str | None = Field(default=None, max_length=100)
@@ -848,6 +856,7 @@ class FinalRenderRequest(RenderFreezeRequest):
 
 _chat_threads: dict[str, str] = {}
 _create_jobs: dict[str, dict[str, Any]] = {}
+_create_job_failure_baselines: dict[str, tuple[str, str, str]] = {}
 _bulk_generation_jobs: dict[str, dict[str, Any]] = {}
 _bulk_generation_tasks: dict[str, asyncio.Task[None]] = {}
 _create_tasks: dict[str, asyncio.Task[None]] = {}
@@ -1656,6 +1665,60 @@ async def _set_create_job(
             )
         except Exception:
             pass
+
+
+def _reconcile_create_job_with_run_state(job: dict[str, Any]) -> dict[str, Any]:
+    """Project a canonical run failure over stale in-memory/DB job state.
+
+    The process store is optional and can outlive the worker that owns the
+    append-only state.  A successful status lookup must therefore never return
+    ``running`` after the run itself has published a terminal failure.
+    """
+
+    run_id = str(job.get("runId") or "").strip()
+    if not run_id:
+        return job
+    job_status = str(job.get("status") or "").strip().lower()
+    if job_status not in {"queued", "running", "inspecting"}:
+        _create_job_failure_baselines.pop(str(job.get("jobId") or ""), None)
+        return job
+    try:
+        progress = read_run_progress(safe_run_dir(run_id, ROOT), validate_request_outputs=False)
+    except (FileNotFoundError, OSError, ValueError):
+        return job
+    failure = progress.get("failure")
+    if not isinstance(failure, dict) or not bool(failure.get("terminal")):
+        _create_job_failure_baselines.pop(str(job.get("jobId") or ""), None)
+        return job
+    failure_signature = (
+        str(failure.get("stage") or ""),
+        str(failure.get("runtimeStage") or ""),
+        str(failure.get("message") or ""),
+    )
+    baseline = _create_job_failure_baselines.get(str(job.get("jobId") or ""))
+    if baseline is not None and baseline == failure_signature:
+        # A resume starts from a stopped run.  Keep the new job running until
+        # its worker publishes a fresh active state or a new terminal error.
+        resume_task = _resume_tasks.get(str(job.get("jobId") or ""))
+        if resume_task is not None and not resume_task.done():
+            return job
+    if baseline is not None:
+        _create_job_failure_baselines.pop(str(job.get("jobId") or ""), None)
+    stage = str(failure.get("stage") or "").strip()
+    message = str(failure.get("message") or "").strip()
+    error_code = str(failure.get("errorKind") or "").strip() or None
+    return {
+        **job,
+        "status": "failed",
+        "message": "作成失敗",
+        "error": str(job.get("error") or "").strip() or message or "ToC作成に失敗しました",
+        "errorCode": str(job.get("errorCode") or "").strip() or error_code,
+        **(
+            {"currentProcess": stage, "currentProcessNumber": _process_number(stage)}
+            if stage
+            else {}
+        ),
+    }
 
 
 def _process_label(process_number: int) -> str:
@@ -2900,6 +2963,13 @@ def _manifest_cut_contract(data: dict[str, Any], *, min_cuts_per_scene: int = 1)
                 )
                 event_minimum = minimums.get("by_event_beats")
                 selected_minimum = minimums.get("selected")
+                # Current cinematic authoring owns cut counts explicitly. The legacy
+                # beat-per-cut minima are not part of that contract.
+                cinematic = (data.get('video_metadata') or {}).get('cinematic_direction_contract') == 'cinematic_direction_v1'
+                if cinematic:
+                    distinct_minimum, event_minimum = selected_minimum, 0
+                    if selected_minimum != len(cuts):
+                        issues.append(f"scene {scene_id}: authored cut count differs from actual cuts")
                 semantic_values = (
                     distinct_minimum,
                     event_minimum,
@@ -3236,6 +3306,8 @@ def _validate_p650_run_core(
     if require_generated_asset_outputs:
         try:
             _validate_generated_outputs(run_dir, "asset")
+        except MediaOutputError:
+            raise
         except RuntimeError as exc:
             raise RuntimeError(f"ToC run did not reach p650: {exc}") from exc
 
@@ -4803,12 +4875,16 @@ def _video_candidate_provenance_from_request(
 def _current_video_candidate_provenance(
     run_dir: Path,
     item_id: str,
+    *,
+    manifest_data: dict[str, Any] | None = None,
 ) -> dict[str, str] | None:
     """Resolve the candidate namespace bound to the current materialized request."""
 
     try:
         binding = _video_request_binding(run_dir, item_id)
-        _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+        data = manifest_data
+        if data is None:
+            _manifest_path, _original_text, data = _read_manifest_data(run_dir)
         target = _video_target_by_item_id(data, item_id)
         if target is None:
             return None
@@ -4922,7 +4998,10 @@ def _write_silence_audio(path: Path, duration_seconds: float) -> None:
 def _effective_narration_delivery(narration: dict[str, Any]) -> dict[str, Any]:
     from toc.providers.elevenlabs import (
         DEFAULT_ELEVENLABS_LANGUAGE_CODE,
+        DEFAULT_ELEVENLABS_MODEL_ID,
         DEFAULT_ELEVENLABS_VOICE_ID,
+        normalize_elevenlabs_model_id,
+        normalize_elevenlabs_voice_settings,
         parse_pronunciation_dictionary_locators,
     )
 
@@ -4946,10 +5025,19 @@ def _effective_narration_delivery(narration: dict[str, Any]) -> dict[str, Any]:
     if raw_locators is None or raw_locators == "":
         raw_locators = os.environ.get("ELEVENLABS_PRONUNCIATION_DICTIONARY_LOCATORS")
     locators = [dict(value) for value in parse_pronunciation_dictionary_locators(raw_locators)]
+    model_id = normalize_elevenlabs_model_id(
+        narration.get("model_id")
+        or os.environ.get("ELEVENLABS_MODEL_ID")
+        or DEFAULT_ELEVENLABS_MODEL_ID
+    )
+    voice_settings = normalize_elevenlabs_voice_settings(
+        narration.get("voice_settings"),
+        model_id=model_id,
+    )
     public = {
         "voice_id": str(narration.get("voice_id") or os.environ.get("ELEVENLABS_VOICE_ID") or DEFAULT_ELEVENLABS_VOICE_ID),
-        "model_id": str(narration.get("model_id") or os.environ.get("ELEVENLABS_MODEL_ID") or "eleven_v3"),
-        "voice_settings": _dict_value(narration.get("voice_settings")),
+        "model_id": model_id,
+        "voice_settings": voice_settings,
         "output_format": str(narration.get("output_format") or os.environ.get("ELEVENLABS_OUTPUT_FORMAT") or "mp3_44100_128"),
         "language_code": str(
             narration.get("language_code")
@@ -5039,8 +5127,17 @@ def _server_video_execution_options(
     tool: str,
     has_first_frame: bool,
     has_reference_images: bool = False,
+    native_audio_mode: str = 'off',
 ) -> dict[str, Any]:
     load_env_files(repo_root=ROOT)
+    if native_audio_mode != 'off' and tool != 'higgsfield':
+        raise ValueError('同期音声を使うには対応するHiggsfieldモデルを選んでください')
+    if tool == 'higgsfield':
+        from toc.providers.higgsfield import IMAGE_MODEL, REFERENCE_MODEL
+        if has_first_frame and has_reference_images:
+            raise ValueError('Higgsfield frame/reference inputs cannot be combined')
+        return {'backend': 'higgsfield', 'model': IMAGE_MODEL if has_first_frame else REFERENCE_MODEL,
+                'generate_audio': native_audio_mode != 'off'}
     if tool in {"kling_3_0", "kling_3_0_omni"}:
         is_omni = tool == "kling_3_0_omni"
         model = (
@@ -5140,7 +5237,8 @@ def _video_provider_capability_issues(
         <= capabilities.reference_images_max
     ):
         issues.append(
-            f"{label}: reference image count {int(reference_count)} is outside the {tool} "
+            f"{label}: reference image count {int(reference_count)} is outside the "
+            f"{tool if capabilities.reference_limit_verified else 'ToC application input'} "
             f"{input_mode or 'default'} limit "
             f"{capabilities.reference_images_min}-{capabilities.reference_images_max}"
         )
@@ -5173,6 +5271,13 @@ def _assert_video_request_within_provider_capabilities(
     )
     if issues:
         raise ValueError("; ".join(issues))
+    if request.tool == 'higgsfield':
+        if request.quality not in {'480p', '720p', '1080p'}:
+            raise ValueError('Higgsfield Seedance 2.5 supports 480p, 720p, 1080p')
+        if request.references and (request.first_reference or request.last_reference):
+            raise ValueError('Higgsfield frame/reference inputs cannot be combined')
+        if request.last_reference and not request.first_reference:
+            raise ValueError('Higgsfield end frame requires a first frame')
 
 
 def _assert_video_auxiliary_references_supported(
@@ -5399,6 +5504,31 @@ def _generate_video_file_blocking(
                 last_frame_image=provider_last_frame_image,
                 out_path=destination,
             )
+        elif request.tool == 'higgsfield':
+            from toc.providers.higgsfield import HiggsfieldClient
+            from toc.providers.video_validation import verify_generated_video
+            load_env_files(repo_root=ROOT)
+            options = request.provider_execution_options
+            identity = hashlib.sha256((destination.relative_to(run_dir).as_posix() + ':' +
+                str(request.prompt_source_digest)).encode()).hexdigest()
+            pending = destination.with_name('.' + destination.stem + '.unverified.mp4')
+            try:
+                provider_result = HiggsfieldClient.from_env().generate_video(
+                    model=str(options.get('model') or ''), prompt=request.prompt,
+                    duration_seconds=request.duration_seconds, aspect_ratio=request.aspect_ratio, resolution=request.quality,
+                    input_image=provider_input_image, last_frame_image=provider_last_frame_image,
+                    reference_images=provider_reference_images, generate_audio=bool(options.get('generate_audio', False)),
+                    out_path=pending, journal_path=run_dir / 'logs/providers/higgsfield' / f'{identity}.json',
+                    request_digest=identity, poll_every_seconds=_video_poll_every_seconds(), timeout_seconds=_video_timeout_seconds())
+                if provider_result.get('status') != 'completed':
+                    raise RuntimeError(f"Higgsfield generation status: {provider_result.get('status')}; request {provider_result.get('request_id')}")
+                provider_result['validation'] = verify_generated_video(pending,
+                    duration_seconds=request.duration_seconds, aspect_ratio=request.aspect_ratio,
+                    require_audio=bool(options.get('generate_audio')))
+                os.replace(pending, destination)
+                provider_result['out_path'] = destination.relative_to(run_dir).as_posix()
+            finally:
+                pending.unlink(missing_ok=True)
         elif request.tool == "seedance":
             provider_result = _generate_seedance_video_file(
                 request=request,
@@ -5604,7 +5734,10 @@ async def _generate_video_candidates(run_dir: Path, req: VideoGenerateItem) -> d
             "materialized video duration is shorter than the current narration; "
             "create video prompts again before generation"
         )
-    candidates = await asyncio.gather(*(_generate_video_one(run_dir, req, index) for index in range(1, req.candidate_count + 1)))
+    async def candidate(index):
+        return await _run_media_item(f"video:{req.item_id}:{index}", req.model_dump(mode="json"),
+            lambda: _generate_video_one(run_dir, req, index))
+    candidates = await asyncio.gather(*(candidate(index) for index in range(1, req.candidate_count + 1)))
     return {
         "itemId": req.item_id,
         "durationSeconds": req.duration_seconds,
@@ -6110,10 +6243,17 @@ def _restore_file_transaction(snapshot: _FileTransactionSnapshot) -> None:
             # Canonical state is append-only.  The other three files are
             # derived projections and are rebuilt from the committed head.
             continue
+        from toc.media_resume import ACTIVE_MEDIA_JOURNAL
+        journal = ACTIVE_MEDIA_JOURNAL.get()
+        tracked = journal is not None and path.parent == journal.root and path.name in {"script.md", "video_manifest.md"}
+        if tracked:
+            journal.authorize_manifest_update(previous_content.decode() if previous_content is not None else None, path.name)
         if previous_content is None:
             path.unlink(missing_ok=True)
         else:
             _atomic_write_bytes(path, previous_content)
+        if tracked:
+            journal.confirm_manifest_update(path.name)
 
 
 def _render_manifest_data(original_text: str, data: dict[str, Any]) -> str:
@@ -6132,10 +6272,14 @@ def _render_manifest_data(original_text: str, data: dict[str, Any]) -> str:
 
 
 def _write_manifest_data(manifest_path: Path, original_text: str, data: dict[str, Any]) -> None:
-    _atomic_write_text(
-        manifest_path,
-        _render_manifest_data(original_text, data),
-    )
+    from toc.media_resume import ACTIVE_MEDIA_JOURNAL
+    text = _render_manifest_data(original_text, data)
+    journal = ACTIVE_MEDIA_JOURNAL.get()
+    if journal is not None and manifest_path.parent == journal.root and manifest_path.name in {"script.md", "video_manifest.md"}:
+        journal.authorize_manifest_update(text, manifest_path.name)
+    _atomic_write_text(manifest_path, text)
+    if journal is not None and manifest_path.parent == journal.root and manifest_path.name in {"script.md", "video_manifest.md"}:
+        journal.confirm_manifest_update(manifest_path.name)
 
 
 def _full_json_hash(value: Any) -> str:
@@ -7573,8 +7717,17 @@ def _default_video_output_for_target(target: dict[str, Any]) -> str:
     return f"assets/scenes/{selector}/{selector}.mp4"
 
 
-def _candidate_video_output_for_item(run_dir: Path, item_id: str) -> str | None:
-    revision = _current_video_candidate_provenance(run_dir, item_id)
+def _candidate_video_output_for_item(
+    run_dir: Path, item_id: str, *, manifest_data: dict[str, Any] | None = None,
+) -> str | None:
+    if (run_dir / 'production_selections.json').is_file():
+        from server.production_tools_api import selected_video_path
+        selected = selected_video_path(run_dir, item_id, manifest_data)
+        if selected:
+            return selected
+    if not (run_dir / "assets/test/video_gen_candidates" / _safe_artifact_id(item_id)).is_dir():
+        return None
+    revision = _current_video_candidate_provenance(run_dir, item_id, manifest_data=manifest_data)
     if revision is None:
         return None
     candidate = _video_candidate_path(
@@ -7586,6 +7739,15 @@ def _candidate_video_output_for_item(run_dir: Path, item_id: str) -> str | None:
     if candidate.is_file():
         return candidate.relative_to(run_dir).as_posix()
     return None
+
+
+def _display_candidate_video_output_for_item(run_dir: Path, item_id: str, *, manifest_data=None):
+    try:
+        return _candidate_video_output_for_item(run_dir, item_id, manifest_data=manifest_data)
+    except (ValueError, FileNotFoundError):
+        # A stale selection must still allow opening the workspace and selecting
+        # its replacement. Rendering/sound use the strict resolver directly.
+        return None
 
 
 def _assert_current_video_candidate_path(
@@ -7656,7 +7818,7 @@ def _manifest_narration_items(run_dir: Path, data: dict[str, Any] | None = None)
             else ("" if narration_silent_ok else _default_narration_output_for_target(target))
         )
         video_output = str(video_generation.get("output") or _default_video_output_for_target(target)).strip()
-        candidate_output = _candidate_video_output_for_item(run_dir, selector)
+        candidate_output = _display_candidate_video_output_for_item(run_dir, selector, manifest_data=data)
         resolved_audio = resolve_run_relative(run_dir, narration_output) if narration_output else run_dir / "__missing_narration__"
         resolved_video = resolve_run_relative(run_dir, candidate_output or video_output)
         audio_duration = _probe_media_duration_seconds(resolved_audio)
@@ -7713,6 +7875,9 @@ def _manifest_narration_items(run_dir: Path, data: dict[str, Any] | None = None)
                     or ""
                 ),
                 "videoTool": str(video_generation.get("tool") or "kling_3_0"),
+                "videoNativeAudioMode": _dict_value(video_generation.get("native_audio")).get("mode", "off"),
+                "videoHasDialogue": bool(_dict_value(video_generation.get("native_audio")).get("dialogue")),
+                "cinematicDirection": _dict_value(_dict_value(node.get("cut_contract")).get("cinematic_contract")).get("execution"),
                 "videoQuality": str(video_generation.get("quality") or "1080p"),
                 "videoAspectRatio": str(video_generation.get("aspect_ratio") or "16:9"),
                 "videoFirstReference": str(video_generation.get("first_frame") or video_generation.get("input_image") or ""),
@@ -7781,7 +7946,7 @@ def _manifest_video_items(
             if target.get("is_render_unit")
             else {}
         )
-        video_input_mode = str(input_contract.get("input_mode") or "").strip()
+        video_input_mode = str(input_contract.get("input_mode") or video_generation.get("input_mode") or "").strip()
         if video_input_mode == "reference_images":
             first_frame = ""
         else:
@@ -7801,7 +7966,7 @@ def _manifest_video_items(
         video_output = str(
             video_generation.get("output") or _default_video_output_for_target(target)
         ).strip()
-        candidate_output = _candidate_video_output_for_item(run_dir, selector)
+        candidate_output = _display_candidate_video_output_for_item(run_dir, selector, manifest_data=data)
         selected_video = candidate_output or video_output
         resolved_video = resolve_run_relative(run_dir, selected_video)
         resolved_first_frame = (
@@ -7848,6 +8013,9 @@ def _manifest_video_items(
                 "videoDurationSeconds": _probe_media_duration_seconds(resolved_video),
                 "configuredVideoDurationSeconds": max(1, configured_duration),
                 "videoTool": str(video_generation.get("tool") or "kling_3_0"),
+                "videoNativeAudioMode": _dict_value(video_generation.get("native_audio")).get("mode", "off"),
+                "videoHasDialogue": bool(_dict_value(video_generation.get("native_audio")).get("dialogue")),
+                "cinematicDirection": _dict_value(_dict_value(node.get("cut_contract")).get("cinematic_contract")).get("execution"),
                 "videoQuality": str(video_generation.get("quality") or "1080p"),
                 "videoAspectRatio": str(
                     video_generation.get("aspect_ratio") or "16:9"
@@ -7997,6 +8165,9 @@ def _prepare_manifest_narration_generation(
             raise NarrationRevisionConflict(
                 f"narration grounding changed; save the current text before generation: {item.item_id}"
             )
+        if item.tool != "silent":
+            from toc.narration_audio import DEFAULT_LEAD_IN_SECONDS
+            node.setdefault("render", {}).setdefault("narration_offset_seconds", DEFAULT_LEAD_IN_SECONDS)
         candidate_id = f"{_now_stamp()}_{uuid.uuid4().hex[:12]}"
         candidate_output = _narration_candidate_output(target, item.output, candidate_id)
         _validate_run_relative_audio_path(run_dir, candidate_output, must_exist=False)
@@ -8119,7 +8290,8 @@ def _apply_audio_duration_to_manifest(run_dir: Path, durations_by_item: dict[str
         if target is None:
             continue
         node = target["cut"]
-        min_duration = max(1, math.ceil(duration))
+        offset = max(0.0, _float_value(_dict_value(node.get("render")).get("narration_offset_seconds") or 0))
+        min_duration = max(1, math.ceil(duration + offset))
         video_generation = node.get("video_generation") if isinstance(node.get("video_generation"), dict) else {}
         current = int(video_generation.get("duration_seconds") or 0)
         if current < min_duration:
@@ -8507,7 +8679,7 @@ def _render_unit_timeline_issues(
 
 
 def _apply_narration_timeline(
-    data: dict[str, Any], timeline: list[NarrationTimelineItem]
+    data: dict[str, Any], timeline: list[NarrationTimelineItem], *, preserve_generation_items=()
 ) -> str:
     targets = _manifest_scene_targets(data)
     expected_ids = [str(target["selector"]) for target in targets]
@@ -8541,7 +8713,8 @@ def _apply_narration_timeline(
                 f"narration timeline would truncate audio for {item.item_id}: "
                 f"required={required_duration}s requested={item.video_duration_seconds}s"
             )
-        video_generation["duration_seconds"] = item.video_duration_seconds
+        if item.item_id not in preserve_generation_items:
+            video_generation["duration_seconds"] = item.video_duration_seconds
         node["video_generation"] = video_generation
         render["video_duration_seconds"] = item.video_duration_seconds
         render["narration_offset_seconds"] = float(item.narration_offset_seconds)
@@ -8571,7 +8744,11 @@ def _narration_min_duration_seconds(run_dir: Path, item_id: str) -> float | None
         _validate_run_relative_audio_path(run_dir, output, must_exist=True)
     except ValueError:
         return None
-    return _probe_media_duration_seconds(resolve_run_relative(run_dir, output))
+    duration = _probe_media_duration_seconds(resolve_run_relative(run_dir, output))
+    if duration is None:
+        return None
+    offset = max(0.0, _float_value(_dict_value(node.get("render")).get("narration_offset_seconds") or 0))
+    return duration + offset
 
 
 def _generate_narration_file_blocking(run_dir: Path, request: NarrationGenerateItem) -> dict[str, Any]:
@@ -8667,6 +8844,10 @@ def _prepare_render_video_clip(
     *,
     strict: bool = False,
 ) -> Path:
+    from toc.media_resume import ACTIVE_MEDIA_JOURNAL
+    journal = ACTIVE_MEDIA_JOURNAL.get()
+    if journal is not None:
+        journal.bind_file(source.relative_to(run_dir).as_posix())
     duration = max(1, int(item.video_duration_seconds))
     if not shutil.which("ffmpeg"):
         if strict:
@@ -8726,6 +8907,10 @@ def _prepare_render_narration(
     *,
     strict: bool = False,
 ) -> Path:
+    from toc.media_resume import ACTIVE_MEDIA_JOURNAL
+    journal = ACTIVE_MEDIA_JOURNAL.get()
+    if journal is not None:
+        journal.bind_file(source.relative_to(run_dir).as_posix())
     offset = max(0.0, float(item.narration_offset_seconds))
     duration = max(1.0, float(item.video_duration_seconds))
     ffmpeg = shutil.which("ffmpeg")
@@ -8765,16 +8950,10 @@ def _prepare_render_narration(
             ffmpeg,
             "-hide_banner",
             "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "anullsrc=r=44100:cl=mono",
-            "-t",
-            f"{offset:.3f}",
             "-i",
             str(source),
             "-filter_complex",
-            f"[0:a][1:a]concat=n=2:v=0:a=1[a0];[a0]apad,atrim=duration={duration:.3f}[a]",
+            f"[0:a]adelay={offset * 1000:.3f}:all=1,apad,atrim=duration={duration:.3f}[a]",
             "-map",
             "[a]",
             "-c:a",
@@ -8830,7 +9009,20 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
             raise NarrationRevisionConflict(
                 "revision-aware render inputs must include every manifest cut exactly once in canonical order"
             )
-        timeline_hash = _apply_narration_timeline(data, req.items)
+    selected_ids = set()
+    if (run_dir / 'production_selections.json').is_file():
+        from server.production_tools_api import selected_video_path
+        for target in _manifest_video_targets(data):
+            if selected_video_path(run_dir, str(target['selector']), data):
+                selected_ids.add(str(target['selector']))
+    timeline_hash = _apply_narration_timeline(data, req.items, preserve_generation_items=selected_ids)
+    for item in req.items:
+        if item.video_path:
+            _assert_current_video_candidate_path(run_dir, item.item_id, item.video_path)
+    from server.sound_design_api import freeze as freeze_sound
+    from toc import sound_design
+    sound_snapshot = freeze_sound(run_dir, data)
+    approved_videos = {v["item_id"]: v for v in _sound_design_api.video_context(run_dir, data)["videos"]}
     _backup_run_file(run_dir, "video_manifest.md", label="before_render_freeze")
     clips: list[Path] = []
     narrations: list[Path] = []
@@ -8901,6 +9093,9 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
                 or str(video_generation.get("output") or "")
             )
             _assert_current_video_candidate_path(run_dir, selector, video_path)
+            approved_video = approved_videos[selector]
+            if video_path != approved_video["path"] or item.video_duration_seconds != approved_video["duration_seconds"]:
+                raise ValueError("結合する動画・尺がp860の動画承認と異なります")
             _validate_run_relative_video_path(run_dir, video_path, must_exist=True)
             video_source = resolve_run_relative(run_dir, video_path)
             clips.append(
@@ -8908,7 +9103,8 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
                 if revision_aware
                 else _prepare_render_video_clip(run_dir, video_source, item)
             )
-            video_generation["duration_seconds"] = item.video_duration_seconds
+            if item.item_id not in selected_ids:
+                video_generation["duration_seconds"] = item.video_duration_seconds
             video_generation["output"] = video_path
             node["video_generation"] = video_generation
             render = _dict_value(node.get("render"))
@@ -8937,6 +9133,8 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
             narration_path = "" if is_silent else selected_narration_path
         else:
             narration_path = item.narration_path or selected_narration_path
+            if item.narration_path and item.narration_path != selected_narration_path:
+                raise ValueError("結合するナレーションがp860で承認した音声と異なります")
         if _narration_has_intentional_silence(narration) and not narration_path:
             narration_path = _silent_render_narration_path(run_dir, item)
             if not revision_aware:
@@ -8965,6 +9163,7 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
             else _prepare_render_narration(run_dir, narration_source, item)
         )
         updated.append(item.item_id)
+    audio_set_hash = _manifest_narration_audio_set_hash(data)
     if snapshot_id:
         list_dir = _frontend_review_dir(run_dir) / "render_inputs"
         list_dir.mkdir(parents=True, exist_ok=True)
@@ -8977,6 +9176,7 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
     review_dir = _frontend_review_dir(run_dir)
     review_dir.mkdir(parents=True, exist_ok=True)
     plan_path = review_dir / (f"render_plan_{safe_snapshot}.json" if snapshot_id else "render_plan_latest.json")
+    sound_plan_path = review_dir / (f"sound_render_{safe_snapshot}.json" if snapshot_id else "sound_render_latest.json")
     clips_text = "\n".join(_concat_list_line(path) for path in clips) + ("\n" if clips else "")
     narration_text = "\n".join(_concat_list_line(path) for path in narrations) + ("\n" if narrations else "")
     plan_text = (
@@ -8988,6 +9188,8 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
                 "items": [_model_dump(item) for item in req.items],
                 "audioSetHash": audio_set_hash,
                 "timelineHash": timeline_hash,
+                "soundHash": sound_snapshot["sound_hash"],
+                "soundPlan": sound_plan_path.relative_to(run_dir).as_posix(),
                 "warnings": warnings,
             },
             ensure_ascii=False,
@@ -9000,6 +9202,7 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
         clips_path,
         narration_path,
         plan_path,
+        sound_plan_path,
         run_dir / "state.txt",
         run_dir / "run_status.json",
         run_dir / "p000_index.md",
@@ -9013,6 +9216,7 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
         _atomic_write_text(clips_path, clips_text)
         _atomic_write_text(narration_path, narration_text)
         _atomic_write_text(plan_path, plan_text)
+        sound_design.write_json(run_dir, sound_plan_path.relative_to(run_dir).as_posix(), sound_snapshot)
         append_state_snapshot(
             run_dir / "state.txt",
             {
@@ -9043,6 +9247,8 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
         "output": req.output,
         "audioSetHash": audio_set_hash,
         "timelineHash": timeline_hash,
+        "soundHash": sound_snapshot["sound_hash"],
+        "soundPlan": sound_plan_path.relative_to(run_dir).as_posix(),
     }
 
 
@@ -9137,19 +9343,23 @@ async def _run_final_render(run_dir: Path, req: FinalRenderRequest, freeze_resul
     ]
     if req.reencode:
         command.append("--reencode")
-    proc = await asyncio.create_subprocess_exec(
-        *command,
-        cwd=str(ROOT),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=3600)
-    if proc.returncode != 0:
-        detail = stderr.decode("utf-8", errors="replace").strip() or stdout.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(detail or f"render-video.sh exited with status {proc.returncode}")
+    if freeze_result.get("soundPlan"):
+        command.extend(["--sound-plan", str(run_dir / freeze_result["soundPlan"])])
+    binding = _assert_bound_run_root(run_dir)
+    # A surviving renderer keeps the directory lease even if its server dies.
+    stdout, stderr = await _run_resume_subprocess_command(command, timeout_seconds=3600,
+        pass_fds=(binding.descriptor,) if binding is not None else ())
     async with _serialized_run_write(run_dir, "run_artifacts"):
         try:
             _require_frozen_render_narration_current(run_dir, freeze_result)
+            if freeze_result.get("soundHash"):
+                _, _, current_manifest = _read_manifest_data(run_dir)
+                try:
+                    current_sound_hash = _sound_design_api.freeze(run_dir, current_manifest)["sound_hash"]
+                except ValueError as exc:
+                    raise NarrationRevisionConflict(str(exc)) from exc
+                if current_sound_hash != freeze_result["soundHash"]:
+                    raise NarrationRevisionConflict("BGM・SEまたは動画がレンダー中に変更されました。再結合してください")
         except NarrationRevisionConflict:
             append_state_snapshot(
                 run_dir / "state.txt",
@@ -9220,6 +9430,18 @@ def _scene_visualizable_action(scene: dict[str, Any]) -> Any:
     return None
 
 
+def _review_native_audio(generation: dict[str, Any], item: FrontendReviewItem) -> dict[str, Any]:
+    from toc.cinematic_language import normalize_native_audio
+    audio = deepcopy(_dict_value(generation.get('native_audio')) or {'mode': 'off'})
+    if item.video_native_audio_mode is not None:
+        audio['mode'] = item.video_native_audio_mode
+        if audio['mode'] == 'off':
+            audio = {'mode': 'off', 'sound_events': [], 'dialogue': []}
+        elif audio['mode'] == 'natural_sound':
+            audio['dialogue'] = []
+    return normalize_native_audio(audio)
+
+
 def _compile_frontend_video_prompt_payload(
     *,
     data: dict[str, Any],
@@ -9231,7 +9453,7 @@ def _compile_frontend_video_prompt_payload(
         raise ValueError(f"video manifest target not found: {item.item_id}")
     node = target["cut"]
     scene = target["scene"]
-    video_generation = node.get("video_generation") if isinstance(node.get("video_generation"), dict) else {}
+    video_generation = deepcopy(node.get("video_generation")) if isinstance(node.get("video_generation"), dict) else {}
     metadata = data.get("video_metadata") if isinstance(data.get("video_metadata"), dict) else {}
     source_prompt = _video_prompt_for_request(item)
     if not source_prompt:
@@ -9246,7 +9468,11 @@ def _compile_frontend_video_prompt_payload(
         if target.get("is_render_unit")
         else {}
     )
-    if input_contract.get("input_mode") == "reference_images":
+    selected_input_mode = item.video_input_mode or video_generation.get('input_mode')
+    if input_contract and selected_input_mode and selected_input_mode != input_contract.get('input_mode'):
+        raise ValueError('render-unit input mode must preserve its canonical input contract')
+    reference_image_mode = input_contract.get('input_mode') == 'reference_images' or selected_input_mode == 'reference_images'
+    if reference_image_mode:
         first_frame = ""
     else:
         first_frame = _default_first_frame(item) or str(
@@ -9260,10 +9486,18 @@ def _compile_frontend_video_prompt_payload(
         # ``None`` means the field was not edited; an explicit empty string
         # means the caller intentionally cleared the end-frame constraint.
         last_frame = item.video_last_reference.strip()
+    if reference_image_mode:
+        if (item.video_first_reference or '').strip() or (item.video_last_reference or '').strip():
+            raise ValueError('reference-image mode cannot include frame boundaries')
+        last_frame = ''
+    native_audio = _review_native_audio(video_generation, item)
+    if 'native_audio' in video_generation or item.video_native_audio_mode is not None:
+        video_generation['native_audio'] = native_audio
     execution_options = _server_video_execution_options(
         tool=tool,
         has_first_frame=bool(first_frame),
         has_reference_images=bool(item.video_references),
+        native_audio_mode=native_audio['mode'],
     )
     reference_content_sha256 = _video_reference_content_sha256(
         run_dir,
@@ -9493,6 +9727,7 @@ def _effective_video_materialization_items(
         )
         reference_image_mode = (
             input_contract.get("input_mode") == "reference_images"
+            or (effective_item.video_input_mode or generation.get('input_mode')) == 'reference_images'
         )
         first_reference = (
             ""
@@ -9524,6 +9759,7 @@ def _effective_video_materialization_items(
             tool=selected_tool,
             has_first_frame=bool(first_reference),
             has_reference_images=bool(references),
+            native_audio_mode=_review_native_audio(generation, effective_item)['mode'],
         )
         input_mode = (
             "first_last_frame"
@@ -9664,7 +9900,9 @@ def _video_generation_request_section(run_dir: Path, item: FrontendReviewItem) -
         if target is not None and target.get("is_render_unit")
         else {}
     )
-    reference_image_mode = input_contract.get("input_mode") == "reference_images"
+    reference_image_mode = (input_contract.get("input_mode") == "reference_images"
+        or item.video_input_mode == 'reference_images'
+        or _dict_value(target_node.get('video_generation')).get('input_mode') == 'reference_images')
     first_frame = "" if reference_image_mode else _default_first_frame(item)
     last_frame = (
         "" if reference_image_mode else (item.video_last_reference or "").strip()
@@ -9877,6 +10115,7 @@ def _video_prompt_item_materialization_is_current(
         video_last_reference=last_reference or None,
         video_references=references,
         video_tool=tool,
+        video_input_mode=generation.get('input_mode'),
     )
     _current_target, current_payload = _compile_frontend_video_prompt_payload(
         data=data,
@@ -11424,7 +11663,12 @@ def _update_manifest_video_generation(run_dir: Path, items: list[FrontendReviewI
             if target.get("is_render_unit")
             else {}
         )
-        reference_image_mode = input_contract.get("input_mode") == "reference_images"
+        reference_image_mode = (input_contract.get("input_mode") == "reference_images"
+            or (item.video_input_mode or video_generation.get('input_mode')) == 'reference_images')
+        if item.video_input_mode is not None:
+            video_generation['input_mode'] = item.video_input_mode
+        if item.video_native_audio_mode is not None:
+            video_generation['native_audio'] = _review_native_audio(video_generation, item)
         video_generation.update(
             {
                 "tool": item.video_tool or video_generation.get("tool") or "kling_3_0",
@@ -12432,11 +12676,17 @@ async def _generate_request_item_output(
                 else max(1, int(IMAGE_GENERATION_GLOBAL_PARALLELISM)),
             },
         )
-        return await _generate_request_item_output_with_slot(
-            run_dir=run_dir,
-            kind=kind,
-            item=item,
-        )
+        repair = RepairSession(run_dir, 'p560' if kind == 'asset' else 'p660',
+            binding={'item': str(item.id), 'request': str(getattr(item, 'request_digest', '') or ''), 'prompt': str(item.prompt)},
+            stage_limit=100000, run_limit=100000, unit_limit=2, budget_group='media')
+        while True:
+            repair.claim(str(item.id))
+            try:
+                outcome = await _generate_request_item_output_with_slot(run_dir=run_dir, kind=kind, item=item)
+                repair.complete(str(item.id))
+                return outcome
+            except MediaOutputError as exc:
+                repair.feedback(str(item.id), {'output': str(item.output), 'prompt': str(item.prompt)}, [str(exc)])
 
 
 def _prepare_bound_image_provider_workspace(
@@ -12606,8 +12856,17 @@ async def _generate_request_item_output_with_slot(
         and not str(getattr(item, "request_revision", "") or "").strip()
     ):
         raise RuntimeError(f"{kind} request v2 requires an immutable request snapshot: {item.id}")
+    destination_decodes = False
     if destination.exists():
-        if _has_completed_app_server_image_provenance(
+        try:
+            validate_image_bytes(destination)
+            from PIL import Image
+            with Image.open(destination) as existing:
+                existing.verify()
+            destination_decodes = True
+        except (ValueError, OSError):
+            pass
+        if destination_decodes and _has_completed_app_server_image_provenance(
             run_dir,
             item_id=str(item.id),
             destination=destination,
@@ -12744,7 +13003,7 @@ async def _generate_request_item_output_with_slot(
                         timeout=_image_generation_outer_timeout_seconds(),
                     )
                     if result.saved_path is None:
-                        raise RuntimeError(f"Codex app-server did not return an image for {item.id}")
+                        raise MediaOutputError(f"Codex app-server did not return an image for {item.id}")
                     reject_local_raster_image_result(result, item_id=item.id)
                     if provenance_policy == IMAGE_GENERATION_PROVENANCE_POLICY_REQUEST_BOUND_V2 and not bool(getattr(result, "provenance_authoritative", False)):
                         raise RuntimeError(f"Codex app-server did not return authoritative request-bound provenance for {item.id}")
@@ -12758,6 +13017,18 @@ async def _generate_request_item_output_with_slot(
                             reference_sha256s=reference_sha256s,
                         )
                     _assert_bound_run_root(run_dir)
+                    try:
+                        validate_image_bytes(Path(result.saved_path))
+                        from PIL import Image
+                        with Image.open(result.saved_path) as produced:
+                            produced.verify()
+                    except (ValueError, FileNotFoundError) as exc:
+                        raise MediaOutputError(f"{item.id}: generated image is invalid: {exc}") from exc
+                    except OSError as exc:
+                        # Pillow decode errors have no errno; real disk/permission errors propagate.
+                        if exc.errno is not None:
+                            raise
+                        raise MediaOutputError(f"{item.id}: generated image cannot be decoded: {exc}") from exc
                     retention_record = retain_first_image(
                         result.saved_path,
                         root=ROOT,
@@ -12805,7 +13076,7 @@ async def _generate_request_item_output_with_slot(
                     )
                     await asyncio.wait_for(client.start(), timeout=CODEX_APP_SERVER_START_TIMEOUT_SECONDS)
         if result.saved_path is None:
-            raise RuntimeError(f"Codex app-server did not return an image for {item.id}")
+            raise MediaOutputError(f"Codex app-server did not return an image for {item.id}")
         _assert_bound_run_root(run_dir)
         try:
             _destination_relative, destination = _validate_generation_destination_nofollow(
@@ -13062,6 +13333,7 @@ async def _generate_request_outputs_unlocked(*, run_dir: Path, kind: str) -> Non
 
 def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
     issues: list[str] = []
+    failed_items: list[str] = []
     snapshot_filename = {
         "asset": "asset_generation_request_snapshot.json",
         "scene": "image_generation_request_snapshot.json",
@@ -13082,16 +13354,20 @@ def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
     if not request_items:
         raise RuntimeError(f"{kind} image generation incomplete: no {kind} requests")
     for item in request_items:
+        before_issues = len(issues)
         if not item.output:
-            issues.append(f"{item.id}: missing output")
-            continue
+            raise RuntimeError(f"{item.id}: request has no output path")
         try:
             output = resolve_run_relative(run_dir, item.output)
             require_image_file(output)
             if not output.is_file():
                 issues.append(item.output)
+                failed_items.append(str(item.id))
                 continue
             validate_image_bytes(output)
+            from PIL import Image
+            with Image.open(output) as image:
+                image.verify()
             if (
                 kind == "asset"
                 or str(
@@ -13115,8 +13391,33 @@ def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
                     issues.append(f"{item.output}: missing strict request-bound provenance for current snapshot")
         except (OSError, ValueError) as exc:
             issues.append(f"{item.output}: {exc}")
+        if len(issues) > before_issues:
+            failed_items.append(str(item.id))
     if issues:
-        raise RuntimeError(f"{kind} image generation incomplete: {', '.join(issues)}")
+        raise MediaOutputError(f"{kind} image generation incomplete: {', '.join(issues)}", kind=kind, item_ids=failed_items)
+
+
+async def _validate_or_repair_image_outputs(run_dir: Path, validator) -> None:
+    """Recheck the same terminal gate, regenerating only diagnosed current items."""
+    while True:
+        try:
+            validator()
+            return
+        except MediaOutputError as exc:
+            if exc.kind not in {'asset', 'scene'} or not exc.item_ids:
+                raise
+            items = {str(item.id): item for item in load_request_items(run_dir, exc.kind)}
+            if not set(exc.item_ids) <= items.keys():
+                raise RuntimeError('image repair target is not in current requests') from exc
+            for item_id in dict.fromkeys(exc.item_ids):
+                item = items[item_id]
+                repair = RepairSession(run_dir, 'p560' if exc.kind == 'asset' else 'p660',
+                    binding={'item': item_id, 'request': str(getattr(item, 'request_digest', '') or '')},
+                    stage_limit=100000, run_limit=100000, unit_limit=2, budget_group='media')
+                repair.feedback(item_id, {'output': item.output}, [str(exc)])
+                repair.claim(item_id)
+                await _generate_request_item_output(run_dir=run_dir, kind=exc.kind, item=item)
+                repair.complete(item_id)
 
 
 def _validate_p680_outputs(run_dir: Path, *, mode: str = "terminal") -> None:
@@ -13297,9 +13598,9 @@ async def _generate_scene_outputs_after_p650_preflight(job_id: str, *, run_id: s
             await _generate_request_outputs_unlocked(run_dir=run_dir, kind='scene')
             failure_phase = 'validation'
             _validate_p650_run(run_id)
-            _validate_generated_outputs(run_dir, 'asset')
-            _validate_generated_outputs(run_dir, 'scene')
-            _validate_p680_outputs(run_dir, mode='terminal')
+            await _validate_or_repair_image_outputs(run_dir, lambda: _validate_generated_outputs(run_dir, 'asset'))
+            await _validate_or_repair_image_outputs(run_dir, lambda: _validate_generated_outputs(run_dir, 'scene'))
+            await _validate_or_repair_image_outputs(run_dir, lambda: _validate_p680_outputs(run_dir, mode='terminal'))
         except Exception as exc:
             generated_count = 0
             with suppress(Exception):
@@ -13315,7 +13616,7 @@ async def _generate_create_images(job_id: str, *, run_id: str) -> bool:
     _validate_pre_asset_provider_gate(run_dir)
     await _set_create_job(job_id, {"message": "素材画像を生成中"})
     await _generate_request_outputs(run_dir=run_dir, kind="asset")
-    _validate_generated_outputs(run_dir, "asset")
+    await _validate_or_repair_image_outputs(run_dir, lambda: _validate_generated_outputs(run_dir, "asset"))
     _mark_asset_generation_handoff(run_dir, asset_quality_passed=True)
     await _generate_scene_outputs_after_p650_preflight(
         job_id, run_id=run_id, run_dir=run_dir,
@@ -13697,7 +13998,7 @@ async def _run_create_job_bound(
         elif generate_images and create_mode == CREATE_MODE_SCENE_STORYBOARD:
             _validate_scene_storyboard_create_run(run_id, strict_visual_quality=True)
         elif generate_images:
-            _validate_frontend_create_run(run_id, strict_visual_quality=True)
+            await _validate_or_repair_image_outputs(run_dir_for_log, lambda: _validate_frontend_create_run(run_id, strict_visual_quality=True))
         else:
             _validate_materialized_p650_run(run_id)
         write_app_server_debug_log(
@@ -14032,6 +14333,12 @@ def _track_create_task(job_id: str, coroutine: Any) -> asyncio.Task[None]:
     return task
 
 
+def _cleanup_resume_task(completed: asyncio.Task[Any], current_job_id: str) -> None:
+    if _resume_tasks.get(current_job_id) is completed:
+        _resume_tasks.pop(current_job_id, None)
+        _create_job_failure_baselines.pop(current_job_id, None)
+
+
 @router.get("/image_gen", response_class=HTMLResponse)
 async def image_gen_page() -> Response:
     index = DIST_DIR / "index.html"
@@ -14114,6 +14421,11 @@ async def api_create_run(req: CreateRunRequest) -> dict[str, Any]:
                     expected_run_identity=reservation.identity,
                 )
                 lease_reserved = True
+                cinematic_preferences = (getattr(req, 'cinematic_preferences', None) or '').strip()
+                if cinematic_preferences:
+                    write_regular_file_nofollow(destination_root=_run_dir,
+                        destination_relative='cinematic_preferences.md', data=(cinematic_preferences + '\n').encode('utf-8'),
+                        expected_destination_root_identity=reservation.identity)
                 process_store_result = await asyncio.to_thread(
                     _create_process_record_best_effort,
                     job=job,
@@ -14241,6 +14553,11 @@ async def api_create_storyboard_run(req: CreateStoryboardRunRequest) -> dict[str
                     expected_run_identity=reservation.identity,
                 )
                 lease_reserved = True
+                cinematic_preferences = (getattr(req, 'cinematic_preferences', None) or '').strip()
+                if cinematic_preferences:
+                    write_regular_file_nofollow(destination_root=_run_dir,
+                        destination_relative='cinematic_preferences.md', data=(cinematic_preferences + '\n').encode('utf-8'),
+                        expected_destination_root_identity=reservation.identity)
                 process_store_result = await asyncio.to_thread(
                     _create_process_record_best_effort,
                     job=job,
@@ -14387,6 +14704,11 @@ async def api_create_world_walk_run(
                     expected_run_identity=reservation.identity,
                 )
                 lease_reserved = True
+                cinematic_preferences = (getattr(req, 'cinematic_preferences', None) or '').strip()
+                if cinematic_preferences:
+                    write_regular_file_nofollow(destination_root=_run_dir,
+                        destination_relative='cinematic_preferences.md', data=(cinematic_preferences + '\n').encode('utf-8'),
+                        expected_destination_root_identity=reservation.identity)
                 process_store_result = await asyncio.to_thread(
                     _create_process_record_best_effort,
                     job=job,
@@ -14451,14 +14773,14 @@ async def api_create_run_status(job_id: str) -> dict[str, Any]:
     async with _create_jobs_lock:
         job = _create_jobs.get(job_id)
         if job:
-            return dict(job)
+            return _reconcile_create_job_with_run_state(dict(job))
     try:
         record = await asyncio.to_thread(process_store.get_process_run, job_id=job_id)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=f"create job not found; process DB unavailable: {exc}") from exc
     if not record:
         raise HTTPException(status_code=404, detail="create job not found")
-    return record.to_api()
+    return _reconcile_create_job_with_run_state(record.to_api())
 
 
 @router.get("/api/image-gen/runs/{run_id}/process")
@@ -14469,14 +14791,24 @@ async def api_run_process(run_id: str) -> dict[str, Any]:
     try:
         record = await asyncio.to_thread(process_store.get_process_run, run_id=run_id)
     except Exception as exc:
+        try:
+            progress = read_run_progress(safe_run_dir(run_id, ROOT), validate_request_outputs=False)
+        except (FileNotFoundError, OSError, ValueError):
+            progress = {}
+        failure = progress.get("failure") if isinstance(progress, dict) else None
+        failure = failure if isinstance(failure, dict) else {}
+        fallback_status = str(progress.get("status") or "") if isinstance(progress, dict) else ""
+        fallback_stage = str(failure.get("stage") or "")
         return {
             "runId": run_id,
-            "currentProcess": current_process,
-            "currentProcessNumber": current_process_number,
+            "status": "failed" if failure.get("terminal") else fallback_status,
+            "error": str(failure.get("message") or "") if failure.get("terminal") else None,
+            "currentProcess": fallback_stage or current_process,
+            "currentProcessNumber": _process_number(fallback_stage) if fallback_stage else current_process_number,
             "processStore": {"enabled": process_store.enabled(), "error": str(exc)},
         }
     if record:
-        payload = record.to_api()
+        payload = _reconcile_create_job_with_run_state(record.to_api())
         payload["currentProcessFromState"] = current_process
         payload["currentProcessNumberFromState"] = current_process_number
         return payload
@@ -14489,6 +14821,10 @@ async def api_run_process(run_id: str) -> dict[str, Any]:
 
 
 def _target_duration_seconds_for_run(run_dir: Path) -> int:
+    from toc.authoring_resume import read_create_input
+    saved_path = run_dir / "logs/orchestration/create_input.json"
+    if saved_path.exists() or saved_path.is_symlink():
+        return read_create_input(run_dir)["target_duration_seconds"]
     manifest_path = run_dir / "video_manifest.md"
     if manifest_path.is_file():
         _path, _original_text, data = _read_manifest_data(run_dir)
@@ -14614,6 +14950,7 @@ async def _run_resume_subprocess_command(
     command: list[str],
     *,
     pass_fds: tuple[int, ...] = (),
+    timeout_seconds: float | None = None,
 ) -> tuple[bytes, bytes]:
     proc = await asyncio.create_subprocess_exec(
         *command,
@@ -14627,7 +14964,7 @@ async def _run_resume_subprocess_command(
     try:
         stdout, stderr = await asyncio.wait_for(
             asyncio.shield(communicate_task),
-            timeout=FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS,
+            timeout=FRONTEND_CREATE_HELPER_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds,
         )
     except asyncio.CancelledError as cancellation:
         with suppress(asyncio.CancelledError):
@@ -14643,7 +14980,7 @@ async def _run_resume_subprocess_command(
             or stdout.decode("utf-8", errors="replace").strip()
         )
         raise TimeoutError(
-            "resume-from-p500 subprocess timed out"
+            "resume subprocess timed out"
             + (f": {detail}" if detail else "")
         ) from exc
     if proc.returncode != 0:
@@ -14653,7 +14990,7 @@ async def _run_resume_subprocess_command(
         )
         raise RuntimeError(
             detail
-            or f"resume-from-p500 exited with status {proc.returncode}"
+            or f"resume subprocess exited with status {proc.returncode}"
         )
     return stdout, stderr
 
@@ -14684,6 +15021,35 @@ def _p500_resume_plan_token(stdout: bytes, *, checkpoint_id: str) -> str:
             "resume-from-p500 dry-run plan_token is missing or malformed"
         )
     return plan_token
+
+
+async def _run_authoring_resume_subprocess(*, job_id: str, run_dir: Path) -> None:
+    from toc.authoring_resume import read_create_input
+    saved = read_create_input(run_dir)
+    command = [sys.executable, str(ROOT / "scripts" / "toc-immersive-frontend-run.py"),
+        "--run-dir", str(run_dir), "--topic", saved["topic"],
+        "--resume-authoring", "--stop-target", "p450"]
+    binding = _assert_bound_run_root(run_dir)
+    pass_fds: tuple[int, ...] = ()
+    if binding is not None:
+        async with _run_execution_leases_guard:
+            lease = _run_execution_leases.get(job_id)
+        if not isinstance(lease, _RunExecutionLease):
+            raise RuntimeError("authoring resume is missing its execution lease")
+        command.extend(["--expected-run-device", str(binding.identity[0]),
+            "--expected-run-inode", str(binding.identity[1]),
+            "--inherited-run-fd", str(lease.run_descriptor)])
+        pass_fds = (lease.run_descriptor,)
+    await _run_resume_subprocess_command(command, pass_fds=pass_fds)
+
+
+def _requires_authoring_resume(run_dir: Path) -> bool:
+    from toc.authoring_resume import needs_authoring_resume, read_create_input
+    contract = run_dir / "logs/orchestration/create_input.json"
+    if not contract.exists() and not contract.is_symlink():
+        return False  # Legacy p500 can recover its exact input from the process record.
+    read_create_input(run_dir)
+    return needs_authoring_resume(run_dir)
 
 
 async def _run_p500_resume_subprocess(
@@ -15033,11 +15399,45 @@ async def _run_p500_resume_job(
             )
         expected_run_identity = retained_run.identity
     if expected_run_identity is None:
-        await _run_p500_resume_job_bound(
-            job_id,
-            run_id=run_id,
-            create_mode=create_mode,
-        )
+        try:
+            await _run_p500_resume_job_bound(
+                job_id,
+                run_id=run_id,
+                create_mode=create_mode,
+            )
+        except asyncio.CancelledError:
+            with suppress(Exception):
+                await _record_p500_resume_failure_state(
+                    safe_run_dir(run_id, ROOT),
+                    asyncio.CancelledError("ToC再開がキャンセルされました"),
+                )
+            await _set_create_job(
+                job_id,
+                {
+                    "status": "failed",
+                    "error": "ToC再開がキャンセルされました",
+                    "errorCode": "CancelledError",
+                    "message": "再開中断",
+                },
+                write_run_log=False,
+            )
+            raise
+        except Exception as exc:
+            with suppress(Exception):
+                await _record_p500_resume_failure_state(
+                    safe_run_dir(run_id, ROOT),
+                    exc,
+                )
+            await _set_create_job(
+                job_id,
+                {
+                    "status": "failed",
+                    "error": _create_run_error_message(exc),
+                    "errorCode": type(exc).__name__,
+                    "message": "再開失敗",
+                },
+                write_run_log=False,
+            )
         return
     if not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}:
         raise ValueError("invalid run_id")
@@ -15052,11 +15452,20 @@ async def _run_p500_resume_job(
                 else None
             ),
         ):
-            await _run_p500_resume_job_bound(
-                job_id,
-                run_id=run_id,
-                create_mode=create_mode,
-            )
+            try:
+                await _run_p500_resume_job_bound(
+                    job_id,
+                    run_id=run_id,
+                    create_mode=create_mode,
+                )
+            except asyncio.CancelledError as exc:
+                with suppress(Exception):
+                    await _record_p500_resume_failure_state(run_dir, exc)
+                raise
+            except Exception as exc:
+                with suppress(Exception):
+                    await _record_p500_resume_failure_state(run_dir, exc)
+                raise
     except asyncio.CancelledError:
         await _set_create_job(
             job_id,
@@ -15086,6 +15495,36 @@ async def _run_p500_resume_job(
             retained_run.close()
 
 
+async def _record_p500_resume_failure_state(
+    run_dir: Path,
+    exc: BaseException,
+) -> None:
+    """Publish a resumable run's terminal failure on the canonical state log."""
+
+    detail = _create_run_error_message(exc if isinstance(exc, Exception) else RuntimeError(str(exc)))
+    async with _serialized_run_write(run_dir, "p500_resume_failure"):
+        current = parse_state_file(run_dir / "state.txt")
+        runtime_stage = str(current.get("runtime.stage") or "").strip()
+        concrete_failure = (
+            "failed" in runtime_stage.lower()
+            or runtime_stage == "semantic_review_blocked_transport"
+            or bool(str(current.get("runtime.failure.stage") or "").strip())
+            or bool(str(current.get("runtime.failure.phase") or "").strip())
+        )
+        updates = {
+            "status": "FAILED",
+            "runtime.create_job.status": "failed",
+            "runtime.create_job.error_code": type(exc).__name__,
+            "runtime.resume.p500.status": "failed",
+            "runtime.resume.p500.error": detail,
+        }
+        if not str(current.get("last_error") or "").strip():
+            updates["last_error"] = detail
+        if not concrete_failure:
+            updates["runtime.stage"] = "p500_resume_failed"
+        append_state_snapshot(run_dir / "state.txt", updates)
+
+
 async def _run_p500_resume_job_bound(
     job_id: str,
     *,
@@ -15095,6 +15534,56 @@ async def _run_p500_resume_job_bound(
     run_dir = safe_run_dir(run_id, ROOT)
     started = time.monotonic()
     try:
+        operation_id = (_create_jobs.get(job_id) or {}).get("mediaOperationId")
+        if not operation_id and (_create_jobs.get(job_id) or {}).get("resumeMode") == "narration_start":
+            from toc.media_resume import MediaJournal
+            try:
+                journal = MediaJournal.create(
+                    run_dir, "narration_drafts",
+                    NarrationDraftCreateRequest(run_id=run_id, replace=False).model_dump(mode="json"),
+                )
+            except Exception:
+                append_state_snapshot(run_dir / "state.txt", {
+                    "status": "FAILED", "runtime.stage": "narration_preparation_failed",
+                    "runtime.failure.stage": "p710", "slot.p710.status": "failed",
+                    "runtime.resume.narration.status": "journal_setup_failed",
+                })
+                raise
+            append_state_snapshot(run_dir / "state.txt", {"runtime.resume.narration.status": "running"})
+            operation_id = journal.id
+            await _set_create_job(job_id, {
+                "mediaOperationId": operation_id,
+                "currentProcess": "p710", "currentProcessNumber": 710,
+                "message": "ナレーション準備を開始中",
+            })
+        if operation_id:
+            narration_start = (_create_jobs.get(job_id) or {}).get("stopTarget") == "p710"
+            if narration_start:
+                append_state_snapshot(run_dir / "state.txt", {
+                    "status": "P710", "runtime.stage": "narration_preparing",
+                    "slot.p710.status": "in_progress", "last_error": "",
+                    "runtime.failure.stage": "", "runtime.failure.phase": "",
+                })
+            try:
+                result = await _resume_saved_media_operation(run_dir, operation_id)
+            except BaseException as exc:
+                if narration_start:
+                    append_state_snapshot(run_dir / "state.txt", {
+                        "status": "FAILED", "runtime.stage": "narration_preparation_failed",
+                        "runtime.failure.stage": "p710", "slot.p710.status": "failed",
+                        "runtime.resume.narration.status": "failed",
+                        "last_error": _create_run_error_message(
+                            exc if isinstance(exc, Exception) else RuntimeError("narration preparation interrupted")
+                        ),
+                    })
+                raise
+            if narration_start:
+                append_state_snapshot(run_dir / "state.txt", {"runtime.resume.narration.status": "completed"})
+            await _set_create_job(job_id, {
+                "status": "completed", "message": "保存済みの設定で再開完了",
+                "resumeMode": "media_operation", "result": result,
+            })
+            return
         await _set_create_job(
             job_id,
             {
@@ -15139,6 +15628,13 @@ async def _run_p500_resume_job_bound(
                     "current process record"
                 )
             source = record_source
+        if _requires_authoring_resume(run_dir):
+            await _set_create_job(job_id, {
+                "resumeMode": "authoring_subprocess",
+                "message": "検証済みの前工程を保持して執筆を再開中",
+                "metadata": {"resumeMode": "authoring_subprocess"},
+            })
+            await _run_authoring_resume_subprocess(job_id=job_id, run_dir=run_dir)
         subprocess_result = await _run_p500_resume_subprocess(
             job_id=job_id,
             run_dir=run_dir,
@@ -15191,11 +15687,15 @@ async def _run_p500_resume_job_bound(
         # The subprocess owns both the create/resume lease and canonical resume
         # state. Preserve its semantic failure and applied checkpoint verbatim.
         with suppress(Exception):
-            _invalidate_published_image_generation_handoff(
-                run_dir,
-                invalidated_by="p500_resume.post_handoff_failure",
-                reason=str(exc),
-            )
+            await _record_p500_resume_failure_state(run_dir, exc)
+        failed_job = _create_jobs.get(job_id) or {}
+        if not failed_job.get("mediaOperationId") and failed_job.get("resumeMode") != "narration_start":
+            with suppress(Exception):
+                _invalidate_published_image_generation_handoff(
+                    run_dir,
+                    invalidated_by="p500_resume.post_handoff_failure",
+                    reason=str(exc),
+                )
         with suppress(Exception):
             await _sync_process_current_process(job_id, run_id)
         detail = _create_run_error_message(exc)
@@ -15227,7 +15727,15 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
     if not run_id or "/" in run_id or "\\" in run_id or run_id in {".", ".."}:
         raise ValueError("invalid run_id")
     run_dir = output_root(ROOT) / run_id
-    retained_run = _retain_frontend_create_run(run_dir)
+    try:
+        retained_run = _retain_frontend_create_run(run_dir)
+    except FrontendCreateLockOwnedError as exc:
+        # A live worker can own the directory before this API reaches the
+        # in-memory active-job check (including workers from another process).
+        raise HTTPException(
+            status_code=409,
+            detail="このrunの作成・再開処理はすでに実行中です。進捗を確認してください。",
+        ) from exc
     job_id = uuid.uuid4().hex
     job_reserved = False
     task_scheduled = False
@@ -15279,46 +15787,78 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
                 record = None
             create_mode = _resume_create_mode_for_run(run_dir, record)
 
+            from toc.media_resume import MediaJournal
             try:
-                _validate_current_p680_run(
-                    run_id,
-                    create_mode=create_mode,
+                media_operation = (
+                    MediaJournal.load(run_dir, req.operation_id) if req.operation_id
+                    else MediaJournal.latest_incomplete(run_dir)
                 )
-            except Exception:
-                p680_complete = False
-            else:
-                p680_complete = True
-            if p680_complete:
-                raise HTTPException(
-                    status_code=409,
-                    detail="run already reached strict p680 completion",
-                )
-
-            try:
-                _validate_p650_run(run_id)
-            except Exception:
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404, detail="saved media operation was not found") from exc
+            except (ValueError, KeyError, TypeError) as exc:
+                raise HTTPException(status_code=409, detail="saved media operation is invalid: " + str(exc)) from exc
+            if media_operation is not None:
+                try:
+                    media_operation.verify_inputs()
+                except ValueError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+                resume_mode = "media_operation"
                 p650_complete = False
             else:
-                p650_complete = True
-            if p650_complete:
-                regeneration_plan = _classify_p680_regeneration_plan(run_dir)
-                if regeneration_plan.errors:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            "image-only resume preflight rejected unsafe "
-                            "regeneration targets: "
-                            + "; ".join(regeneration_plan.errors[:20])
-                        ),
+                try:
+                    _validate_current_p680_run(
+                        run_id,
+                        create_mode=create_mode,
                     )
-                resume_mode = (
-                    "p500_subprocess"
-                    if regeneration_plan.requires_canonical_p500
-                    else "image_only"
-                )
-            else:
-                resume_mode = "p500_subprocess"
+                except Exception:
+                    p680_complete = False
+                else:
+                    p680_complete = True
+                if p680_complete:
+                    state = parse_state_file(run_dir / "state.txt")
+                    waiting = (
+                        str(state.get("status") or "").upper() == "P680"
+                        and state.get("slot.p710.status") in {"pending", "not_started"}
+                        and state.get("runtime.repair.phase") != "repairing"
+                    )
+                    setup_retry = (
+                        state.get("status") == "FAILED"
+                        and state.get("slot.p710.status") == "failed"
+                        and state.get("runtime.resume.narration.status") == "journal_setup_failed"
+                    )
+                    if not (req.continue_waiting and waiting) and not setup_retry:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="run already reached strict p680 completion; no requested waiting stage is available",
+                        )
+                    resume_mode = "narration_start"
+                    p650_complete = False
 
+                if not p680_complete:
+                    try:
+                        _validate_p650_run(run_id)
+                    except Exception:
+                        p650_complete = False
+                    else:
+                        p650_complete = True
+                    if p650_complete:
+                        regeneration_plan = _classify_p680_regeneration_plan(run_dir)
+                        if regeneration_plan.errors:
+                            raise HTTPException(
+                                status_code=409,
+                                detail=(
+                                    "image-only resume preflight rejected unsafe "
+                                    "regeneration targets: "
+                                    + "; ".join(regeneration_plan.errors[:20])
+                                ),
+                            )
+                        resume_mode = (
+                            "p500_subprocess"
+                            if regeneration_plan.requires_canonical_p500
+                            else "image_only"
+                        )
+                    else:
+                        resume_mode = "authoring_subprocess" if _requires_authoring_resume(run_dir) else "p500_subprocess"
             current_process_number = _current_process_number_for_run(run_id)
             if current_process_number == 0 and record is not None:
                 current_process_number = int(record.current_process_number)
@@ -15327,6 +15867,27 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
             current_process = _process_label(current_process_number)
             title = record.title if record else run_id
             source = record.source if record and record.source else title
+            saved_path = run_dir / "logs/orchestration/create_input.json"
+            if saved_path.exists() or saved_path.is_symlink():
+                from toc.authoring_resume import read_create_input
+                saved = read_create_input(run_dir)
+                title, source = saved["topic"], saved["source"]
+            resume_failure_baseline: tuple[str, str, str] | None = None
+            try:
+                baseline_progress = read_run_progress(
+                    run_dir,
+                    validate_request_outputs=False,
+                )
+            except (FileNotFoundError, OSError, ValueError):
+                baseline_progress = None
+            if isinstance(baseline_progress, dict):
+                baseline_failure = baseline_progress.get("failure")
+                if isinstance(baseline_failure, dict) and baseline_failure.get("terminal"):
+                    resume_failure_baseline = (
+                        str(baseline_failure.get("stage") or ""),
+                        str(baseline_failure.get("runtimeStage") or ""),
+                        str(baseline_failure.get("message") or ""),
+                    )
             try:
                 target_duration_seconds = _target_duration_seconds_for_run(run_dir)
             except ValueError as exc:
@@ -15335,6 +15896,14 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
                     detail=f"run target duration is invalid: {exc}",
                 ) from exc
 
+            effective_stop = "p710" if resume_mode == "narration_start" else req.stop_target
+            if media_operation is not None:
+                effective_stop = {
+                    "narration_drafts": "p710", "narration": "p730", "narration_bulk": "p730",
+                    "video_prompts": "p830", "video": "p840", "video_bulk": "p840",
+                    "sound": "p860",
+                    "render_freeze": "p910", "render": "p920",
+                }[media_operation.data["kind"]]
             job = {
                 "jobId": job_id,
                 "runId": run_id,
@@ -15343,15 +15912,16 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
                 "title": title,
                 "createMode": create_mode,
                 "resumeMode": resume_mode,
+                "mediaOperationId": media_operation.id if media_operation else None,
                 "targetDurationSeconds": target_duration_seconds,
-                "stopTarget": req.stop_target,
-                "stopTargetNumber": _process_number(req.stop_target),
+                "stopTarget": effective_stop,
+                "stopTargetNumber": _process_number(effective_stop),
                 "currentProcess": current_process,
                 "currentProcessNumber": current_process_number,
                 "pid": os.getpid(),
                 "error": None,
                 "errorCode": None,
-                "message": f"{current_process}から{req.stop_target}へ再開中",
+                "message": f"{current_process}から{effective_stop}へ再開中",
             }
             async with _create_jobs_lock:
                 running_count = sum(
@@ -15384,14 +15954,16 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
                             detail="too many create jobs are running",
                         )
                 _create_jobs[job_id] = job
+                if resume_failure_baseline is not None:
+                    _create_job_failure_baselines[job_id] = resume_failure_baseline
 
             process_store_result = await asyncio.to_thread(
                 _create_process_record_best_effort,
                 job=job,
                 title=title,
                 source=source,
-                stop_target=req.stop_target,
-                generate_images=True,
+                stop_target=effective_stop,
+                generate_images=media_operation is None and resume_mode != "narration_start",
             )
             if process_store_result:
                 job["processStore"] = process_store_result
@@ -15404,13 +15976,14 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
                     "runId": run_id,
                     "fromProcess": current_process,
                     "fromProcessNumber": current_process_number,
-                    "stopTarget": req.stop_target,
+                    "stopTarget": effective_stop,
                     "targetDurationSeconds": target_duration_seconds,
                     "resumeMode": resume_mode,
                     "resumePolicy": (
                         "hash_aware_partial"
                         if resume_mode == "image_only"
-                        else "p500_checkpoint_plan_apply"
+                        else ("authoring_checkpoints_then_p500" if resume_mode == "authoring_subprocess"
+                              else "p500_checkpoint_plan_apply")
                     ),
                     "processStore": process_store_result,
                 },
@@ -15438,11 +16011,7 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
             raise
         _resume_tasks[job_id] = resume_task
         resume_task.add_done_callback(
-            lambda completed, current_job_id=job_id: (
-                _resume_tasks.pop(current_job_id, None)
-                if _resume_tasks.get(current_job_id) is completed
-                else None
-            )
+            lambda completed, current_job_id=job_id: _cleanup_resume_task(completed, current_job_id)
         )
         task_scheduled = True
         return job
@@ -15452,6 +16021,7 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
             if job_reserved:
                 async with _create_jobs_lock:
                     _create_jobs.pop(job_id, None)
+                _create_job_failure_baselines.pop(job_id, None)
             retained_run.close()
         raise
 
@@ -15548,52 +16118,71 @@ async def api_requests(run_id: str, kind: str = Query(pattern="^(asset|scene)$")
             raise
         run_dir = restored
     restore_retained_candidates = is_first_image_retention_restored_run(run_dir)
-    return await asyncio.to_thread(
+    from server.display_reads import shared_read
+    return await shared_read(_display_read_key(run_dir, "images:" + kind), lambda: asyncio.to_thread(
         _request_gallery_payload,
         run_dir=run_dir,
         run_id=run_id,
         kind=kind,
         restore_retained_candidates=restore_retained_candidates,
-    )
+    ))
+
+
+def _display_read_key(run_dir: Path, kind: str) -> tuple:
+    from server.display_reads import file_version
+    root = run_dir.stat()
+    return (str(run_dir), root.st_dev, root.st_ino, kind, *(
+        file_version(run_dir / name) for name in (
+            "video_manifest.md", "state.txt", "state.current.json",
+            "video_generation_requests.md", "image_generation_requests.md",
+        )
+    ))
+
+
+def _narration_display_payload(run_dir: Path) -> dict[str, Any]:
+    from server.display_reads import read_manifest
+    data = read_manifest(run_dir / "video_manifest.md", _extract_manifest_yaml_text)
+    return {
+        "run": {"id": run_dir.name, "path": f"output/{run_dir.name}"},
+        "items": _manifest_narration_items(run_dir, data),
+        "audioSetHash": _manifest_narration_audio_set_hash(data),
+        "progress": read_run_progress(run_dir, validate_request_outputs=False),
+    }
 
 
 @router.get("/api/image-gen/narration-items")
 async def api_narration_items(run_id: str) -> dict[str, Any]:
+    from server.display_reads import shared_read
     run_dir = safe_run_dir(run_id, ROOT)
-    try:
+    async def read():
         async with _serialized_run_write(run_dir, "run_artifacts"):
-            _manifest_path, _manifest_original, manifest_data = _read_manifest_data(run_dir)
-            items = _manifest_narration_items(run_dir, manifest_data)
-            audio_set_hash = _manifest_narration_audio_set_hash(manifest_data)
-            progress = read_run_progress(run_dir)
+            return await _run_blocking_with_cancel_barrier(_narration_display_payload, run_dir)
+    try:
+        return await shared_read(_display_read_key(run_dir, "narration"), read)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _video_display_payload(run_dir: Path) -> dict[str, Any]:
+    from server.display_reads import read_manifest
+    data = read_manifest(run_dir / "video_manifest.md", _extract_manifest_yaml_text)
     return {
-        "run": {"id": run_id, "path": f"output/{run_id}"},
-        "items": items,
-        "audioSetHash": audio_set_hash,
-        "progress": progress,
+        "run": {"id": run_dir.name, "path": f"output/{run_dir.name}"},
+        "items": _manifest_video_items(run_dir, data),
+        "references": [reference_to_api(option) for option in list_reference_options(run_dir)],
+        "progress": read_run_progress(run_dir, validate_request_outputs=False),
     }
 
 
 @router.get("/api/image-gen/video-items")
 async def api_video_items(run_id: str) -> dict[str, Any]:
+    from server.display_reads import shared_read
     run_dir = safe_run_dir(run_id, ROOT)
     try:
-        _manifest_path, _manifest_original, manifest_data = _read_manifest_data(
-            run_dir
-        )
-        items = _manifest_video_items(run_dir, manifest_data)
+        return await shared_read(_display_read_key(run_dir, "video"),
+                                 lambda: asyncio.to_thread(_video_display_payload, run_dir))
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
-        "run": {"id": run_id, "path": f"output/{run_id}"},
-        "items": items,
-        "references": [
-            reference_to_api(option) for option in list_reference_options(run_dir)
-        ],
-        "progress": read_run_progress(run_dir),
-    }
 
 
 @router.get("/api/image-gen/progress")
@@ -15601,7 +16190,7 @@ async def api_progress(run_id: str) -> dict[str, Any]:
     run_dir = safe_run_dir(run_id, ROOT)
     return {
         "run": {"id": run_id, "path": f"output/{run_id}"},
-        "progress": read_run_progress(run_dir),
+        "progress": await asyncio.to_thread(read_run_progress, run_dir, validate_request_outputs=False),
     }
 
 
@@ -15833,7 +16422,143 @@ async def _create_video_prompts_locked(
     }
 
 
+async def _run_media_item(key: str, request: dict[str, Any], action: Callable) -> dict[str, Any]:
+    from toc.media_resume import ACTIVE_MEDIA_JOURNAL, output_paths
+    journal = ACTIVE_MEDIA_JOURNAL.get()
+    if journal is None:
+        return await action()
+    journal.verify_inputs()
+    cached = journal.cached(key, request)
+    if cached is not None:
+        if all(_probe_media_duration_seconds(journal.root / path) is not None for path in output_paths(cached)):
+            return cached
+    result = await action()
+    journal.complete_item(key, request, result)
+    return result
+
+
+async def _dispatch_media_operation(kind: str, req: BaseModel, function: Callable) -> dict[str, Any]:
+    if kind in {"video_bulk", "narration_drafts", "video_prompts", "render_freeze"}:
+        return await function(req)
+    if kind == "narration_bulk":
+        if len({item.item_id for item in req.items}) != len(req.items):
+            raise ValueError("bulk narration generation contains duplicate item_id values")
+        semaphore = asyncio.Semaphore(req.concurrency)
+        async def one(item):
+            async with semaphore:
+                try:
+                    return await api_narration_generate(NarrationGenerateRequest(run_id=req.run_id, **item.model_dump()))
+                except Exception as exc:
+                    return {"itemId": item.item_id, "status": "failed", "error": str(exc), "candidates": []}
+        results = await asyncio.gather(*(one(item) for item in req.items))
+        from toc.media_resume import result_failed
+        payload = {"runId": req.run_id, "status": "partial_failure" if result_failed(results) else "completed"}
+        payload.update({"results": [r.get("item", r) for r in results],
+            "updated": [selector for r in results for selector in r.get("updated", [])],
+            "audioReadyUpdated": [], "durationUpdated": [], "durationReady": False,
+            "progress": read_run_progress(safe_run_dir(req.run_id, ROOT))})
+        return payload
+    if kind == "video":
+        # Each candidate is checkpointed inside _generate_video_candidates.
+        return await function(req)
+    key = kind + ":" + str(getattr(req, "item_id", "final"))
+    return await _run_media_item(key, req.model_dump(mode="json"), lambda: function(req))
+
+
+async def _finish_media_operation(journal, action: Callable) -> dict[str, Any]:
+    """Persist provider completion before releasing a lease on disconnect/cancellation."""
+    from toc.media_resume import result_failed
+    worker = asyncio.create_task(action())
+    cancellation = None
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+        except Exception:
+            break
+    try:
+        result = worker.result()
+        success = not result_failed(result) and all(
+            item.get("status") == "completed" for item in journal.data["items"].values()
+        )
+        journal.finish(success)
+        if journal.data["status"] != "completed" and not result_failed(result):
+            raise RuntimeError("media result could not be verified; operation remains resumable")
+    except BaseException:
+        journal.finish(False)
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return result
+
+
+def _durable_media_operation(kind: str):
+    from functools import wraps
+    def decorate(function):
+        @wraps(function)
+        async def wrapped(req):
+            from toc.media_resume import ACTIVE_MEDIA_JOURNAL, MediaJournal
+            current = ACTIVE_MEDIA_JOURNAL.get()
+            if current is not None:
+                if current.request.get("run_id") != req.run_id:
+                    raise ValueError("media operation run changed")
+                return await _dispatch_media_operation(kind, req, function)
+            run_dir = safe_run_dir(req.run_id, ROOT)
+            lease_id = "media-" + uuid.uuid4().hex
+            try:
+                lease = await _acquire_run_execution_lease(lease_id, run_dir)
+            except FileLockUnavailable as exc:
+                raise HTTPException(status_code=409, detail="run generation/resume is already active") from exc
+            try:
+                with bind_run_root(run_dir, expected_identity=lease.identity, descriptor=lease.run_descriptor):
+                    journal = MediaJournal.create(run_dir, kind, req.model_dump(mode="json"))
+                    token = ACTIVE_MEDIA_JOURNAL.set(journal)
+                    try:
+                        result = await _finish_media_operation(journal,
+                            lambda: _dispatch_media_operation(kind, req, function))
+                        return {**result, "operationId": journal.id}
+                    finally:
+                        ACTIVE_MEDIA_JOURNAL.reset(token)
+            finally:
+                await _release_run_execution_lease(lease_id)
+        return wrapped
+    return decorate
+
+
+async def _resume_saved_media_operation(run_dir: Path, operation_id: str) -> dict[str, Any]:
+    from toc.media_resume import ACTIVE_MEDIA_JOURNAL, MediaJournal
+    journal = MediaJournal.load(run_dir, operation_id)
+    journal.verify_inputs()
+    handlers = {
+        "sound": (_sound_design_api.durable_generate, _sound_design_api.SoundGenerateRequest),
+        "narration": (api_narration_generate, NarrationGenerateRequest),
+        "narration_bulk": (api_narration_generate_bulk, BulkNarrationGenerateRequest),
+        "video": (api_video_generate, VideoGenerateRequest),
+        "video_bulk": (api_video_generate_bulk, BulkVideoGenerateRequest),
+        "render": (api_final_render, FinalRenderRequest),
+        "narration_drafts": (api_create_narration_drafts, NarrationDraftCreateRequest),
+        "video_prompts": (api_create_video_prompts, VideoPromptCreateRequest),
+        "render_freeze": (api_render_inputs_freeze, RenderFreezeRequest),
+    }
+    handler, model = handlers[journal.data["kind"]]
+    request = model.model_validate(journal.request)
+    if request.run_id != run_dir.name:
+        raise ValueError("saved media operation belongs to another run")
+    journal.data["status"] = "running"
+    journal.save()
+    token = ACTIVE_MEDIA_JOURNAL.set(journal)
+    try:
+        result = await _finish_media_operation(journal, lambda: handler(request))
+        if journal.data["status"] != "completed":
+            raise RuntimeError("media operation still has failed items; completed items were preserved")
+        return {**result, "operationId": journal.id}
+    finally:
+        ACTIVE_MEDIA_JOURNAL.reset(token)
+
+
 @router.post("/api/image-gen/video-prompts/create")
+@_durable_media_operation("video_prompts")
 async def api_create_video_prompts(req: VideoPromptCreateRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
     # Keep request materialization and provider binding in one revision
@@ -15887,7 +16612,7 @@ async def api_video_file(run_id: str, path: str) -> FileResponse:
 
 
 @router.get("/api/image-gen/audio-file")
-async def api_audio_file(run_id: str, path: str) -> FileResponse:
+async def api_audio_file(run_id: str, path: str, preview_item: str | None = None) -> FileResponse:
     run_dir = safe_run_dir(run_id, ROOT)
     try:
         _validate_run_relative_audio_path(run_dir, path, must_exist=True)
@@ -15896,6 +16621,30 @@ async def api_audio_file(run_id: str, path: str) -> FileResponse:
     target = resolve_run_relative(run_dir, path)
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="file not found")
+    if preview_item is not None:
+        from toc.narration_audio import narration_preview, DEFAULT_LEAD_IN_SECONDS
+        _manifest, _text, data = _read_manifest_data(run_dir)
+        item = _target_by_item_id(data, preview_item)
+        if item is None:
+            raise HTTPException(status_code=404, detail="narration item not found")
+        node = _dict_value(item.get("cut"))
+        narration = _dict_value(_dict_value(node.get("audio")).get("narration"))
+        allowed = {str(narration.get("output") or "")}
+        allowed.update(str(c.get("output") or "") for c in _list_value(narration.get("candidates")) if isinstance(c, dict))
+        if path not in allowed:
+            raise HTTPException(status_code=400, detail="audio does not belong to this narration item")
+        if narration.get("tool") == "silent":
+            return FileResponse(target)
+        offset = float(_dict_value(node.get("render")).get("narration_offset_seconds", DEFAULT_LEAD_IN_SECONDS))
+        measured = await asyncio.to_thread(_probe_media_duration_seconds, target)
+        if measured is None:
+            raise HTTPException(status_code=422, detail="narration duration could not be measured")
+        duration = max(float(_dict_value(node.get("video_generation")).get("duration_seconds") or 0), math.ceil(measured + offset))
+        try:
+            target = await asyncio.to_thread(narration_preview, target,
+                _render_asset_dir(run_dir, "narration_preview"), offset_seconds=offset, duration_seconds=duration)
+        except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            raise HTTPException(status_code=422, detail="narration preview preparation failed") from exc
     media_type = {
         ".mp3": "audio/mpeg",
         ".wav": "audio/wav",
@@ -15941,6 +16690,7 @@ async def api_candidates(
 
 
 @router.post("/api/image-gen/narration-drafts/create")
+@_durable_media_operation("narration_drafts")
 async def api_create_narration_drafts(req: NarrationDraftCreateRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
     try:
@@ -16033,6 +16783,7 @@ async def api_narration_text_save(req: NarrationTextSaveRequest) -> dict[str, An
 
 
 @router.post("/api/image-gen/narration-generate")
+@_durable_media_operation("narration")
 async def api_narration_generate(req: NarrationGenerateRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
     item = NarrationGenerateItem.model_validate(req.model_dump(exclude={"run_id"}))
@@ -16089,6 +16840,7 @@ async def api_narration_generate(req: NarrationGenerateRequest) -> dict[str, Any
 
 
 @router.post("/api/image-gen/narration-generate-bulk")
+@_durable_media_operation("narration_bulk")
 async def api_narration_generate_bulk(req: BulkNarrationGenerateRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
     try:
@@ -16170,6 +16922,7 @@ async def api_narration_audio_approve(req: NarrationAudioApproveRequest) -> dict
     return {"runId": req.run_id, "status": "selected", **result, "progress": progress}
 
 @router.post("/api/image-gen/video-generate")
+@_durable_media_operation("video")
 async def api_video_generate(req: VideoGenerateRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
     item = VideoGenerateItem.model_validate(req.model_dump(exclude={"run_id"}))
@@ -16185,6 +16938,7 @@ async def api_video_generate(req: VideoGenerateRequest) -> dict[str, Any]:
 
 
 @router.post("/api/image-gen/video-generate-bulk")
+@_durable_media_operation("video_bulk")
 async def api_video_generate_bulk(req: BulkVideoGenerateRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
     for item in req.items:
@@ -16220,6 +16974,7 @@ async def api_video_generate_bulk(req: BulkVideoGenerateRequest) -> dict[str, An
 
 
 @router.post("/api/image-gen/render-inputs/freeze")
+@_durable_media_operation("render_freeze")
 async def api_render_inputs_freeze(req: RenderFreezeRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
     try:
@@ -16233,6 +16988,7 @@ async def api_render_inputs_freeze(req: RenderFreezeRequest) -> dict[str, Any]:
 
 
 @router.post("/api/image-gen/final-render")
+@_durable_media_operation("render")
 async def api_final_render(req: FinalRenderRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
     try:
@@ -17649,3 +18405,10 @@ async def api_chat_turn(req: ChatTurnRequest) -> dict[str, Any]:
         if method and str(method).endswith("/requestApproval"):
             approvals.append({"method": method, "params": params})
     return {"sessionId": req.session_id, "threadId": thread_id, "message": "\n".join(messages).strip(), "approvals": approvals}
+
+
+# Register p860 after the shared runtime and render helpers are defined.
+from server import sound_design_api as _sound_design_api
+_sound_design_api.install(sys.modules[__name__])
+from server import production_tools_api as _production_tools_api
+_production_tools_api.install(sys.modules[__name__])

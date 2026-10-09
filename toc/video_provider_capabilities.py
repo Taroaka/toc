@@ -12,6 +12,9 @@ class VideoProviderCapabilities:
     reference_images_max: int
     supported: bool = True
     unsupported_reason: str = ""
+    native_audio: bool = False
+    reference_audio: bool = False
+    reference_limit_verified: bool = True
 
 
 def _canonical_video_tool(tool: str) -> str:
@@ -57,6 +60,16 @@ def resolve_video_provider_capabilities(
         "reference_images",
         "reference_to_video",
     }
+
+    if normalized_tool == 'higgsfield':
+        image_model = 'bytedance/seedance-2.5/image-to-video'
+        reference_model = 'bytedance/seedance-2.5/reference-to-video'
+        expected = reference_model if reference_mode else image_model
+        valid_mode = reference_mode or normalized_mode in {'image_to_video', 'first_last_frame'}
+        supported = valid_mode and normalized_model == expected
+        return VideoProviderCapabilities(4, 30, 1 if reference_mode else 0, 32 if reference_mode else 0,
+            supported=supported, unsupported_reason='' if supported else 'Higgsfield model/input operation is not supported',
+            native_audio=True, reference_audio=False, reference_limit_verified=not reference_mode)
 
     if normalized_tool == "seedance":
         # Current Seedance 1.0 endpoints share the 2–12 second task window.

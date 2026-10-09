@@ -1,0 +1,3 @@
+- [x] Backend regression tests and durable p710 continuation (59 passed)
+- [x] Frontend waiting predicate, request, label and tests (20 passed, build succeeded)
+- [x] Independent backend/frontend review and integration tests; deploy without starting production work

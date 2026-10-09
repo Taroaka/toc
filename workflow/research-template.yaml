@@ -11,12 +11,26 @@ aliases: ["string"]
 
 # Story materials（必須）
 story_materials:
-  canonical_story_dump: "string" # 原話/通俗版/重要版の筋を省略しすぎず厚めに書く。
+  canonical_story_dump: "string" # 調査した筋を厚く書く。複数版は variant_id を明示して分け、未選択の版を統合しない。
   chronological_events:
     - event_id: "E1"
       event: "string"            # scene ではなく出来事単位。
       sources: ["S1"]
+      variant_ids: ["V1"]       # この出来事を確認した版。空配列は所属未確認であり、全版共通を意味しない。
+      evidence_kind: "explicit_text|source_inference|external_interpretation"
+      evidence_refs: ["P1"]
       confidence: 0.0
+  # 資料で裏付けられる因果だけ。隣接する全出来事をつなぐ必要はない。
+  causal_links: []
+  # - link_id: "CL1"
+  #   cause_event_id: "E1"
+  #   effect_event_id: "E2"      # 実在する別の event_id
+  #   explanation: "string"
+  #   variant_ids: ["V1"]
+  #   evidence_kind: "explicit_text|source_inference|external_interpretation"
+  #   sources: ["S1"]
+  #   evidence_refs: ["P1"]
+  #   basis: "string"          # この資料が因果を支える理由。推論・外部解釈はその旨を明記。
   characters:
     - character_id: "C1"
       name: "string"
@@ -42,6 +56,7 @@ story_materials:
       story_value: "string"
   adaptation_options:
     - option_id: "A1"
+      evidence_kind: "creative_proposal" # 任意案。採用・構成・演出の設計は p200 が担当。
       proposal: "string"
       source_basis: ["S1"]
       risks: ["string"]
@@ -67,6 +82,13 @@ source_passages:
 variants:
   - variant_id: "V1"
     name: "string"
+    story_dump: "string"       # この版単独の筋。単一版でも版・底本を識別する。
+    event_ids: ["E1"]
+    familiarity:
+      audience: "string" # 依頼言語・対象地域など
+      basis: "string" # 普及・受容の根拠。古さや資料数だけで判定しない。
+      source_refs: []
+      uncertainty: "string" # 未確認なら未確認と記す。数値を捏造しない。
     differences: ["string"]
     impact_on_story: "string"
     sources: ["S1"]
@@ -98,6 +120,10 @@ facts:
     - fact_id: "F1"
       claim: "string"
       kind: "plot|character|setting|theme|symbol|historical_context|interpretation|other"
+      material_path: "/story_materials/chronological_events/0/event" # 対象記述への JSON Pointer。関連箇所がなければ空文字。
+      variant_ids: ["V1"]
+      evidence_kind: "explicit_text|source_inference|external_interpretation"
+      evidence_refs: ["P1"]
       confidence: 0.0
       verification: "verified|partially_verified|unverified"
       sources: ["S1"]
@@ -116,6 +142,7 @@ open_questions:
     question: "string"
     known_theories: ["string"]
     investigation_status: "unverified|in_progress|verified"
+    resolution_need: "research_required|p200_decision|non_blocking"
     sources: ["S1"]
 
 handoff_to_story:
@@ -139,4 +166,4 @@ evaluation_contract:
   target_questions: ["string"]
   must_cover: ["canonical_story_dump", "chronological_events", "source_passages", "conflicts"]
   must_resolve_conflicts: ["string"]
-  done_when: ["p200 が追加調査なしで scene/beat 候補を作れる"]
+  done_when: ["原作の筋・資料が支える因果・版別の根拠を追え、調査上の不足と p200 の選択事項を区別できる"]

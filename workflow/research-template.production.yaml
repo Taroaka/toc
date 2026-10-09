@@ -15,14 +15,28 @@ aliases: ["string"]
 
 # === 0) Story materials（最優先・必須） ===
 story_materials:
-  canonical_story_dump: "string" # 20-60行目安。誰が/何を求め/何が起き/どう決着するかを厚く書く。
+  canonical_story_dump: "string" # 20-60行目安。複数版は variant_id を明示して分け、未選択の版を統合しない。
   chronological_events:
     - event_id: "E1"
       event: "string"            # scene ではなく出来事単位
-      story_function: "setup|turn|reversal|revelation|climax|aftermath"
+      story_function: "setup|turn|reversal|revelation|climax|aftermath" # 任意の観察メモ。p200 の構成判断を拘束しない。
       involved_characters: ["C1"]
-      source_refs: ["S1", "P1"]
+      sources: ["S1"]          # source_inventory の source_id のみ。抜粋との対応は source_passages.related_material_refs に event_id を記録。
+      variant_ids: ["V1"]       # この出来事を確認した版。空配列は所属未確認であり、全版共通を意味しない。
+      evidence_kind: "explicit_text|source_inference|external_interpretation"
+      evidence_refs: ["P1"]
       confidence: 0.0
+  # 資料で裏付けられる因果だけ。隣接する全出来事をつなぐ必要はない。
+  causal_links: []
+  # - link_id: "CL1"
+  #   cause_event_id: "E1"
+  #   effect_event_id: "E2"      # 実在する別の event_id
+  #   explanation: "string"
+  #   variant_ids: ["V1"]
+  #   evidence_kind: "explicit_text|source_inference|external_interpretation"
+  #   sources: ["S1"]
+  #   evidence_refs: ["P1"]
+  #   basis: "string"          # この資料が因果を支える理由。推論・外部解釈はその旨を明記。
   characters:
     - character_id: "C1"
       name: "string"
@@ -58,6 +72,7 @@ story_materials:
       source_refs: ["S1"]
   adaptation_options:
     - option_id: "A1"
+      evidence_kind: "creative_proposal" # 任意案。採用・構成・演出の設計は p200 が担当。
       proposal: "string"
       source_basis: ["S1"]
       expected_gain: "string"
@@ -85,6 +100,13 @@ source_passages:
 variants:
   - variant_id: "V1"
     name: "string"
+    story_dump: "string"       # この版単独の筋。単一版でも版・底本を識別する。
+    event_ids: ["E1"]
+    familiarity:
+      audience: "string" # 依頼言語・対象地域など
+      basis: "string" # 普及・受容の根拠。古さや資料数だけで判定しない。
+      source_refs: []
+      uncertainty: "string" # 未確認なら未確認と記す。数値を捏造しない。
     differences: ["string"]
     impact_on_story: "string"
     source_refs: ["S1"]
@@ -118,6 +140,10 @@ facts:
     - fact_id: "F1"
       claim: "string"
       kind: "plot|character|setting|theme|symbol|historical_context|interpretation|other"
+      material_path: "/story_materials/chronological_events/0/event" # 対象記述への JSON Pointer。関連箇所がなければ空文字。
+      variant_ids: ["V1"]
+      evidence_kind: "explicit_text|source_inference|external_interpretation"
+      evidence_refs: ["P1"]
       confidence: 0.0
       verification: "verified|partially_verified|unverified"
       sources: ["S1"]
@@ -143,6 +169,7 @@ open_questions:
     question: "string"
     known_theories: ["string"]
     investigation_status: "unverified|in_progress|verified"
+    resolution_need: "research_required|p200_decision|non_blocking"
     sources: ["S1"]
     p200_handling: "ignore|treat_as_hypothesis|ask_user|additional_research"
 

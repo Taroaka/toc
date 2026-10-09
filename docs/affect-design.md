@@ -304,3 +304,7 @@ viewer_contract:
 - [Google Cloud Blog (2018) How 20th Century Fox uses ML to predict a movie audience](https://cloud.google.com/blog/products/ai-machine-learning/how-20th-century-fox-uses-ml-to-predict-a-movie-audience)
 - [NECSUS (2020) Ghost in the (Hollywood) machine](https://necsus-ejms.org/ghost-in-the-hollywood-machine-emergent-applications-of-artificial-intelligence-in-the-film-industry/)
 - [COGNIMUSE (2017) intended / expected / experienced emotion annotations](https://link.springer.com/article/10.1186/s13640-017-0194-1)
+
+## 音で支える感情と物語理解
+
+BGM・SEはvalence/arousalの強弱だけで選ばず、人物への帰属、次の出来事の予想、空間と身体性、記憶と余韻も考える。[音響の研究資料](research/film-sound-emotion.md)を参照。楽器/調性/音量から感情を一意に決める対応表は置かない。高揚と心を動かされる感覚、作者の狙いと観客の実感を区別し、音を引く案も残す。既存の音・語りの設計欄を使い、追加の感動スコアや合否閾値は導入しない。

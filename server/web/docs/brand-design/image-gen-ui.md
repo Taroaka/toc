@@ -77,3 +77,7 @@ repo 内挿入は canonical output path を上書きする可能性があるた�
 - generation in progress: 対象 card の button と candidate area で状態表示する
 
 画像生成ログは right chat pane に流さない。
+
+## BGM・SE workspace
+
+動画と最終の間にBGM・SEタブを配置する。p860の動画承認、編集可能な生成案、候補音声の試聴・採用、音量・開始位置・長さ・fade・loop、設定確定を同じ画面で扱う。状態はサーバー正本から復元し、古い承認や未確定の設定は最終結合へ進めない。追加音なしもユーザーの明示的な確定として記録する。詳細は `docs/implementation/sound-design.md`。

@@ -12,7 +12,8 @@ What it does:
   1) Generate reusable assets and scene images from video_manifest.md
   2) Generate narration audio
   3) Generate video clips
-  4) Build ffmpeg concat lists and render final video.mp4 (1280x720, 24fps)
+  4) Wait for video approval and BGM/SE settings in p860
+  5) Freeze clips, narration and BGM/SE; render final video.mp4 (1280x720, 24fps)
 USAGE
 }
 
@@ -213,40 +214,32 @@ python scripts/generate-assets-from-manifest.py \
   --video-negative-prompt "fade out, fade to black, crossfade, dissolve, cut, hard cut, montage, timelapse, jump cut, title card, subtitle text, on-screen text, watermark"
 
 require_frozen_narration_binding
-if [[ "$revision_aware_narration" == "true" ]]; then
-  python scripts/freeze-approved-render-inputs.py \
-    --run-dir "$run_dir" \
-    --output "video.mp4"
+stage="sound_design"
+if python scripts/freeze-approved-render-inputs.py --run-dir "$run_dir" --check-sound-only; then
+  :
 else
-  python scripts/build-clip-lists.py --manifest "$manifest" --out-dir "$run_dir"
+  code=$?
+  if [[ "$code" != "3" ]]; then exit "$code"; fi
+  echo "動画生成が完了しました。フロントのBGM・SEで動画承認と音の設定確定を行い、最終結合へ進んでください。"
+  exit 0
 fi
-
-narration_list="${run_dir%/}/video_narration_list.txt"
-audio="${run_dir%/}/assets/audio/narration.mp3"
+freeze_result=$(python scripts/freeze-approved-render-inputs.py --run-dir "$run_dir" --output "video.mp4")
+clip_list=$(printf '%s' "$freeze_result" | python -c 'import json,sys; print(json.load(sys.stdin)["clipList"])')
+narration_list=$(printf '%s' "$freeze_result" | python -c 'import json,sys; print(json.load(sys.stdin)["narrationList"])')
+sound_plan=$(printf '%s' "$freeze_result" | python -c 'import json,sys; print(json.load(sys.stdin)["soundPlan"])')
 stage="render"
 python scripts/toc-state.py append --run-dir "$run_dir" --set "runtime.stage=${stage}"
 require_frozen_narration_binding
-if [[ -s "$narration_list" ]]; then
-  scripts/render-video.sh \
-    --clip-list "${run_dir%/}/video_clips.txt" \
-    --narration-list "$narration_list" \
-    --fps 24 --size 1280x720 \
-    --out "${run_dir%/}/video.mp4"
-elif [[ -f "$audio" ]]; then
-  scripts/render-video.sh \
-    --clip-list "${run_dir%/}/video_clips.txt" \
-    --audio "$audio" \
-    --fps 24 --size 1280x720 \
-    --out "${run_dir%/}/video.mp4"
-else
-  echo "Narration audio not found (rendering silent video): $audio" >&2
-  scripts/render-video.sh \
-    --clip-list "${run_dir%/}/video_clips.txt" \
-    --fps 24 --size 1280x720 \
-    --out "${run_dir%/}/video.mp4"
-fi
+scripts/render-video.sh \
+  --clip-list "${run_dir%/}/${clip_list}" \
+  --narration-list "${run_dir%/}/${narration_list}" \
+  --sound-plan "${run_dir%/}/${sound_plan}" \
+  --fps 24 --size 1280x720 \
+  --out "${run_dir%/}/video.mp4"
 
 require_frozen_narration_binding
+python scripts/freeze-approved-render-inputs.py --run-dir "$run_dir" \
+  --verify-sound-snapshot "${run_dir%/}/${sound_plan}"
 python scripts/check-final-video-duration-gate.py \
   --run-dir "$run_dir" \
   --video "${run_dir%/}/video.mp4"

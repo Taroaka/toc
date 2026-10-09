@@ -1,0 +1,8 @@
+# 設計
+
+- 共通runtime decoderで安全な構文正規化を実施しreceiptをcallbackで返す。元のresponse provenanceは維持。
+- それ以外の対応可能な構文不正はsyntax専用の小さい文字位置差分を生成。文字列内容や数値/IDを変更せず、成功後も通常の構造検証を実施する。曖昧な切断/引用符/構造変更は内容を推測して補わない。
+- story_field_repairが実際の不正path/型/許可IDを収集し、strict patch schemaを作成。scene_idとbase_digest、path allowlist、値型を検証してdeep copyへ適用。
+- p220はfield補正をscene丸ごと補正より優先。因果やhandoff等の内容不整合だけ従来scene authorへ返す。スキーマを緩めて合格にはしない。
+- CLIのfield_repairはモデル設定を既存repairモデルのまま継承し、output_schemaを直接app-serverへ送る。全story再出力用envelopeで包まない。
+- deterministic修復は補正budgetを消費しない。LLMによるsyntax/field/narrative補正は分類をログに残し、通常の共有budgetを使う。

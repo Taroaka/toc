@@ -82,6 +82,11 @@ internal references は diagnostics に留め、prompt 本文へ入れない。
 
 ## Compiler contract
 
+`cinematic_contract.execution` があるcutは、解決済みの光・焦点・演技・物理を
+`cinematic_execution_projection_v1` / `cinematic_execution_compiler_v1`として既存groupへ投影する。
+明示された項目を固定件数で切り捨てない。`video_generation.native_audio` は実行時の音声設定を
+所有し、p400の発話原稿から解決された台詞を使う。詳細は[撮影方針](cinematic-language.md)を参照。
+
 ```yaml
 api_prompt_payload:
   policy_version: video_api_prompt_v1
@@ -222,4 +227,3 @@ compiler. Do not patch compiled prompt text to hide a source error.
 - `docs/implementation/video-integration.md`
 - `docs/data-contracts.md`
 - `workflow/playbooks/video-generation/kling.md`
-

@@ -46,7 +46,7 @@ def test_bulk_video_generation_materializes_target_set_once_before_workers_start
     source = _callback_source("generateVideoItems")
 
     materialize_index = source.index("await materializeVideoPrompts(targetItems)")
-    workers_start_index = source.index("await Promise.all")
+    workers_start_index = source.index("'/api/image-gen/video-generate-bulk'")
 
     assert "await saveCurrentReview()" not in source
     assert materialize_index < workers_start_index
@@ -75,11 +75,11 @@ def test_generation_payload_keeps_frontend_prompt_as_authoring_source() -> None:
     source = _callback_source("buildVideoGenerateItem")
 
     assert "prompt: item.videoDraftPrompt" in source
-    assert "item.videoInputMode === 'reference_images' ? ''" in source
+    assert "videoInputReferences(" in source
 
 
 def test_reference_image_mode_does_not_recreate_a_first_frame_from_references() -> None:
-    assert "videoInputMode?: string" in FRONTEND_SOURCE
+    assert "videoInputMode?:" in FRONTEND_SOURCE
     assert "item.videoInputMode === 'reference_images'" in FRONTEND_SOURCE
     materialize_source = _callback_source("buildItemPayload")
-    assert "item.videoInputMode === 'reference_images' ? ''" in materialize_source
+    assert "videoInputReferences(" in materialize_source

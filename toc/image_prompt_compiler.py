@@ -7,6 +7,8 @@ fields outside the provider-facing prompt by construction.
 
 from __future__ import annotations
 
+from toc.production_diagnostics import AuthoringValidationError
+
 import hashlib
 import json
 import re
@@ -21,7 +23,7 @@ from toc.image_prompt_projection_registry import (
 
 
 IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v2"
-IMAGE_PROMPT_COMPILER_VERSION = "conditional_drawable_prompt_compiler_v3"
+IMAGE_PROMPT_COMPILER_VERSION = "conditional_drawable_prompt_compiler_v4"
 DRAWABLE_PROMPT_IR_SCHEMA_VERSION = "drawable_prompt_ir_v1"
 
 FRAGMENT_GROUP_ORDER = DRAWABLE_PROMPT_GROUP_ORDER
@@ -178,6 +180,9 @@ def build_drawable_prompt_ir(
 
     plan = _mapping(first_frame_visual_plan)
     characters = _dedupe_strings(character_ids)
+    unpeopled = plan.get("cut_role") == "sub"
+    if unpeopled and (characters or _mapping(plan.get("reference_binding")).get("character_references")):
+        raise AuthoringValidationError("b_roll.character_reference_forbidden")
     objects = _dedupe_strings(object_ids)
     locations = _dedupe_strings(location_ids)
     references = _dedupe_strings(reference_images)
@@ -198,19 +203,24 @@ def build_drawable_prompt_ir(
         *visual_evidence,
     )
     if not current_moment:
-        raise ValueError("drawable_prompt_current_moment_missing")
+        raise AuthoringValidationError("drawable_prompt_current_moment_missing")
 
     primary_subject = _first_drawable_text(primary_node.get("name"), primary_node.get("label"))
     if not primary_subject or primary_subject in {*characters, *objects, *locations}:
         primary_subject = ""
 
     fragments: list[DrawablePromptFragment] = []
-    _append_fragment(fragments, "style", "実写映画調、自然な映画照明、実物セットとして見える質感。")
+    from toc.cinematic_language import language_text
+    film_text = language_text(_mapping(plan.get('film_language')), image=True)
+    _append_fragment(fragments, "style", "実写映画調、自然な映画照明、実物セットとして見える質感。"
+                     + ("\n" + film_text if film_text else ""))
     if normalized_story_time:
         _append_fragment(
             fragments,
             "story_time",
-            f"{render_projection_value_marker('story_time', _sentence_body(normalized_story_time))}。衣装、髪型、建築、生活道具、素材、技術水準をこの時代に整合させる。",
+            f"{render_projection_value_marker('story_time', _sentence_body(normalized_story_time))}。"
+            + ("建築、生活道具、素材、技術水準をこの時代に整合させる。" if unpeopled
+               else "衣装、髪型、建築、生活道具、素材、技術水準をこの時代に整合させる。"),
         )
     if normalized_scene_time_of_day:
         _append_fragment(
@@ -260,20 +270,24 @@ def build_drawable_prompt_ir(
     character_text = _character_fragment(plan, characters)
     if characters:
         if not character_text:
-            raise ValueError("drawable_prompt_character_state_missing")
+            raise AuthoringValidationError("drawable_prompt_character_state_missing")
         _append_fragment(fragments, "characters", character_text)
     if objects:
         object_text = _object_fragment(plan, current_moment, objects)
         if not object_text:
-            raise ValueError("drawable_prompt_object_state_missing")
+            raise AuthoringValidationError("drawable_prompt_object_state_missing")
         _append_fragment(fragments, "objects", object_text)
     if locations:
         location_text = _location_fragment(composition)
         if not location_text:
-            raise ValueError("drawable_prompt_location_state_missing")
+            raise AuthoringValidationError("drawable_prompt_location_state_missing")
         _append_fragment(fragments, "location", location_text)
 
-    _append_fragment(fragments, "composition", _composition_fragment(composition))
+    composition_text = _composition_fragment(composition)
+    if plan.get('geometry'):
+        from toc.spatial_previs import geometry_prompt
+        composition_text += '\n' + geometry_prompt(plan['geometry'])
+    _append_fragment(fragments, "composition", composition_text)
     _append_fragment(
         fragments,
         "light_material",
@@ -292,6 +306,14 @@ def build_drawable_prompt_ir(
     constraint_lines = [
         "画面内テキスト、字幕、ロゴ、ウォーターマーク、アニメ、漫画、イラストを入れない。"
     ]
+    visible_states = [_clean_drawable_text(item) for item in _list(plan.get("authored_visible_state_facts"))]
+    if any(visible_states):
+        constraint_lines.append("開始画で見える状態は、" + "、".join(value for value in visible_states if value) + "。")
+    if unpeopled:
+        constraint_lines.append("人物、顔、身体、手足、群衆、人影、シルエット、人物の反射・映り込みを一切入れない。")
+    preservation = [_clean_drawable_text(item) for item in _list(plan.get("source_preservation_constraints"))]
+    if any(preservation):
+        constraint_lines.append("原作から変更しない条件は、" + "、".join(value for value in preservation if value) + "。")
     if not_yet:
         constraint_lines.append("まだ描かないものは、" + "、".join(not_yet) + "。")
     _append_fragment(fragments, "constraints", "\n".join(constraint_lines))
@@ -305,7 +327,6 @@ def build_drawable_prompt_ir(
                 DrawablePromptFragment(group=fragment.group, text=sanitized_text)
             )
     fragments = sanitized_fragments
-    _validate_positive_drawable_fragments(fragments)
 
     included_groups = {fragment.group for fragment in fragments}
     required_groups = [
@@ -410,7 +431,7 @@ def _bound_character_state_lines(
     if raw_bindings is None:
         return []
     if not isinstance(raw_bindings, (list, tuple)):
-        raise ValueError("drawable_prompt_character_state_bindings_require_sequence")
+        raise AuthoringValidationError("drawable_prompt_character_state_bindings_require_sequence")
 
     visible_ids = set(character_ids)
     seen_ids: set[str] = set()
@@ -431,38 +452,38 @@ def _bound_character_state_lines(
     lines: list[str] = []
     for raw_binding in raw_bindings:
         if not isinstance(raw_binding, Mapping):
-            raise ValueError("drawable_prompt_character_state_binding_invalid")
+            raise AuthoringValidationError("drawable_prompt_character_state_binding_invalid")
         if not isinstance(raw_binding.get("character_id"), str):
-            raise ValueError("drawable_prompt_character_state_binding_invalid")
+            raise AuthoringValidationError("drawable_prompt_character_state_binding_invalid")
         character_id = raw_binding["character_id"].strip()
         if not character_id or character_id not in visible_ids:
-            raise ValueError("drawable_prompt_character_state_binding_unbound")
+            raise AuthoringValidationError("drawable_prompt_character_state_binding_unbound")
         if character_id in seen_ids:
-            raise ValueError("drawable_prompt_character_state_binding_duplicate")
+            raise AuthoringValidationError("drawable_prompt_character_state_binding_duplicate")
         seen_ids.add(character_id)
 
         if not isinstance(raw_binding.get("character_name"), str):
-            raise ValueError("drawable_prompt_character_state_binding_invalid")
+            raise AuthoringValidationError("drawable_prompt_character_state_binding_invalid")
         character_name = _clean_drawable_text(raw_binding.get("character_name"))
         if character_name in seen_names:
-            raise ValueError("drawable_prompt_character_state_binding_identity_conflict")
+            raise AuthoringValidationError("drawable_prompt_character_state_binding_identity_conflict")
         seen_names.add(character_name)
         canonical_name = canonical_name_by_id.get(character_id)
         if canonical_name and canonical_name != character_name:
-            raise ValueError(
+            raise AuthoringValidationError(
                 "drawable_prompt_character_state_binding_identity_mismatch"
             )
 
         raw_appearance = raw_binding.get("appearance_continuity")
         if not isinstance(raw_appearance, Mapping):
-            raise ValueError("drawable_prompt_character_appearance_state_missing")
+            raise AuthoringValidationError("drawable_prompt_character_appearance_state_missing")
         appearance = raw_appearance
         if not isinstance(appearance.get("costume_state"), str):
-            raise ValueError("drawable_prompt_character_appearance_state_invalid")
+            raise AuthoringValidationError("drawable_prompt_character_appearance_state_invalid")
         costume_state = _clean_drawable_text(appearance.get("costume_state"))
         raw_forbidden = appearance.get("forbidden_costume_states", [])
         if not isinstance(raw_forbidden, (list, tuple)):
-            raise ValueError(
+            raise AuthoringValidationError(
                 "drawable_prompt_forbidden_costume_states_require_sequence"
             )
         forbidden_states = [
@@ -472,11 +493,11 @@ def _bound_character_state_lines(
             not isinstance(item, str) or not item.strip()
             for item in raw_forbidden
         ) or any(not value for value in forbidden_states):
-            raise ValueError("drawable_prompt_forbidden_costume_state_invalid")
+            raise AuthoringValidationError("drawable_prompt_forbidden_costume_state_invalid")
         if not character_name or not costume_state:
-            raise ValueError("drawable_prompt_character_appearance_state_missing")
+            raise AuthoringValidationError("drawable_prompt_character_appearance_state_missing")
         if costume_state in forbidden_states:
-            raise ValueError("drawable_prompt_character_appearance_state_conflict")
+            raise AuthoringValidationError("drawable_prompt_character_appearance_state_conflict")
 
         line = f"{character_name}の衣装は、{_sentence_body(costume_state)}を維持し"
         if forbidden_states:
@@ -505,7 +526,9 @@ def _object_fragment(
         meaning = _clean_drawable_text(item.get("story_meaning_in_this_cut"))
         position = _localized_position(item.get("required_screen_position"))
         subject = name or "小道具"
-        details = [value for value in (state, meaning) if value and value != current_moment]
+        # An explicit object state remains valid when the entire first frame
+        # describes that object. Deduplicating it must not erase the binding.
+        details = [value for value in (state, meaning) if value]
         if position:
             details.append(f"{position}に置く")
         if details:
@@ -539,6 +562,9 @@ def _composition_fragment(composition: Mapping[str, Any]) -> str:
         lines.append(f"画面は{shot_size}。")
     if camera:
         lines.append(f"カメラは{_sentence_body(camera)}。")
+    focus = _clean_drawable_text(composition.get("focus_intent"))
+    if focus:
+        lines.append(f"焦点は{_sentence_body(focus)}。")
     return "\n".join(_dedupe_strings(lines))
 
 
@@ -547,10 +573,6 @@ def _light_material_fragment(
     *,
     scene_time_of_day: str = "",
 ) -> str:
-    _validate_material_time_of_day(
-        material,
-        scene_time_of_day=scene_time_of_day,
-    )
     lines: list[str] = []
     light_source = _clean_drawable_text(material.get("light_source"))
     light_direction = _clean_drawable_text(material.get("light_direction"))
@@ -632,95 +654,6 @@ def _reference_fragment(
             )
         )
     return "\n".join(lines)
-
-
-def _validate_material_time_of_day(
-    material: Mapping[str, Any],
-    *,
-    scene_time_of_day: str,
-) -> None:
-    """Reject explicit positive light markers that oppose the canonical daypart."""
-
-    daypart = str(scene_time_of_day or "").strip()
-    if not daypart:
-        return
-    if "真夜中" in daypart or "深夜" in daypart or daypart == "夜":
-        opposing = ("朝日", "真昼", "昼光", "日中", "夕日")
-    elif "夕" in daypart or "日没" in daypart:
-        opposing = ("朝日", "真昼", "昼光", "真夜中", "深夜")
-    elif "昼" in daypart or "日中" in daypart:
-        opposing = ("朝日", "夕方", "日没", "夜", "真夜中", "深夜", "月光")
-    elif "朝" in daypart:
-        opposing = ("朝夕", "夕方", "夕刻", "夕日", "日没", "夜", "真夜中", "深夜", "月光")
-    else:
-        return
-    probe = json.dumps(dict(material), ensure_ascii=False, sort_keys=True)
-    for marker in opposing:
-        sanitized = re.sub(
-            rf"{re.escape(marker)}(?:は|を)?(?:なし|入れない|出さない|使わない)",
-            "",
-            probe,
-        )
-        if marker in sanitized:
-            raise ValueError(
-                f"drawable_prompt_time_of_day_conflict:{daypart}:{marker}"
-            )
-
-
-def _validate_positive_drawable_fragments(
-    fragments: Iterable[DrawablePromptFragment],
-) -> None:
-    positive_groups = {
-        "current_moment",
-        "primary_subject",
-        "characters",
-        "objects",
-        "location",
-        "composition",
-        "light_material",
-        "current_state_delta",
-    }
-    text = "\n".join(
-        fragment.text for fragment in fragments if fragment.group in positive_groups
-    )
-    alternative = re.search(r"(?:または|もしくは|いずれか|\bor\b)", text, re.IGNORECASE)
-    if alternative:
-        context = text[max(0, alternative.start() - 40) : alternative.end() + 40]
-        raise ValueError(
-            f"drawable_prompt_unresolved_alternative:{alternative.group(0)}:{context}"
-        )
-    sequential_overview = re.search(r"(?:→|⇒|->|=>)", text)
-    if sequential_overview:
-        context = text[
-            max(0, sequential_overview.start() - 40) : sequential_overview.end() + 40
-        ]
-        raise ValueError(
-            "drawable_prompt_sequential_overview:"
-            f"{sequential_overview.group(0)}:{context}"
-        )
-    abstract_markers = (
-        "変化点",
-        "変化の証拠",
-        "空間の締めつけ",
-        "人物の制約",
-        "sceneの前提",
-        "次cut",
-        "内面の変化",
-    )
-    for marker in abstract_markers:
-        if marker in text:
-            raise ValueError(f"drawable_prompt_abstract_placeholder:{marker}")
-    broken_join = re.search(
-        r"(?:をの|をと(?:前景|中景|背景)|がを|にはを|のでを|へを|とを)",
-        text,
-    )
-    if broken_join:
-        context = text[
-            max(0, broken_join.start() - 40) : broken_join.end() + 40
-        ]
-        raise ValueError(
-            f"drawable_prompt_broken_japanese_join:{broken_join.group(0)}:{context}"
-        )
 
 
 def _visual_evidence_values(plan: Mapping[str, Any]) -> tuple[str, ...]:

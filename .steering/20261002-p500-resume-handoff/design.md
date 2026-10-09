@@ -1,0 +1,2 @@
+# Design
+After recompile and asset preparation, validate current p400 skeleton before switching manifest_phase to production through bound writes. Refresh grounding before request projection. Production manifests remain unchanged. Unknown phases fail. Server publishes a fallback terminal failure only when subprocess did not already publish a more specific failure; all mutations remain inside run ownership.

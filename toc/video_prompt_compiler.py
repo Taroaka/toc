@@ -141,6 +141,11 @@ def compose_video_render_unit_contract(
     """
 
     contracts = [dict(contract) for contract in source_contracts]
+    for contract in [*contracts, dict(unit_contract or {})]:
+        if "visual_planning_contract" in contract and contract["visual_planning_contract"] != "source_first_v2":
+            raise ValueError("video_render_unit_planning_version_unknown")
+    if len(contracts) > 1 and any(contract.get('cut_role') == 'sub' for contract in contracts):
+        raise ValueError('b_roll.requires_separate_video_render_unit')
     if not contracts:
         return dict(unit_contract or {})
     if len(contracts) == 1:
@@ -186,8 +191,17 @@ def compose_video_render_unit_contract(
             key: value for key, value in continuity_contract.items() if value
         },
     }
+    planning_versions = {c.get("visual_planning_contract", "") for c in contracts}
+    if "source_first_v2" in planning_versions:
+        if planning_versions != {"source_first_v2"}:
+            raise ValueError("video_render_unit_mixed_planning_versions")
+        composed_contract["visual_planning_contract"] = "source_first_v2"
     if unit_contract:
         normalized_unit_contract = dict(unit_contract)
+        if "visual_planning_contract" in composed_contract:
+            if normalized_unit_contract.get("visual_planning_contract", "source_first_v2") != "source_first_v2":
+                raise ValueError("video_render_unit_mixed_planning_versions")
+            normalized_unit_contract["visual_planning_contract"] = "source_first_v2"
         explicit_unit_motion = dict(
             _mapping(normalized_unit_contract.get("motion_contract"))
         )
@@ -196,11 +210,12 @@ def compose_video_render_unit_contract(
                 source_reveal_elements
             )
             normalized_unit_contract["motion_contract"] = explicit_unit_motion
-        return resolve_video_prompt_contract(
-            {},
-            cut_contract=normalized_unit_contract,
-            scene_contract=composed_contract,
+        result = resolve_video_prompt_contract(
+            {}, cut_contract=normalized_unit_contract, scene_contract=composed_contract,
         )
+        if "visual_planning_contract" in composed_contract:
+            result["visual_planning_contract"] = composed_contract["visual_planning_contract"]
+        return result
     return composed_contract
 
 
@@ -309,6 +324,8 @@ def compile_video_api_prompt_v1(
 ) -> dict[str, Any]:
     """Return a deterministic provider prompt payload."""
 
+    if "visual_planning_contract" in _mapping(cut_contract) and _mapping(cut_contract)["visual_planning_contract"] != "source_first_v2":
+        raise ValueError("video_prompt.planning_version_unknown")
     vg = dict(video_generation or {})
     raw_source = str(source_prompt or vg.get("prompt_authoring_source") or vg.get("source_motion_prompt") or "").strip()
     materialized_payload = _mapping(vg.get("api_prompt_payload"))
@@ -356,6 +373,13 @@ def compile_video_api_prompt_v1(
         cut_contract=cut_contract,
         scene_contract=scene_contract,
     )
+    unpeopled = contract.get("cut_role") == "sub"
+    if unpeopled:
+        if (_mapping(contract.get("asset_dependency")).get("character_ids_required")
+                or _mapping(contract.get("continuity_contract")).get("character_ids")
+                or _mapping(_mapping(first_frame_visual_plan).get("source_grounding")).get("character_ids")
+                or _mapping(_mapping(first_frame_visual_plan).get("reference_binding")).get("character_references")):
+            raise ValueError("b_roll.character_reference_forbidden")
     _validate_cut_local_location(
         contract,
         scene_location_sequence=scene_location_sequence,
@@ -422,7 +446,7 @@ def compile_video_api_prompt_v1(
     start_values = authored_start_values or _dedupe(parsed_source["start_state"])
     start_lines: list[str] = []
     if first:
-        start_lines.append("入力画像に写る人物、構図、物の位置、光を開始状態として保つ。")
+        start_lines.append("入力画像の構図、物の位置、光を開始状態として保つ。" if unpeopled else "入力画像に写る人物、構図、物の位置、光を開始状態として保つ。")
     start_lines.extend(_sentences(start_values, limit=4))
 
     canonical_primary = _first_clean(
@@ -445,8 +469,13 @@ def compile_video_api_prompt_v1(
         if first and last:
             primary = "開始状態から終了画像の状態へ、一つの自然な動きで連続して移る"
         elif first:
-            primary = "被写体は自然な呼吸とごく小さな重心移動だけを行う"
+            primary = ("入力画像の被写体と構図を保ち、指定されていない動作を加えない"
+                       if _mapping(cut_contract).get("visual_planning_contract") == "source_first_v2"
+                       else "被写体は自然な呼吸とごく小さな重心移動だけを行う")
+        elif _mapping(cut_contract).get("visual_planning_contract") == "source_first_v2":
+            raise ValueError("video_prompt_primary_motion_missing")
         else:
+            # Preserve the existing contract when replaying legacy requests.
             primary = "一つの明確な動作だけを自然な速度で行う"
     primary = _limit_primary_motion(primary, provider)
 
@@ -487,7 +516,7 @@ def compile_video_api_prompt_v1(
     )
     end_lines = _sentences(end_values, limit=2)
     if last:
-        end_lines.append("最後は指定された終了画像の人物、構図、物の位置、光へ自然に一致させる。")
+        end_lines.append("最後は指定された終了画像の構図、物の位置、光へ自然に一致させる。" if unpeopled else "最後は指定された終了画像の人物、構図、物の位置、光へ自然に一致させる。")
 
     structured_continuity = _dedupe(
         _sequence(vg_motion.get("must_preserve"))
@@ -503,7 +532,9 @@ def compile_video_api_prompt_v1(
     )
     continuity_lines: list[str] = []
     if story_time.strip():
-        if allowed_new_reveal_elements:
+        if unpeopled:
+            continuity_lines.append(f"{_sentence_body(story_time)}の建築、生活道具、素材、技術水準を変えない。")
+        elif allowed_new_reveal_elements:
             continuity_lines.append(
                 f"主動作で現れる承認済み要素も含め、{_sentence_body(story_time)}の"
                 "衣装、髪型、建築、生活道具、素材、技術水準に整合させる。"
@@ -524,7 +555,9 @@ def compile_video_api_prompt_v1(
         for item in reference_role_bindings
     )
     continuity_lines.extend(_sentences(continuity_values, limit=5))
-    if allowed_new_reveal_elements:
+    if unpeopled:
+        continuity_lines.append("建築、素材、物の位置関係、光源方向を一貫させる。")
+    elif allowed_new_reveal_elements:
         continuity_lines.append(
             "顔、髪、体格、画面内の位置関係、光源方向を一貫させ、"
             "衣装と重要な小道具は承認済み要素以外を変えない。"
@@ -578,6 +611,8 @@ def compile_video_api_prompt_v1(
     ):
         raise ValueError("video_reveal_allowlist_not_grounded_in_motion_or_end_state")
     constraint_lines: list[str] = []
+    if unpeopled:
+        constraint_lines.append("人物、顔、身体、手足、群衆、人影、シルエット、人物の反射・映り込みを全編で一切入れない。")
     if forbidden:
         constraint_lines.append("追加しないものは、" + "、".join(forbidden[:8]) + "。")
     if allowed_new_reveal_elements:
@@ -609,7 +644,7 @@ def compile_video_api_prompt_v1(
             "終了フレームを到達境界として扱い、途中でフェードしない、カットしない、別ショットへ切り替えない。"
         )
 
-    negative_prompt_mode = "inline" if _is_seedance(provider) else "separate"
+    negative_prompt_mode = "inline" if _is_seedance(provider) or provider == 'higgsfield' else "separate"
     if additional_negative and negative_prompt_mode == "inline":
         constraint_lines.append(_ensure_sentence(additional_negative))
     negative_prompt_lines = (
@@ -665,6 +700,15 @@ def compile_video_api_prompt_v1(
             _limit_camera(camera, provider, max_operations=camera_budget)
         ),
     }
+    execution = dict(_mapping(_mapping(contract.get('cinematic_contract')).get('execution')))
+    if isinstance(vg.get('native_audio'), Mapping):
+        execution.setdefault('schema_version', 'cinematic_execution_v1')
+        execution['native_audio'] = dict(vg['native_audio'])
+    if execution:
+        from toc.cinematic_language import video_execution_fragments
+        for group, fragment in video_execution_fragments(execution).items():
+            if fragment:
+                fragment_values[group] = '\n'.join(v for v in (fragment_values[group], fragment) if v)
     included_fragments = [
         {"group": group, "text": fragment_values[group]}
         for group in VIDEO_PROMPT_GROUP_ORDER
@@ -753,6 +797,8 @@ def compile_video_api_prompt_v1(
             }
         ),
     }
+    if execution:
+        source_payload['execution_compiler_version'] = 'cinematic_execution_compiler_v1'
     source_digest = _sha256_json(source_payload)
     ir = {
         "schema_version": VIDEO_PROMPT_IR_SCHEMA_VERSION,
@@ -776,6 +822,7 @@ def compile_video_api_prompt_v1(
     return {
         "policy_version": VIDEO_API_PROMPT_POLICY_VERSION,
         "compiler_version": VIDEO_PROMPT_COMPILER_VERSION,
+        **({'execution_compiler_version': 'cinematic_execution_compiler_v1'} if execution else {}),
         "projection_registry_version": projection["registry_version"],
         "provider": provider,
         "mode": mode,

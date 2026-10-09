@@ -88,8 +88,8 @@ class TestTocImmersiveRideScaffold(unittest.TestCase):
             "600": "p680",
             "p700": "p750",
             "700": "p750",
-            "p800": "p850",
-            "800": "p850",
+            "p800": "p860",
+            "800": "p860",
             "p900": "p930",
             "900": "p930",
         }

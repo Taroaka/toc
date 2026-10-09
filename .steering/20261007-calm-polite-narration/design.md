@@ -1,0 +1,5 @@
+# 設計
+正本はdocs/implementation/narration-prompting.md。script-creationとplaybookから参照し、stage-groundingのscript/narration必須資料へ追加する。
+tts_textは送信する文字列の正本。フロントはこの文字列からタグを表示し、古いメタデータや未適用のタグを表示しない。無音cutにはタグを付けない。
+平易な言い換えと発音修正を区別する。多義語の全体置換を避け、読みはTTS本文へ適用する。revisionとsource bindingを更新し、旧音声ファイルは保存する。
+物語固有の設定はrunへ保存し、汎用コードに作品名による分岐を追加しない。

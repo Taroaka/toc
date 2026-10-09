@@ -4,9 +4,12 @@ from unittest.mock import patch
 
 from toc.providers.elevenlabs import (
     DEFAULT_ELEVENLABS_LANGUAGE_CODE,
+    DEFAULT_ELEVENLABS_MODEL_ID,
     DEFAULT_ELEVENLABS_VOICE_ID,
     ElevenLabsClient,
     ElevenLabsConfig,
+    normalize_elevenlabs_model_id,
+    normalize_elevenlabs_voice_settings,
     parse_pronunciation_dictionary_locators,
 )
 
@@ -25,17 +28,44 @@ class TestElevenLabsDefaults(unittest.TestCase):
             else:
                 os.environ["ELEVENLABS_VOICE_ID"] = old
 
-    def test_from_env_defaults_to_eleven_v3_model(self) -> None:
+    def test_from_env_defaults_to_eleven_v4_model(self) -> None:
         old = os.environ.get("ELEVENLABS_MODEL_ID")
         try:
             os.environ.pop("ELEVENLABS_MODEL_ID", None)
             cfg = ElevenLabsConfig.from_env(api_key="test_key")
-            self.assertEqual(cfg.model_id, "eleven_v3")
+            self.assertEqual(cfg.model_id, DEFAULT_ELEVENLABS_MODEL_ID)
+            self.assertEqual(cfg.model_id, "eleven_v4")
         finally:
             if old is None:
                 os.environ.pop("ELEVENLABS_MODEL_ID", None)
             else:
                 os.environ["ELEVENLABS_MODEL_ID"] = old
+
+    def test_legacy_v3_model_selection_is_migrated_to_v4(self) -> None:
+        self.assertEqual(normalize_elevenlabs_model_id("eleven_v3"), "eleven_v4")
+        cfg = ElevenLabsConfig.from_env(api_key="test_key", model_id="eleven_v3")
+        self.assertEqual(cfg.model_id, "eleven_v4")
+
+        client = ElevenLabsClient(ElevenLabsConfig(api_key="test_key", model_id="eleven_v3"))
+        with patch("toc.providers.elevenlabs.request_bytes", return_value=b"audio") as request_bytes:
+            client.tts(text="こんにちは")
+        payload = request_bytes.call_args.kwargs["json_payload"]
+        self.assertEqual(payload["model_id"], "eleven_v4")
+
+    def test_v4_drops_legacy_voice_settings(self) -> None:
+        self.assertEqual(
+            normalize_elevenlabs_voice_settings(
+                {
+                    "stability": 0.35,
+                    "similarity_boost": 0.75,
+                    "style": 0.4,
+                    "speed": 1.1,
+                    "use_speaker_boost": True,
+                },
+                model_id="eleven_v4",
+            ),
+            {"stability": 0.35, "similarity_boost": 0.75},
+        )
 
     def test_from_env_defaults_to_japanese_language_code(self) -> None:
         old = os.environ.get("ELEVENLABS_LANGUAGE_CODE")

@@ -178,7 +178,8 @@ def _has_complete_silence_contract(container: dict) -> bool:
     return (
         isinstance(contract, dict)
         and contract.get("intentional") is True
-        and contract.get("confirmed_by_human") is True
+        and (contract.get("confirmed_by_human") is True
+             or (contract.get("source") == "boundary_b_roll_v1" and contract.get("kind") == "b_roll"))
         and bool(str(contract.get("kind") or "").strip())
         and bool(str(contract.get("reason") or "").strip())
     )

@@ -137,7 +137,7 @@ Coarse buckets remain p100 through p900. The following slots are active:
 | p500 | p510, p520, p530, p550, p560, p570 | asset source context, inventory, plan, requests, generation, continuity checks |
 | p600 | p610, p620, p650, p660, p670, p680 | image source context, prompt/request authoring, readiness, generation, output checks, optional selection |
 | p700 | p710, p730, p740, p750 | narration authoring, TTS, measured duration, optional listening/selection |
-| p800 | p810, p830, p840 | motion authoring, requests, video generation |
+| p800 | p810, p830, p840, p860 | motion authoring, video generation, approved-video BGM/SE generation and settings |
 | p900 | p910, p920 | render inputs and final render/output checks |
 
 Retired production slots are `p130`, `p230`, `p320`, `p430`, `p435`, `p540`, `p630`, `p640`,
@@ -148,7 +148,7 @@ Coarse target resolution:
 
 ```text
 p100 → p120   p200 → p220   p300 → p330   p400 → p450   p500 → p570
-p600 → p680   p700 → p750   p800 → p840   p900 → p920
+p600 → p680   p700 → p750   p800 → p860   p900 → p920
 ```
 
 Slot completion means the owning author/materializer and ordinary validators finished. A slot may
@@ -165,6 +165,11 @@ and creative additions; a human must explicitly authorize hybridization when con
 variants are intentionally combined.
 
 ### Visual value and script
+
+New frontend runs use the `source_first_v2` visual planning contract described in
+[Visual planning](implementation/visual-planning.md). Scene coverage and raw source bindings are mandatory;
+creative notes may be empty. p400 preserves source scene IDs and notes without rebuilding legacy amplification fields.
+Stored v1 artifacts retain their old contract. Unknown/mixed versions and stale inputs fail structural validation.
 
 `visual_value.md` records visual identity, anchors, reusable asset candidates, regeneration risks,
 and downstream handoff. `script.md` owns scene intent, event sequence, cut blueprints, narration
@@ -298,7 +303,7 @@ image_generation:
   references: []
   api_prompt_payload:
     policy_version: image_api_prompt_v2
-    compiler_version: conditional_drawable_prompt_compiler_v3
+    compiler_version: conditional_drawable_prompt_compiler_v4
     prompt: "exact provider-facing prompt"
     sha256: sha256:<prompt hash>
     source_digest: sha256:<compiler source hash>
@@ -376,3 +381,14 @@ The L2 bucket owner writes `logs/orchestration/pXXX.supervisor_result.json`:
 L1 checks the result, required paths, state, and ordinary validator result. It does not need a
 critic report, aggregate report, score, or approval certificate to start the next bucket.
 
+## p400 cinematic_direction_v1
+
+新規p400は `cinematic_direction.json` を演出の正本とし、script/video metadataの
+`cinematic_direction_contract` と `source_cinematic_direction` で版・bytesを結び付ける。
+詳細は [p400演出契約](implementation/p400-cinematic-authoring.md)。原作scene/event契約を変更せず、
+演出判断はsceneの `cinematic_direction` とcut契約へ投影する。計画尺と実測尺は区別する。
+
+p420の `asset_requests` は原作にある未登録素材の追加/scene binding依頼。
+`source_asset_requests_v1` のruntimeが仮参照を解決し、`base_resources` と拡張registryを照合する。
+解決記録はscript/manifestの `asset_resolutions`、根拠と使用cutはp500 asset inventory/planへ引き継ぐ。
+詳細は [p400演出契約](implementation/p400-cinematic-authoring.md#p420の未登録素材--source_asset_requests_v1)。

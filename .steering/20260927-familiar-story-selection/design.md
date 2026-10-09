@@ -1,0 +1,6 @@
+# Design
+
+selectionにstory_event_selection_v1、selected_variant_ids、selected_event_ids、familiarity_basis、selection_rationale、omitted_eventsを保持。新しい複数版researchでは単一採用を要求し、採用eventの実在・版所属・順序・重複を検査する。省略は許可し、理由を残す。
+単一版/版情報なしの旧成果物は既存全件coverageの互換性を維持。新規author promptは全作品で新しい選定契約を指示する。
+Architectと最終storyは共有resolverで採用event orderを取得。Scene Author/repairに採用決定を明示し、p400のprofile/ledgerは選択eventだけを対象にする。raw researchは変更しない。
+p100の調査指示にも、一般的な筋の認知度と裏付け・不確実性を記録する方針を追加する。

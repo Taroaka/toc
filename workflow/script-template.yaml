@@ -1,3 +1,9 @@
+# 新規p420: cinematic_direction.json の asset_requests を source_asset_requests_v1 で解決する。
+# 未登録素材は原作引用と使用cutを持ち、script/manifest の asset_resolutions と p500 の asset bibleへ渡す。
+# source_first_v2: see docs/implementation/visual-planning.md.
+# Legacy scene_value_amplification / expressive_contract samples below apply only to v1.
+# v2 uses metadata visual_planning_contract and source_visual_value {path, sha256},
+# plus source_story_scene_id and scene_intent.visual_notes (empty allowed).
 # Script output template
 # Canonical order: authoring → structural validation → manifest materialization.
 script_metadata:
@@ -404,6 +410,8 @@ scenes:
           text: ""
           status: optional_draft|superseded_by_p700
         narration: ""
+        # 音声ありcutは、ですます調・平易な本文を執筆し、TTS本文に語り方タグと読みを含める。
+        # 無音cutは空文字。例: [Warm, calm narration, slow measured delivery] … [short pause] …
         tts_text: ""
         narration_authoring:
           schema_version: narration_authoring_v1

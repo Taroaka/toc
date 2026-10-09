@@ -13,6 +13,8 @@ keys.  Unknown keys are retained rather than discarded.
 
 from __future__ import annotations
 
+from toc.story_selection import selected_event_order, StorySelectionError
+
 from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
 import json
@@ -403,6 +405,7 @@ def research_registry_prompt_view(registry: Mapping[str, Any]) -> dict[str, Any]
     return {
         "registry_version": deepcopy(registry.get("registry_version")),
         "raw_research": deepcopy(registry.get("raw_research", {})),
+        "story_selection": deepcopy(registry.get("story_selection")),
         "event_order": deepcopy(registry.get("event_order", [])),
         "all_ids": deepcopy(registry.get("all_ids", [])),
         "duplicate_ids": deepcopy(registry.get("duplicate_ids", {})),
@@ -457,6 +460,18 @@ AUDIENCE_MEANING_INSTRUCTION = (
     "introduce a new fact. Keep creative interpretation explicit and preserve "
     "source-backed meanings, endings, ambiguity, and reveal order. Do not add "
     "scenes, events, assets, or required schema fields just to fit these tools. "
+    "A coping strategy may produce practical success and relational loss at the same time; preserve both source-backed consequences. "
+    "External success is not automatically personal growth. A sincere self-explanation can differ from observable action without being a deliberate lie. "
+    "Only beliefs important to this character's identity or coping need motivate conflict; do not make every disagreement an identity crisis. "
+    "For original fiction these are optional invention tools; for adaptations do not fabricate a wound, motive, conversion, reconciliation, or moral. "
+    "A maintained-state scene is valid: conflict and turn can be empty strings and turning_event can be an empty mapping. "
+    "When a turn is authored, retain its real beat reference; never invent one to fill the schema. "
+    "Each visible beat becomes one cut unless it explicitly supplies ordered cut_transitions. "
+    "For a beat needing multiple shots, author cut_transitions with unique transition_id, "
+    "first_frame_brief (only the visible start), motion_brief, and motion_end_state. "
+    "Keep each transition inside its parent beat; never repeat earlier action after its result. "
+    "Supply enough meaningful transitions for the requested scene duration and provider limits; "
+    "do not add unrelated gestures to fill time. Preserve source_event_ids on every beat. "
     "During repair, preserve the source-grounded intent and planned reveal order "
     "while correcting fields identified by the supplied structural errors."
 )
@@ -480,17 +495,22 @@ def build_story_architect_prompt(
         registry = build_research_registry({})
     prompt_registry = research_registry_prompt_view(registry)
     payload = {
-        "prompt_contract": "story_architect_prompt_v1",
+        "prompt_contract": "story_architect_prompt_v2",
         "role": "Story Architect",
         "instructions": [
             SCENE_CAUSAL_CONNECTION_INSTRUCTION,
             AUDIENCE_MEANING_INSTRUCTION,
             "Use every research field available in full; do not truncate, summarize away, or invent source facts.",
-            "Assign every canonical research event to exactly one semantic scene while preserving chronological order.",
+            "When the user specifies a version, honor it. Otherwise select ONE story version most widely familiar to the intended audience; do not choose by publication age, event count, or exhaustiveness. If no audience is specified, consider the general audience of the request language.",
+            "Research is a source inventory, not a checklist of scenes to include. Unselected versions and supplementary information need not appear. Never concatenate retellings merely to cover all research events; never silently hybridize conflicting versions.",
+            "Record selection.event_selection_contract=story_event_selection_v1, selected_variant_ids (exactly one known variant, or [] for research without variants), selected_event_ids (known IDs in source order), selection_rationale, familiarity_basis, and omitted_events [{event_id, reason}].",
+            "Base familiarity_basis on available research and state uncertainty when recognition evidence is limited; do not invent popularity statistics. Use the most familiar supported coherent story, not an obscure variant for novelty. A user-specified version takes priority even when less familiar.",
+            "Select events that preserve the chosen story's causal spine, iconic moments and ending. Other events may be omitted for coherence and duration; explain omissions within the selected version in omitted_events. Unselected versions require no event-by-event omission justification.",
+            "Assign every selected_event_id exactly once to a semantic scene in chronological order. Coverage applies ONLY to selected_event_ids, never to the full research inventory.",
             "Return only the architectural scene plan at this turn: stable scene_id, title, phase, source_event_ids, incoming_state_id, outgoing_state_id, previous_scene_id, next_scene_id, and causal_connection_from_previous.",
             "Do not author event_sequence or full scene prose in the Architect turn; a dedicated Scene Author will expand each frozen plan.",
             "Keep source-backed facts and creative complements explicitly distinguishable.",
-            "Author story_metadata including the research-grounded time/era, and an adaptation_source_contract_v1 whose core values and non-negotiable events are derived from this research rather than a generic hero template.",
+            "Author story_metadata including the research-grounded time/era, and an adaptation_source_contract_v1 whose core values, non-negotiable events, iconic moments and ending belong ONLY to the adopted version and selected events. Do not promote unselected versions or supplementary research into mandatory story requirements, and do not use a generic hero template.",
             "Return a story_scene_contract_v1 document; scene count must follow semantic events rather than duration-only padding.",
         ],
         "topic": topic,
@@ -889,13 +909,14 @@ def _validate_scene_authoring_surface(
         "title",
         "phase",
         "purpose",
-        "conflict",
-        "turn",
         "visualizable_action",
         "grounding_note",
         "time_of_day",
     ):
         if not _text_id(scene.get(field)):
+            _append_error(errors, "story.scene_overview_missing")
+    for field in ("conflict", "turn"):
+        if not isinstance(scene.get(field), str):
             _append_error(errors, "story.scene_overview_missing")
     if not isinstance(scene.get("affect"), Mapping):
         _append_error(errors, "story.scene_overview_missing")
@@ -954,7 +975,7 @@ def _validate_scene_lifecycle(
     end_id = _state_id(end)
 
     turning = _mapping(scene.get("turning_event"))
-    if turning is not None and beats is not None:
+    if turning and beats is not None:
         turning_beat_id = _text_id(turning.get("beat_id") or turning.get("event_beat_id"))
         beat_ids = {
             _text_id(beat.get("beat_id"))
@@ -1176,15 +1197,10 @@ def validate_story_document(
         return ["story.document_invalid"]
     registry = _registry_for_validation(registry)
     maps = _registry_maps(registry)
-    expected_event_order = [
-        _text_id(item)
-        for item in (
-            registry.get("event_order")
-            if isinstance(registry.get("event_order"), (list, tuple))
-            else list(maps["events"])
-        )
-        if _text_id(item)
-    ]
+    try:
+        expected_event_order = selected_event_order(story, registry)
+    except StorySelectionError as exc:
+        return [str(exc)]
 
     script = _mapping(story.get("script"))
     scenes_value = script.get("scenes") if script is not None else None

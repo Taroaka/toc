@@ -1,0 +1,1 @@
+研究資料とp860実装正本を分離。既存のaudio_intentで早期の意図を引き継ぎ、動画確定後にspottingし、sound_design.jsonの既存cue/prompt/配置へ翻訳する。研究メモをproviderへ丸投げしない。新しい必須採点gateやruntime schemaは追加しない。未実装の複数cue編集等は別TODOとして明記。

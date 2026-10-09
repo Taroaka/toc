@@ -67,6 +67,8 @@
 #   slot.pXXX.note=string
 #
 # Authoring slots retained in production:
+#   p400.cinematic_direction_contract=cinematic_direction_v1
+# Once declared, a missing cinematic_direction.json is an error, not a legacy fallback.
 #   slot.p410.status=pending|in_progress|done|skipped|blocked|failed
 #   slot.p420.status=pending|in_progress|done|skipped|blocked|failed
 #   slot.p570.status=pending|in_progress|done|skipped|blocked|failed
@@ -132,3 +134,12 @@
 #   requirements, progress blockers, score inputs, or approval certificates.
 # - Existing state.current.json and p000_index.md files are read as data and
 #   may be regenerated without changing state.txt history.
+
+# p860: shared BGM / SE process after video approval, before p910
+slot.p860.status=pending|in_progress|done|failed
+slot.p860.requirement=required|optional
+stage.sound_design.status=pending|in_progress|completed|failed
+artifact.sound_design=<run>/sound_design.json
+human_choice.video.video_set_hash=sha256:<ordered video bytes and timeline>
+human_choice.video.actor=frontend
+human_choice.video.at=<ISO8601>

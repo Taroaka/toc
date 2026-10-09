@@ -1347,6 +1347,48 @@ body {
   background: var(--surface-editor) !important;
 }
 
+.narrationContentGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.narrationImageColumn,
+.narrationTextColumn {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.narrationImageFrame {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(6, 10, 13, 0.68);
+}
+
+.narrationImageFrame img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.narrationImageEmpty {
+  padding: 24px;
+}
+
+@media (max-width: 800px) {
+  .narrationContentGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .narrationSettingsGrid,
 .renderSettingsGrid {
   display: grid;

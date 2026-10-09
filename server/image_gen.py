@@ -60,11 +60,69 @@ RUN_STAGE_STATE_KEYS = {
         "stage.image_generation.status",
     ),
     "p700": ("stage.narration.status",),
-    "p800": ("stage.video.status", "stage.video_generation.status"),
+    "p800": ("stage.video.status", "stage.video_generation.status", "stage.sound_design.status"),
     "p900": ("stage.render.status", "stage.qa.status"),
 }
 RUN_PROGRESS_BLOCKING_STATES = {"failed", "blocked"}
 RUN_PROGRESS_TERMINAL_STATES = {"done", "passed", "ready", "approved", "skipped"}
+RUN_PROGRESS_FAILURE_STATUSES = {"failed", "failure", "error", "aborted", "interrupted"}
+RUN_PROGRESS_ACTIVE_STATES = {
+    "in_progress",
+    "running",
+    "queued",
+    "pending",
+    "not_started",
+    "awaiting_approval",
+    "authored",
+}
+# These names are emitted by the production runners, while ``runtime.failure.stage``
+# may use either the slot code or the stage name.  Keep the projection generic so
+# older runs can still expose a useful failure location.
+RUN_FAILURE_SLOT_BY_STAGE = {
+    "research": "p120",
+    "story": "p220",
+    "visual_value": "p310",
+    "cinematic": "p410",
+    "cinematic_projection": "p420",
+    "scene_set": "p410",
+    "scene_detail": "p410",
+    "cut_blueprint": "p420",
+    "asset_plan": "p530",
+    "asset_output_validation": "p570",
+    "asset_generation": "p560",
+    "image_prompt": "p620",
+    "scene_image_generation": "p660",
+    "scene_implementation": "p660",
+    "p650": "p650",
+    "p660": "p660",
+    "p670": "p670",
+    "p680": "p680",
+    "semantic_review_failed_after_media_generation": "p680",
+    "semantic_review_failed_before_media_generation": "p570",
+    "semantic_review_blocked_transport": "p570",
+    "narration": "p730",
+    "video_prompt": "p830",
+    "video_generation": "p840",
+    "sound_design": "p860",
+    "render_freeze": "p910",
+    "render_inputs_frozen": "p910",
+    "final_render": "p920",
+    "render": "p920",
+}
+RUN_ACTIVE_SLOT_BY_STAGE = {
+    "sound_design": "p860",
+    "research_authoring": "p120",
+    "story_authoring": "p220",
+    "visual_value_authoring": "p310",
+    "cinematic_authoring": "p410",
+    "cinematic_projection": "p420",
+    "asset_images_generating": "p560",
+    "scene_images_generating": "p660",
+    "narration_frontend_revision_workflow": "p730",
+    "video_generation": "p840",
+    "render_inputs_frozen": "p910",
+    "final_render": "p920",
+}
 IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
 IMAGE_API_PROMPT_POLICY_PREFIX = "image_api_prompt_v"
 COMPILED_IMAGE_API_PROMPT_POLICY_VERSION = "image_api_prompt_v2"
@@ -311,6 +369,201 @@ def _state_slot_statuses(state: dict[str, str]) -> dict[str, str]:
     return statuses
 
 
+def _failure_slot_from_marker(value: str) -> str | None:
+    marker = str(value or "").strip().lower()
+    if not marker:
+        return None
+    direct = re.search(r"(?<!\d)(p\d{3})(?!\d)", marker)
+    if direct:
+        return direct.group(1)
+    for name in sorted(RUN_FAILURE_SLOT_BY_STAGE, key=len, reverse=True):
+        if name in marker:
+            return RUN_FAILURE_SLOT_BY_STAGE[name]
+    return None
+
+
+def _active_slot_from_state(state: dict[str, str]) -> str | None:
+    if str(state.get("runtime.repair.phase") or "").strip().lower() == "repairing":
+        repair_slot = _failure_slot_from_marker(str(state.get("runtime.repair.stage") or ""))
+        if repair_slot:
+            return repair_slot
+    runtime_stage = str(state.get("runtime.stage") or "").strip().lower()
+    if any(token in runtime_stage for token in ("failed", "error", "blocked")):
+        return None
+    for name in sorted(RUN_ACTIVE_SLOT_BY_STAGE, key=len, reverse=True):
+        if name in runtime_stage:
+            return RUN_ACTIVE_SLOT_BY_STAGE[name]
+    return None
+
+
+def _frontier_failed_slot(slot_statuses: dict[str, str]) -> str | None:
+    """Return a failed slot only when it is the current ordered frontier.
+
+    A later failed slot is commonly left behind by an interrupted run after a
+    resume.  It must not hide an earlier pending slot in the progress view.
+    """
+
+    failed_codes = sorted(
+        (code for code, status in slot_statuses.items() if status == "failed"),
+        key=lambda code: int(code[1:]),
+    )
+    for code in failed_codes:
+        code_number = int(code[1:])
+        if not any(
+            int(previous[1:]) < code_number
+            and status in RUN_PROGRESS_ACTIVE_STATES
+            for previous, status in slot_statuses.items()
+        ):
+            return code
+    return None
+
+
+def _failure_slot_for_state(
+    state: dict[str, str],
+    slot_statuses: dict[str, str],
+) -> str | None:
+    runtime_stage = str(state.get("runtime.stage") or "").strip().lower()
+    failure_stage = str(state.get("runtime.failure.stage") or "").strip().lower()
+    if failure_stage:
+        marker_slot = _failure_slot_from_marker(failure_stage)
+        if marker_slot:
+            return marker_slot
+    if "failed" in runtime_stage or "error" in runtime_stage:
+        marker_slot = _failure_slot_from_marker(runtime_stage)
+        if marker_slot:
+            return marker_slot
+    active_slot = _active_slot_from_state(state)
+    if active_slot and slot_statuses.get(active_slot) == "failed":
+        return active_slot
+    return _frontier_failed_slot(slot_statuses)
+
+
+def _has_terminal_failure(
+    state: dict[str, str],
+    slot_statuses: dict[str, str],
+) -> bool:
+    status = str(state.get("status") or "").strip().lower()
+    runtime_stage = str(state.get("runtime.stage") or "").strip().lower()
+    if status in RUN_PROGRESS_FAILURE_STATUSES:
+        return True
+    repairing = str(state.get("runtime.repair.phase") or "").strip().lower() == "repairing"
+    # During a real author repair, older failed slot/runtime markers are
+    # historical evidence.  The repair ledger is the active state until a
+    # producer publishes FAILED.
+    if repairing:
+        return False
+    active_slot = _active_slot_from_state(state)
+    if active_slot:
+        slot_status = str(slot_statuses.get(active_slot) or "").strip().lower()
+        if slot_status == "failed":
+            return True
+        return False
+    if "failed" in runtime_stage or "error" in runtime_stage:
+        return True
+    # A frontier failed slot is a terminal display state even for older runs
+    # whose producers did not publish a top-level FAILED status.
+    if _frontier_failed_slot(slot_statuses) is not None:
+        return True
+    return False
+
+
+_FAILURE_SECRET_RE = re.compile(
+    r"(?ix)"
+    r"(?P<authorization>\bauthorization\b\s*[:=]\s*)"
+    r"(?P<authorization_value>[^\s,;]+(?:\s+[^\s,;]+)?)"
+    r"|(?P<prefix>"
+    r"\b(?:bearer|basic)\s+"
+    r"|[\"']?\b(?:token|access[_-]?token|api[_-]?key|password|secret)\b[\"']?\s*(?:[:=]\s*|\s+)"
+    r"|[?&](?:token|access[_-]?token|api[_-]?key|password|secret)="
+    r")"
+    r"(?P<value>[\"']?[^\s,;\"']+[\"']?)"
+)
+
+
+def _redact_failure_secrets(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        authorization = match.group("authorization")
+        if authorization:
+            return authorization + "<redacted>"
+        return match.group("prefix") + "<redacted>"
+
+    return _FAILURE_SECRET_RE.sub(replace, value)
+
+
+def _safe_failure_message(
+    state: dict[str, str],
+    *,
+    run_dir: Path | None = None,
+    failure_slot: str | None = None,
+) -> str:
+    validation_paths: list[Path] = []
+    if run_dir is not None and (
+        failure_slot in {"p410", "p420"}
+    ):
+        validation_paths.append(run_dir / "logs/authoring/p400/validation.json")
+    for path in validation_paths:
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and str(payload.get("error") or "").strip():
+            value = str(payload["error"]).strip()
+            value = " ".join(value.split())
+            value = _redact_failure_secrets(value)
+            return value[:1199] + "…" if len(value) > 1200 else value
+
+    media_failure = False
+    if failure_slot and re.fullmatch(r"p\d{3}", failure_slot):
+        media_failure = 650 <= int(failure_slot[1:]) <= 680
+    diagnostic_keys = (
+        (
+            "image_generation.error",
+            "image_generation.block_reason",
+            "runtime.failure.reason",
+            "last_error",
+            "runtime.create_job.error_code",
+        )
+        if media_failure
+        else (
+            "runtime.failure.reason",
+            "last_error",
+            "runtime.create_job.error_code",
+            "image_generation.error",
+            "image_generation.block_reason",
+        )
+    )
+    for key in diagnostic_keys:
+        value = str(state.get(key) or "").strip()
+        if not value:
+            continue
+        value = " ".join(value.split())
+        value = _redact_failure_secrets(value)
+        if len(value) > 1200:
+            value = value[:1199] + "…"
+        return value
+    return ""
+
+
+def _failure_projection(
+    state: dict[str, str],
+    slot_statuses: dict[str, str],
+    *,
+    run_dir: Path | None = None,
+) -> dict[str, Any]:
+    terminal = _has_terminal_failure(state, slot_statuses)
+    failure_slot = _failure_slot_for_state(state, slot_statuses) if terminal else ""
+    return {
+        "terminal": terminal,
+        "stage": failure_slot,
+        "runtimeStage": str(state.get("runtime.stage") or ""),
+        "phase": str(state.get("runtime.failure.phase") or ""),
+        "errorKind": str(state.get("runtime.failure.error_kind") or ""),
+        "message": _safe_failure_message(state, run_dir=run_dir, failure_slot=failure_slot) if terminal else "",
+    }
+
+
 def _slot_bucket(code: str) -> str:
     return f"p{code[1]}00" if re.fullmatch(r"p\d{3}", code) else ""
 
@@ -337,6 +590,36 @@ def _overlay_progress_state(
     state: dict[str, str],
 ) -> dict[str, str]:
     slot_statuses = _state_slot_statuses(state)
+    failure = _failure_projection(state, slot_statuses)
+    if str(state.get("runtime.repair.phase") or "").strip().lower() == "repairing":
+        repair_slot = _failure_slot_from_marker(str(state.get("runtime.repair.stage") or ""))
+        for code, status in list(slot_statuses.items()):
+            if status == "failed" and code != repair_slot:
+                slot_statuses[code] = "blocked"
+        if repair_slot and slot_statuses.get(repair_slot) in {"failed", "pending", "not_started"}:
+            slot_statuses[repair_slot] = "in_progress"
+    failure_slot = str(failure.get("stage") or "")
+    if failure.get("terminal") and failure_slot:
+        # A failed stage is authoritative for the visible frontier.  Demote a
+        # stale earlier in_progress marker to blocked in the derived projection
+        # so the UI cannot present the run as still active without inventing a
+        # completion receipt.
+        failure_number = int(failure_slot[1:]) if re.fullmatch(r"p\d{3}", failure_slot) else 0
+        if failure_number:
+            for code, status in list(slot_statuses.items()):
+                if int(code[1:]) < failure_number and status in {"in_progress", "running", "queued"}:
+                    slot_statuses[code] = "blocked"
+            slot_statuses[failure_slot] = "failed"
+    if not failure.get("terminal"):
+        active_slot = _active_slot_from_state(state)
+        active_number = int(active_slot[1:]) if active_slot and re.fullmatch(r"p\d{3}", active_slot) else 0
+        known_slot_codes = {str(slot.get("code") or "") for slot in slots}
+        if active_number and active_slot in known_slot_codes:
+            for code, status in list(slot_statuses.items()):
+                if int(code[1:]) < active_number and status in {"in_progress", "running", "queued"}:
+                    slot_statuses[code] = "blocked"
+            if slot_statuses.get(active_slot) not in {"done", "skipped", "awaiting_approval"}:
+                slot_statuses[active_slot] = "in_progress"
     slots_by_code = {str(slot.get("code") or ""): slot for slot in slots}
     for code, status in slot_statuses.items():
         slot = slots_by_code.get(code)
@@ -373,8 +656,20 @@ def _current_slot_from_state(
     *,
     slots: list[dict[str, Any]],
     slot_statuses: dict[str, str],
+    failure_slot: str | None = None,
+    active_slot: str | None = None,
 ) -> dict[str, str] | None:
     slots_by_code = {str(slot.get("code") or ""): slot for slot in slots}
+    if failure_slot and slot_statuses.get(failure_slot) == "failed":
+        slot = slots_by_code.get(failure_slot)
+        if slot is not None:
+            label = str(slot.get("purpose") or slot.get("stage") or failure_slot)
+            return {"code": failure_slot, "label": label, "state": "failed"}
+    if active_slot and slot_statuses.get(active_slot) in {"in_progress", "running", "queued"}:
+        slot = slots_by_code.get(active_slot)
+        if slot is not None:
+            label = str(slot.get("purpose") or slot.get("stage") or active_slot)
+            return {"code": active_slot, "label": label, "state": slot_statuses[active_slot]}
     active_states = (
         RUN_PROGRESS_BLOCKING_STATES
         | {"in_progress", "pending", "not_started", "awaiting_approval"}
@@ -415,8 +710,14 @@ def read_run_progress(
         if not is_retired_review_slot(slot.get("code"))
     ]
     slot_statuses = _overlay_progress_state(stages=stages, slots=slots, state=state)
+    failure = _failure_projection(state, slot_statuses, run_dir=run_dir)
     active_states = {"not_started", "pending", "in_progress", "blocked", "awaiting_approval", "failed"}
-    current_stage = _current_slot_from_state(slots=slots, slot_statuses=slot_statuses)
+    current_stage = _current_slot_from_state(
+        slots=slots,
+        slot_statuses=slot_statuses,
+        failure_slot=str(failure.get("stage") or "") or None,
+        active_slot=(None if failure["terminal"] else _active_slot_from_state(state)),
+    )
     request_stage = None
     if not (run_dir / REQUEST_FILE_BY_KIND["asset"]).exists():
         request_stage = {"code": "p550", "label": "Asset Requests", "state": "pending"}
@@ -426,7 +727,7 @@ def read_run_progress(
         request_stage = {"code": "p650", "label": "Generation Ready", "state": "pending"}
     elif validate_request_outputs and _has_missing_request_outputs(run_dir, "scene"):
         request_stage = {"code": "p660", "label": "Image Generation", "state": "pending"}
-    if request_stage and (
+    if not failure["terminal"] and request_stage and (
         current_stage is None
         or _stage_code_number(current_stage) > _stage_code_number(request_stage)
     ):
@@ -443,8 +744,17 @@ def read_run_progress(
         percent = min(percent, round((_stage_code_number(request_stage) / max_stage_number) * 100))
     return {
         "topic": state.get("topic") or run_dir.name,
-        "status": state.get("status") or "",
+        "status": "FAILED" if failure["terminal"] else state.get("status") or "",
         "runtimeStage": state.get("runtime.stage") or "",
+        "repair": {
+            "phase": "idle" if failure["terminal"] else state.get("runtime.repair.phase", "idle"),
+            "stage": state.get("runtime.repair.stage", ""),
+            "target": state.get("runtime.repair.target", ""),
+            "attempt": state.get("runtime.repair.attempt", ""),
+            "limit": state.get("runtime.repair.limit", ""),
+            "reason": state.get("runtime.repair.reason", ""),
+        },
+        "failure": failure,
         "currentStage": current_stage,
         "stages": stages,
         "slots": slots,

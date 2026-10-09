@@ -534,7 +534,7 @@ scenes:
         self.assertIn("人物参照画像1（シンデレラ）", payload["prompt"])
         self.assertNotIn("assets/characters", payload["prompt"])
 
-    def test_scene_time_of_day_rejects_conflicting_positive_material_light(self) -> None:
+    def test_scene_time_of_day_does_not_gate_authored_material_meaning(self) -> None:
         plan = _environment_plan()
         plan["scene_material_pack"] = {
             "light_source": "低い自然光",
@@ -543,17 +543,16 @@ scenes:
             ],
         }
 
-        with self.assertRaisesRegex(ValueError, "drawable_prompt_time_of_day_conflict"):
-            compile_image_api_prompt_v2(
-                first_frame_visual_plan=plan,
-                scene_time_of_day="朝",
-            )
+        payload = compile_image_api_prompt_v2(
+            first_frame_visual_plan=plan, scene_time_of_day="朝",
+        )
+        self.assertIn("朝夕どちらにも寄りすぎない", payload["prompt"])
 
     def test_negative_opposing_light_marker_does_not_trigger_time_conflict(self) -> None:
         plan = _environment_plan()
         plan["scene_material_pack"] = {
             "light_source": "月光",
-            "dominant_materials": ["深夜の門前、朝日なし、昼光なし"],
+            "dominant_materials": ["深夜の門前、朝日なし、昼光なし。朝日や自発光は加えない。"],
         }
 
         payload = compile_image_api_prompt_v2(
@@ -703,25 +702,25 @@ scenes:
         with self.assertRaisesRegex(ValueError, "drawable_prompt_current_moment_missing"):
             compile_image_api_prompt_v2(first_frame_visual_plan=plan)
 
-    def test_unresolved_visual_alternative_is_rejected_before_provider_prompt(self) -> None:
+    def test_unresolved_visual_alternative_is_not_a_content_gate(self) -> None:
         plan = _environment_plan()
         plan["temporal_boundary"]["event_fact_visible_in_still"] = (
             "若い女性の手元または表情に緊張が見える"
         )
 
-        with self.assertRaisesRegex(ValueError, "drawable_prompt_unresolved_alternative"):
-            compile_image_api_prompt_v2(first_frame_visual_plan=plan)
+        payload = compile_image_api_prompt_v2(first_frame_visual_plan=plan)
+        self.assertIn(plan["temporal_boundary"]["event_fact_visible_in_still"], payload["prompt"])
 
-    def test_abstract_design_placeholder_is_rejected_before_provider_prompt(self) -> None:
+    def test_abstract_design_placeholder_is_not_a_content_gate(self) -> None:
         plan = _environment_plan()
         plan["temporal_boundary"]["event_fact_visible_in_still"] = (
             "変化の証拠が画面内に残る"
         )
 
-        with self.assertRaisesRegex(ValueError, "drawable_prompt_abstract_placeholder"):
-            compile_image_api_prompt_v2(first_frame_visual_plan=plan)
+        payload = compile_image_api_prompt_v2(first_frame_visual_plan=plan)
+        self.assertIn(plan["temporal_boundary"]["event_fact_visible_in_still"], payload["prompt"])
 
-    def test_scene_sequence_overview_is_rejected_before_provider_prompt(self) -> None:
+    def test_scene_sequence_wording_is_not_a_content_gate(self) -> None:
         cases = (
             (
                 "current_moment",
@@ -766,22 +765,19 @@ scenes:
                 sequence = f"炉を掃除する {arrow} 籠を置かれる {arrow} 一人だけ残される"
                 inject(plan, sequence)
 
-                with self.assertRaisesRegex(
-                    ValueError, "drawable_prompt_sequential_overview"
-                ):
-                    compile_image_api_prompt_v2(
-                        first_frame_visual_plan=plan,
-                        **kwargs,
-                    )
+                payload = compile_image_api_prompt_v2(
+                    first_frame_visual_plan=plan, **kwargs,
+                )
+                self.assertIn(sequence, payload["prompt"])
 
-    def test_broken_particle_join_is_rejected_before_provider_prompt(self) -> None:
+    def test_broken_particle_join_is_not_a_content_gate(self) -> None:
         plan = _environment_plan()
         plan["temporal_boundary"]["event_fact_visible_in_still"] = (
             "指先がガラスの靴をの手前で止まっている"
         )
 
-        with self.assertRaisesRegex(ValueError, "drawable_prompt_broken_japanese_join"):
-            compile_image_api_prompt_v2(first_frame_visual_plan=plan)
+        payload = compile_image_api_prompt_v2(first_frame_visual_plan=plan)
+        self.assertIn(plan["temporal_boundary"]["event_fact_visible_in_still"], payload["prompt"])
 
     def test_reference_uses_current_cut_plan_for_composition_and_state(self) -> None:
         plan = _environment_plan()

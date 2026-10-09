@@ -16,6 +16,7 @@ import re
 import stat
 import subprocess
 import sys
+import yaml
 from types import ModuleType
 from typing import Any
 
@@ -1569,6 +1570,25 @@ def _write_resume_orchestration(
     return state_updates
 
 
+def _promote_resumed_manifest(frontend: ModuleType, run_dir: Path) -> None:
+    """Enter production only after checking the preserved p400 contract."""
+    text, manifest = _load_resume_structured_document(run_dir, "video_manifest.md")
+    phase = str(manifest.get("manifest_phase") or "production").strip().lower()
+    if phase == "production":
+        return
+    if phase != "skeleton":
+        raise P500ResumeError(f"unsupported resume manifest phase: {phase}")
+    frontend._require_fresh_p400_readiness(run_dir)
+    yaml_block = extract_yaml_block(text)
+    if not yaml_block:
+        raise P500ResumeError("resume manifest has no YAML document")
+    manifest["manifest_phase"] = "production"
+    updated = text.replace(
+        yaml_block, yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False).rstrip(), 1
+    )
+    _write_resume_text(run_dir, "video_manifest.md", updated)
+
+
 def materialize_from_p500(
     frontend: ModuleType,
     *,
@@ -1664,6 +1684,9 @@ def materialize_from_p500(
         "asset_plan.md",
         frontend._md_yaml("Asset Plan", asset_plan),
     )
+    frontend._prepare_authoring_grounding(run_dir)
+    _promote_resumed_manifest(frontend, run_dir)
+    # Promotion changes the canonical bytes; bind request generation to that revision.
     frontend._prepare_authoring_grounding(run_dir)
     frontend._write_asset_request_files(run_dir, asset_plan, profile)
     frontend._materialize_standard_request_files(run_dir)

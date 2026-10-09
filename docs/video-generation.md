@@ -177,6 +177,7 @@ p400 script.md + skeleton manifest
   → p600 scene image requests and stills
   → p700 narration/TTS and measured audio
   → p800 motion requests and clips
+  → p860 video approval, BGM / SE proposals, generation and mix settings
   → p900 stream normalization and final render
 ```
 
@@ -242,3 +243,5 @@ every selected value is traceable to the source.
 - `docs/data-contracts.md`
 - `workflow/video-manifest-template.md`
 
+
+BGM・SEの正本とフロント操作は [p860 Sound Design](implementation/sound-design.md) に従う。動画承認後、最終結合前に同じp860で両方を作成する。

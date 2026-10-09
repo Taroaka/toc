@@ -1,0 +1,20 @@
+# Higgsfield public API adapter
+
+`toc.providers.higgsfield.HiggsfieldClient` implements the server-side Seedance 2.5 video operations:
+
+- `bytedance/seedance-2.5/image-to-video`: one first-frame image, optional end-frame image, prompt, duration, resolution, and generated-audio flag. This operation has no `aspect_ratio` request parameter; the adapter checks that each frame matches the requested output ratio within 2.5%, and the output inherits the input frame ratio.
+- `bytedance/seedance-2.5/reference-to-video`: ordered image references, prompt, duration, aspect ratio, resolution, and generated-audio flag.
+
+The adapter rejects unknown models, text-only requests, and mixed frame/reference inputs. It validates the documented duration range (4–30 seconds), resolutions (480p/720p/1080p), and aspect ratios. Aspect ratio is sent only for reference-to-video, whose schema documents it. The API page does not publish its reference-count limit. ToC's request form accepts up to 32 images as an application input bound; this is not a verified provider limit or a guarantee that the provider accepts 32.
+
+In the video workspace select **Higgsfield / Seedance 2.5**, then choose either the start/end-frame mode or the ordered-reference mode. These are different public API operations. The interface preserves planned duration and reports an out-of-range value rather than shortening narration or changing the request silently. Image-to-video inherits the input image ratio; mismatched frame ratios are rejected before upload. The native-audio selector requests no audio, natural sound, or existing authored dialogue plus sound. Unscripted dialogue and score are excluded from natural-sound requests. Source audio can be selected, muted, and mixed with narration in p860.
+
+The server materializes the exact provider prompt, operation, reference bytes, duration, audio setting, and destination before submission. Downloaded video is checked for a video stream, requested duration/ratio, required audio, full decoding, and file hash before it becomes a candidate. The existing candidate selection and approval workflow remains the downstream entry point.
+
+Set `HF_API_KEY` on the server to the Higgsfield `KEY_ID:KEY_SECRET` credential. The adapter sends it only to the Higgsfield API using `Authorization: Key ...`. Local images are uploaded through `/files/generate-upload-url`; upload and public URLs must use HTTPS, and the presigned object-storage PUT receives only the headers returned by Higgsfield. Generated media is downloaded through the shared public-media helper, which validates DNS destinations and redirects and sends no provider credentials.
+
+Before submission, provide a caller-owned `journal_path` and stable `request_digest`. The journal also binds the operation to model, prompt, settings, and image content hashes, independent of local file paths. It records the submit intent before the POST, then the returned `request_id` and same-origin `status_url` immediately after acceptance. Polling resumes from a saved ID. A crash or submit exception without a saved ID is marked indeterminate and is never automatically resubmitted. A completed result URL is held in the local journal so an interrupted download can resume. A completed file is written to a temporary file and atomically replaces the destination only after download succeeds. Returned failures omit provider error text and URLs.
+
+Authenticated API requests reject redirects. Upload requests use the returned presigned headers only; credential-like headers are rejected, and any storage redirect is checked as public HTTPS with sensitive headers removed. The API base is fixed to the official `https://api.higgsfield.ai` origin.
+
+The public API operation references are [Seedance 2.5 Image-to-Video](https://open.higgsfield.ai/models/bytedance/seedance-2.5/image-to-video/api-reference), [Seedance 2.5 Reference-to-Video](https://open.higgsfield.ai/models/bytedance/seedance-2.5/reference-to-video/api-reference), and the [Higgsfield request lifecycle](https://docs.higgsfield.ai/docs/concepts/requests).

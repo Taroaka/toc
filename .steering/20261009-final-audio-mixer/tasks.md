@@ -1,0 +1,5 @@
+- [x] Regression tests for persistence, stale revisions, bus gain/mute and preview parity.
+- [x] Backend mixer settings and local audition endpoint.
+- [x] Final-tab controls, unsaved state and preview playback.
+- [x] Relevant backend tests, frontend test/build, browser interaction verification.
+- [x] Review, documentation and final report.

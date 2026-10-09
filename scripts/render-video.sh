@@ -10,6 +10,7 @@ Usage:
     --clip-list clips.txt \
     [--narration narration.mp3 | --narration-list narration_list.txt] \
     [--bgm bgm.mp3] [--bgm-volume 0.3] \
+    [--sound-plan frozen_sound_render.json] \
     [--audio mixed_audio.m4a] \
     [--srt subtitles.srt] \
     [--fps 24] [--size 1280x720] \
@@ -29,6 +30,7 @@ clip_list=""
 narration=""
 narration_list=""
 bgm=""
+sound_plan=""
 audio=""
 srt=""
 out=""
@@ -47,6 +49,8 @@ while [[ $# -gt 0 ]]; do
       narration_list="$2"; shift 2 ;;
     --bgm)
       bgm="$2"; shift 2 ;;
+    --sound-plan)
+      sound_plan="$2"; shift 2 ;;
     --bgm-volume)
       bgm_volume="$2"; shift 2 ;;
     --audio)
@@ -110,12 +114,26 @@ fi
 
 mixed_audio="$workdir/mixed_audio.m4a"
 
-if [[ -n "$audio" ]]; then
+if [[ -n "$sound_plan" ]]; then
+  if [[ -z "$narration_list" || -n "$audio" || -n "$bgm" || -n "$narration" ]]; then
+    echo "--sound-plan requires --narration-list and cannot be combined with other audio inputs." >&2
+    exit 1
+  fi
+  "${TOC_PYTHON:-python}" "$(dirname "$0")/mix-sound-design.py" \
+    --plan "$sound_plan" --narration-list "$narration_list" --out "$mixed_audio"
+elif [[ -n "$audio" ]]; then
   ffmpeg -hide_banner -y -i "$audio" -c:a aac -b:a 192k "$mixed_audio"
 else
   if [[ -n "$narration_list" ]]; then
     ffmpeg -hide_banner -y -f concat -safe 0 -i "$narration_list" -c copy "$workdir/narration_concat.mp3"
     narration="$workdir/narration_concat.mp3"
+  fi
+
+  if [[ -n "$narration" ]]; then
+    PYTHONPATH="$(cd "$(dirname "$0")/.." && pwd)${PYTHONPATH:+:$PYTHONPATH}" \
+      "${TOC_PYTHON:-python}" -m toc.narration_audio \
+      --source "$narration" --out "$workdir/narration_master.wav"
+    narration="$workdir/narration_master.wav"
   fi
 
   if [[ -n "$narration" && -n "$bgm" ]]; then

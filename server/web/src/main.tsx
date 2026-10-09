@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ProductionToolsPanel } from './ProductionToolsPanel';
 import { createRoot } from 'react-dom/client';
 import {
   AppBar,
@@ -16,6 +17,7 @@ import {
   DialogContent,
   DialogTitle,
   FormControl,
+  FormHelperText,
   IconButton,
   InputLabel,
   LinearProgress,
@@ -52,6 +54,13 @@ import SettingsIcon from '@mui/icons-material/Settings';
 import StopIcon from '@mui/icons-material/Stop';
 import { GlassDock, GlassPanel, GlassStatusRim, GlassSurface } from './components';
 import { pollCreateRun } from './createRunPolling';
+import { resumeRun } from './resumeRun';
+import { canResumeRun, isRunRepairing, isTerminalRunFailure, isWaitingForNarration, runFailureMessage } from './runStatus';
+import { shareRequest } from './requestLoader';
+import { NarrationVoiceTags } from './NarrationVoiceTags';
+import { SoundDesignPanel, type SoundStatus } from './SoundDesignPanel';
+import { FinalAudioMixer } from './FinalAudioMixer';
+import { higgsfieldDurationError, nativeAudioModeAfterProviderSwitch, shouldSendNativeAudioMode, videoInputModeError, videoInputReferences, type VideoInputMode, type VideoNativeAudioMode } from './HiggsfieldSettings';
 import './styles.css';
 
 const MAX_CUT_VIDEO_DURATION_SECONDS = 60;
@@ -92,7 +101,10 @@ type ImageRequestItem = {
   videoTool?: string;
   videoQuality?: string;
   videoAspectRatio?: string;
-  videoInputMode?: string;
+  videoInputMode?: VideoInputMode;
+  videoNativeAudioMode?: VideoNativeAudioMode;
+  videoHasDialogue?: boolean;
+  cinematicDirection?: CinematicDirection | null;
   videoFirstReference?: string;
   videoLastReference?: string;
   videoReferences?: string[];
@@ -113,6 +125,82 @@ type Candidate = {
   mtimeMs?: number;
 };
 
+type CinematicDirection = {
+  film_language?: { fields?: Record<string, unknown>; origins?: unknown } | null;
+  light_continuity?: unknown;
+  focus?: unknown;
+  performance?: unknown;
+  physics?: unknown;
+};
+
+type CinematicDirectionEntry = { label: string; value: string };
+
+const CINEMATIC_DIRECTION_LABELS: Record<string, string> = {
+  visual_intent: '映像の狙い',
+  palette: '色と配色',
+  exposure: '露出',
+  texture: '質感',
+  camera: 'カメラ',
+  shadows: '影の扱い',
+  exposure_shadow_treatment: '明るさと影',
+  materials: '素材感',
+  textures: '質感',
+  material_texture: '素材と質感',
+  optics: 'レンズ表現',
+  depth: '奥行き',
+  optics_depth: 'レンズと奥行き',
+  camera_behavior: 'カメラの動き',
+  composition: '構図',
+  avoidances: '避ける表現',
+  light_continuity: '照明の継続',
+  focus: 'ピント',
+  performance: '演技と動作',
+  physics: '物理的な動き',
+  initial: '初期のピント',
+  change: 'ピント移動',
+  action: '動作',
+  observable_reaction: '目に見える反応',
+  timing: 'タイミング',
+};
+
+function safeDirectionText(value: unknown): string {
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text || /^sha256:/i.test(text) || /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(text)) return '';
+    return text;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) return value.map(safeDirectionText).filter(Boolean).join('、');
+  if (!value || typeof value !== 'object') return '';
+  return Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => !/(^|[_-])(ids?|hash|origins?|revisions?|sources?|schemas?)([_-]|$)/i.test(key))
+    .map(([key, child]) => {
+      const content = safeDirectionText(child);
+      if (!content) return '';
+      const label = CINEMATIC_DIRECTION_LABELS[key] || '補足';
+      return `${label}：${content}`;
+    }).filter(Boolean).join('。');
+}
+
+export function cinematicDirectionEntries(direction?: CinematicDirection | null): CinematicDirectionEntry[] {
+  if (!direction) return [];
+  const entries: CinematicDirectionEntry[] = [];
+  const fields = direction.film_language?.fields;
+  if (fields && typeof fields === 'object' && !Array.isArray(fields)) {
+    for (const [key, value] of Object.entries(fields)) {
+      if (/(^|[_-])(ids?|hash|origins?|revisions?|sources?|schemas?)([_-]|$)/i.test(key)) continue;
+      const text = safeDirectionText(value);
+      if (text) entries.push({ label: CINEMATIC_DIRECTION_LABELS[key] || '映像全体の方針', value: text });
+    }
+  }
+  for (const [key, label] of [['light_continuity', '照明の継続'], ['focus', 'ピント'],
+    ['performance', '演技と動作'], ['physics', '物理的な動き']] as const) {
+    const text = safeDirectionText(direction[key]);
+    if (text) entries.push({ label, value: text });
+  }
+  return entries;
+}
+
 const VIDEO_DRAFT_FIELDS = [
   'videoDraftPrompt',
   'videoQuality',
@@ -122,12 +210,15 @@ const VIDEO_DRAFT_FIELDS = [
   'videoLastReferencePath',
   'videoReferencePaths',
   'videoTool',
+  'videoInputMode',
+  'videoNativeAudioMode',
 ] as const;
 
 type VideoDraftField = (typeof VIDEO_DRAFT_FIELDS)[number];
 const VIDEO_DRAFT_FIELD_SET = new Set<string>(VIDEO_DRAFT_FIELDS);
 
 type EditableItem = ImageRequestItem & {
+  narrationImagePath?: string | null;
   draftPrompt: string;
   selectedReferences: ReferenceOption[];
   candidates: Candidate[];
@@ -180,7 +271,7 @@ type EditableItem = ImageRequestItem & {
 };
 
 type ViewKind = 'asset' | 'scene';
-type WorkspaceMode = 'image' | 'narration' | 'video' | 'render';
+type WorkspaceMode = 'image' | 'narration' | 'video' | 'sound' | 'render';
 type AssetFilter = 'chara' | 'obj' | 'location' | 'asset';
 type AssetCategory = 'chara' | 'obj' | 'location' | 'asset';
 type AssetCreateType = 'character' | 'object' | 'location';
@@ -248,6 +339,8 @@ type VideoGenerateItemPayload = {
   aspect_ratio: string;
   duration_seconds: number;
   tool: string;
+  video_input_mode?: VideoInputMode;
+  video_native_audio_mode?: VideoNativeAudioMode;
   candidate_count: number;
 };
 
@@ -263,6 +356,10 @@ type NarrationManifestItem = {
   configuredVideoDurationSeconds: number;
   videoPrompt: string;
   videoTool: string;
+  videoInputMode: VideoInputMode;
+  videoNativeAudioMode: VideoNativeAudioMode;
+  videoHasDialogue: boolean;
+  cinematicDirection?: CinematicDirection | null;
   videoQuality: string;
   videoAspectRatio: string;
   videoFirstReference: string;
@@ -362,6 +459,15 @@ type RunProgress = {
   topic: string;
   status: string;
   runtimeStage: string;
+  repair?: { phase: string; stage: string; target: string; attempt: string; limit: string; reason: string };
+  failure?: {
+    terminal: boolean;
+    stage: string;
+    runtimeStage: string;
+    phase: string;
+    errorKind: string;
+    message: string;
+  };
   currentStage: RunStage | null;
   stages: RunStage[];
   slots: RunSlot[];
@@ -371,6 +477,26 @@ type RunProgress = {
 };
 
 type CreateRunMode = 'normal' | 'scene_storyboard' | 'world_walk';
+
+export function buildCreateRunRequest(
+  mode: CreateRunMode,
+  values: { title: string; source: string; cinematicPreferences: string; targetDurationSeconds: number; sourceRunId: string },
+): { endpoint: string; body: Record<string, unknown> } {
+  if (mode === 'world_walk') {
+    return { endpoint: '/api/image-gen/runs/create-world-walk', body: {
+      source_run_id: values.sourceRunId, title: values.title.trim() || null,
+      target_duration_seconds: values.targetDurationSeconds,
+    } };
+  }
+  return {
+    endpoint: mode === 'scene_storyboard' ? '/api/image-gen/runs/create/storyboard' : '/api/image-gen/runs/create',
+    body: {
+      title: values.title.trim(), source: values.source.trim() || null,
+      cinematic_preferences: values.cinematicPreferences.trim() || null,
+      target_duration_seconds: values.targetDurationSeconds,
+    },
+  };
+}
 
 type CreateRunJob = {
   jobId: string;
@@ -644,7 +770,7 @@ function toEditableItems(items: ImageRequestItem[], refs: ReferenceOption[], nar
     });
     const narration = narrationById?.get(item.id);
     const sceneKey = inferSceneKey(item.id, narration?.sceneId || item.sceneId);
-    const narrationMinDuration = Math.max(1, Math.ceil(narration?.narrationDurationSeconds || 0));
+    const narrationMinDuration = Math.max(1, Math.ceil((narration?.narrationDurationSeconds || 0) + (narration?.renderNarrationOffsetSeconds || 0)));
     const configuredVideoDuration = Math.max(
       narration?.configuredVideoDurationSeconds || item.configuredVideoDurationSeconds || 8,
       narrationMinDuration,
@@ -654,6 +780,7 @@ function toEditableItems(items: ImageRequestItem[], refs: ReferenceOption[], nar
     return {
       ...item,
       draftPrompt: item.prompt,
+      narrationImagePath: narration?.imageOutput || item.existingImage || item.output || null,
       selectedReferences,
       candidates: item.candidates || [],
       selectedCandidatePath: item.candidates?.find((candidate) => candidate.path)?.path ?? null,
@@ -674,6 +801,10 @@ function toEditableItems(items: ImageRequestItem[], refs: ReferenceOption[], nar
         ? narration.videoReferences
         : item.videoReferences?.length ? item.videoReferences : selectedReferences.map((ref) => ref.path),
       videoTool: narration?.videoTool || item.videoTool || 'kling_3_0',
+      videoInputMode: narration?.videoInputMode || item.videoInputMode || 'image_to_video',
+      videoNativeAudioMode: narration?.videoNativeAudioMode || item.videoNativeAudioMode || 'off',
+      videoHasDialogue: Boolean(narration?.videoHasDialogue || item.videoHasDialogue),
+      cinematicDirection: narration?.cinematicDirection || item.cinematicDirection || null,
       sceneKey,
       sceneLabel: sceneLabelFromKey(sceneKey),
       narrationText: narration?.narrationText || '',
@@ -788,6 +919,8 @@ function mergeLoadedVideoItemsWithLocalState(prev: EditableItem[], next: Editabl
       videoLastReferencePath: dirtyFields.has('videoLastReferencePath') ? previous.videoLastReferencePath : item.videoLastReferencePath,
       videoReferencePaths: dirtyFields.has('videoReferencePaths') ? previous.videoReferencePaths : item.videoReferencePaths,
       videoTool: dirtyFields.has('videoTool') ? previous.videoTool : item.videoTool,
+      videoInputMode: dirtyFields.has('videoInputMode') ? previous.videoInputMode : item.videoInputMode,
+      videoNativeAudioMode: dirtyFields.has('videoNativeAudioMode') ? previous.videoNativeAudioMode : item.videoNativeAudioMode,
       renderVideoPath: localSelectedVideoPath ?? item.renderVideoPath,
       renderVideoExists: localSelectedVideoPath ? previous.renderVideoExists : item.renderVideoExists,
     };
@@ -846,6 +979,7 @@ function viewLabel(view: ViewKind): string {
 function workspaceModeTitle(mode: WorkspaceMode): string {
   if (mode === 'narration') return 'ナレーション生成と確認';
   if (mode === 'video') return '動画候補の生成';
+  if (mode === 'sound') return 'BGM・SEの生成と設定';
   if (mode === 'render') return '最終レンダー入力';
   return '画像候補の比較と採用';
 }
@@ -853,6 +987,7 @@ function workspaceModeTitle(mode: WorkspaceMode): string {
 function workspaceModeLabel(mode: WorkspaceMode): string {
   if (mode === 'narration') return '音声 / シーン';
   if (mode === 'video') return '動画 / シーン';
+  if (mode === 'sound') return 'BGM・SE';
   if (mode === 'render') return '最終 / シーン';
   return '画像';
 }
@@ -1061,7 +1196,20 @@ function parentStageCode(code: string): string {
 }
 
 function RunProgressPanel({ progress }: { progress: RunProgress | null }) {
-  if (!progress || !progress.stages.length) return null;
+  if (!progress) return null;
+  const terminalFailure = isTerminalRunFailure(progress);
+  const repairing = isRunRepairing(progress);
+  if (!progress.stages.length) {
+    if (!terminalFailure) return null;
+    return (
+      <Box className="runProgressPanel" role="alert">
+        <Typography fontWeight={900}>処理が失敗しました</Typography>
+        <Typography variant="body2" color="error.main" whiteSpace="pre-wrap">
+          {runFailureMessage(progress)}
+        </Typography>
+      </Box>
+    );
+  }
   const mainStages = progress.stages.filter((stage) => /^p[1-9]00$/.test(stage.code));
   const current = progress.currentStage && !RETIRED_REVIEW_SLOTS.has(progress.currentStage.code)
     ? progress.currentStage
@@ -1077,19 +1225,25 @@ function RunProgressPanel({ progress }: { progress: RunProgress | null }) {
         <Box minWidth={0}>
           <Typography variant="caption" color="text.secondary">レポ進捗</Typography>
           <Typography fontWeight={900} noWrap>
-            {current ? currentStageTitle(current) : progress.runtimeStage || progress.status || '進捗待ち'}
+            {terminalFailure
+              ? `失敗: ${current ? currentStageTitle(current) : progress.runtimeStage || progress.status || '処理'}`
+              : current ? currentStageTitle(current) : progress.runtimeStage || progress.status || '進捗待ち'}
           </Typography>
         </Box>
-        <Chip size="small" color="primary" label={`${progress.doneCount}/${progress.totalCount}`} />
+        <Chip size="small" color={terminalFailure ? 'error' : 'primary'} label={`${progress.doneCount}/${progress.totalCount}`} />
       </Stack>
-      <LinearProgress variant="determinate" value={Math.max(0, Math.min(100, progress.percent))} />
+      <LinearProgress
+        color={terminalFailure ? 'error' : 'primary'}
+        variant="determinate"
+        value={Math.max(0, Math.min(100, progress.percent))}
+      />
       <Box className="runStageRail" aria-label="ToC進捗ステージ">
         {mainStages.map((stage) => (
           <Chip
             key={stage.code}
             size="small"
             label={`${stage.code} ${stageDisplayLabel(stage)} ${stageStateLabel(stage.state)}`}
-            color={stage.code === current?.code ? 'primary' : stage.state === 'done' ? 'success' : 'default'}
+            color={stage.state === 'failed' ? 'error' : stage.code === current?.code ? 'primary' : stage.state === 'done' ? 'success' : 'default'}
             variant={stage.code === current?.code || stage.state === 'done' ? 'filled' : 'outlined'}
           />
         ))}
@@ -1097,6 +1251,27 @@ function RunProgressPanel({ progress }: { progress: RunProgress | null }) {
       <Typography variant="caption" color="text.secondary">
         {progress.runtimeStage ? `runtime.stage: ${runtimeStageLabel(progress.runtimeStage)}` : 'state.txt / p000_index.md の進捗を表示しています'}
       </Typography>
+      {terminalFailure && (
+        <Box role="alert" sx={{ my: 1 }}>
+          <Typography fontWeight={700}>処理が失敗しました</Typography>
+          <Typography variant="body2" color="error.main" whiteSpace="pre-wrap">
+            {runFailureMessage(progress)}
+          </Typography>
+          {progress.failure?.stage && (
+            <Typography variant="caption" color="text.secondary">
+              失敗ステージ: {progress.failure.stage}
+            </Typography>
+          )}
+        </Box>
+      )}
+      {!terminalFailure && repairing && progress.repair?.phase === 'repairing' && (
+        <Box role="status" sx={{ my: 1 }}>
+          <Typography fontWeight={700}>
+            {progress.repair.stage} を補正中 — {progress.repair.target}（{progress.repair.attempt}/{progress.repair.limit}）
+          </Typography>
+          <Typography variant="body2" color="text.secondary">{progress.repair.reason}</Typography>
+        </Box>
+      )}
       <Divider flexItem />
       <Box className="stageCatalog" aria-label="Pステージと小番号一覧">
         {stageDescriptions.map(({ stage, slots }) => (
@@ -1374,14 +1549,23 @@ type SceneVideoPanelProps = {
 };
 
 function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoReady, videoCandidateCount, onPatchItem, onGenerateVideo }: SceneVideoPanelProps) {
+  const higgsfield = item.videoTool === 'higgsfield';
   const referenceImageMode = item.videoInputMode === 'reference_images';
   const options = useMemo(() => videoReferenceOptions(item, references), [item, references]);
   const byPath = useMemo(() => new Map(options.map((option) => [option.path, option])), [options]);
   const firstReference = item.videoFirstReferencePath ? byPath.get(item.videoFirstReferencePath) ?? null : null;
   const lastReference = item.videoLastReferencePath ? byPath.get(item.videoLastReferencePath) ?? null : null;
   const videoReferences = item.videoReferencePaths.map((path) => byPath.get(path)).filter(Boolean) as ReferenceOption[];
+  const directionEntries = useMemo(() => cinematicDirectionEntries(item.cinematicDirection), [item.cinematicDirection]);
   const videoSlots = useMemo(() => videoCandidateSlots(item, videoCandidateCount), [item, videoCandidateCount]);
   const narrationMinDuration = Math.max(1, Math.ceil(item.narrationDurationSec || 0));
+  const requestedDuration = Math.max(item.videoDurationSec, narrationMinDuration, 1);
+  const durationError = higgsfield ? higgsfieldDurationError(requestedDuration) : null;
+  const inputModeError = videoInputModeError(item.videoTool, item.videoInputMode || 'image_to_video',
+    item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output, item.videoReferencePaths);
+  const nativeAudioProviderError = !higgsfield && Boolean(item.videoNativeAudioMode && item.videoNativeAudioMode !== 'off');
+  const showNativeAudioChoice = higgsfield || nativeAudioProviderError || item.videoDirtyFields.includes('videoNativeAudioMode');
+  const referencesDisabledForTool = higgsfield && !referenceImageMode;
   const previewPaths = Array.from(
     new Set(
       [
@@ -1398,7 +1582,7 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
         <Box minWidth={0}>
           <Typography fontWeight={900}>動画プロンプト</Typography>
           <Typography variant="caption" color="text.secondary" noWrap>
-            first / last reference と画質をこのcutごとに固定
+            cutごとに動画モデル、参照画像、音声を設定
           </Typography>
         </Box>
         <Stack direction="row" spacing={0.75} alignItems="center">
@@ -1416,9 +1600,22 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
         onChange={(event) => onPatchItem(item.id, { videoDraftPrompt: event.target.value })}
       />
 
+      {directionEntries.length > 0 && <Box component="details" sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1.5 }}>
+        <Box component="summary" sx={{ cursor: 'pointer', fontWeight: 800 }}>このカットで使う撮影方針</Box>
+        <Stack spacing={1} sx={{ pt: 1.5 }}>
+          {directionEntries.map((entry, index) => <Box key={`${entry.label}-${index}`}>
+            <Typography variant="caption" color="text.secondary" fontWeight={700}>{entry.label}</Typography>
+            <Typography variant="body2" whiteSpace="pre-wrap">{entry.value}</Typography>
+          </Box>)}
+          <Typography variant="caption" color="text.secondary">
+            完成済み映像に反映する変更は、明示的なp400再構築後に適用されます。
+          </Typography>
+        </Stack>
+      </Box>}
+
       <Box className="videoSettingsGrid">
         <FormControl size="small">
-          <InputLabel>画質</InputLabel>
+            <InputLabel>画質</InputLabel>
           <Select
             label="画質"
             value={item.videoQuality}
@@ -1427,6 +1624,7 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
             <MenuItem value="720p">720p</MenuItem>
             <MenuItem value="1080p">1080p</MenuItem>
             <MenuItem value="4K">4K</MenuItem>
+            {higgsfield && <MenuItem value="480p">480p</MenuItem>}
           </Select>
         </FormControl>
         <FormControl size="small">
@@ -1440,28 +1638,67 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
             <MenuItem value="9:16">9:16</MenuItem>
             <MenuItem value="1:1">1:1</MenuItem>
             <MenuItem value="4:3">4:3</MenuItem>
+            {higgsfield && <MenuItem value="21:9">21:9</MenuItem>}
+            {higgsfield && <MenuItem value="3:4">3:4</MenuItem>}
           </Select>
         </FormControl>
         <FormControl size="small">
-          <InputLabel>tool</InputLabel>
+          <InputLabel>動画モデル</InputLabel>
           <Select
-            label="tool"
+            label="動画モデル"
             value={item.videoTool}
-            disabled={referenceImageMode}
-            onChange={(event) => onPatchItem(item.id, { videoTool: event.target.value })}
+            onChange={(event) => {
+              const nextTool = event.target.value;
+              const nextAudioMode = nativeAudioModeAfterProviderSwitch(nextTool, item.videoNativeAudioMode || 'off');
+              onPatchItem(item.id, {
+                videoTool: nextTool,
+                ...(nextTool === 'higgsfield' ? { videoInputMode: item.videoInputMode || 'image_to_video' } : {}),
+                ...(nextAudioMode !== item.videoNativeAudioMode ? { videoNativeAudioMode: nextAudioMode } : {}),
+              });
+            }}
           >
-            <MenuItem value="kling_3_0">Kling 3.0</MenuItem>
-            <MenuItem value="kling_3_0_omni">Kling Omni</MenuItem>
+            <MenuItem value="kling_3_0" disabled={referenceImageMode}>Kling 3.0</MenuItem>
+            <MenuItem value="kling_3_0_omni" disabled={referenceImageMode}>Kling Omni</MenuItem>
             <MenuItem value="seedance">Seedance</MenuItem>
+            <MenuItem value="higgsfield">Higgsfield / Seedance 2.5</MenuItem>
           </Select>
         </FormControl>
+        {higgsfield && <FormControl size="small">
+          <InputLabel>入力方法</InputLabel>
+          <Select label="入力方法" value={item.videoInputMode || 'image_to_video'} disabled={Boolean(item.isRenderUnit)}
+            onChange={(event) => onPatchItem(item.id, { videoInputMode: event.target.value as VideoInputMode })}>
+            <MenuItem value="image_to_video">開始・終了フレーム</MenuItem>
+            <MenuItem value="reference_images">参照画像から生成</MenuItem>
+          </Select>
+          {item.isRenderUnit && <FormHelperText>この動画単位では参照画像モードを固定しています。</FormHelperText>}
+        </FormControl>}
+        {showNativeAudioChoice && <FormControl size="small">
+          <InputLabel>動画内の音声</InputLabel>
+          <Select label="動画内の音声" value={item.videoNativeAudioMode || 'off'}
+            onChange={(event) => onPatchItem(item.id, { videoNativeAudioMode: event.target.value as VideoNativeAudioMode })}>
+            <MenuItem value="off">なし</MenuItem>
+            {higgsfield && <MenuItem value="natural_sound">環境音・動作音</MenuItem>}
+            {!higgsfield && item.videoNativeAudioMode === 'natural_sound' &&
+              <MenuItem value="natural_sound" disabled>環境音・動作音（非対応モデルの設定）</MenuItem>}
+            {higgsfield && (item.videoHasDialogue || item.videoNativeAudioMode === 'dialogue_and_sound') &&
+              <MenuItem value="dialogue_and_sound" disabled={!item.videoHasDialogue}>環境音と台詞</MenuItem>}
+            {!higgsfield && item.videoNativeAudioMode === 'dialogue_and_sound' &&
+              <MenuItem value="dialogue_and_sound" disabled>環境音と台詞（非対応モデルの設定）</MenuItem>}
+          </Select>
+          {!higgsfield && nativeAudioProviderError && <FormHelperText error>この動画モデルでは音声生成に対応していません。音声を「なし」にしてから進めてください。</FormHelperText>}
+          {!higgsfield && !nativeAudioProviderError && <FormHelperText>この動画モデルでは音声生成を行いません。</FormHelperText>}
+        </FormControl>}
         <TextField
           size="small"
           label="秒数"
           type="number"
           value={item.videoDurationSec}
-          inputProps={{ min: narrationMinDuration, max: MAX_CUT_VIDEO_DURATION_SECONDS }}
+          inputProps={{ min: higgsfield ? 4 : narrationMinDuration, max: higgsfield ? 30 : MAX_CUT_VIDEO_DURATION_SECONDS }}
           onChange={(event) => {
+            if (higgsfield) {
+              onPatchItem(item.id, { videoDurationSec: Number(event.target.value) });
+              return;
+            }
             const next = Math.max(
               narrationMinDuration,
               Math.min(MAX_CUT_VIDEO_DURATION_SECONDS, Number(event.target.value) || narrationMinDuration),
@@ -1470,6 +1707,8 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
           }}
         />
       </Box>
+      {durationError && <FormHelperText error>{durationError}</FormHelperText>}
+      {inputModeError && <FormHelperText error>{inputModeError}</FormHelperText>}
 
       <Box className="videoFrameGrid">
         <Autocomplete
@@ -1508,6 +1747,7 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
         multiple
         options={options}
         value={videoReferences}
+        disabled={referencesDisabledForTool}
         getOptionLabel={(option) => option.label}
         isOptionEqualToValue={(a, b) => a.path === b.path}
         onChange={(_, value) => onPatchItem(item.id, { videoReferencePaths: value.map((option) => option.path) })}
@@ -1517,7 +1757,8 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
             <span>{option.label}</span>
           </Box>
         )}
-        renderInput={(params) => <TextField {...params} label="補助reference" size="small" placeholder="必要な参照を追加" />}
+        renderInput={(params) => <TextField {...params} label="補助参照画像" size="small" placeholder="必要な参照を追加"
+          helperText={referencesDisabledForTool ? '開始・終了フレームを使うため、この方法では送信されません。' : higgsfield ? '選択した順番で送信します。' : undefined} />}
       />
 
       <Box className="videoReferenceRail" aria-label="動画参照画像">
@@ -1548,7 +1789,7 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
               variant="outlined"
               startIcon={<MovieCreationIcon />}
               onClick={handleGenerateVideo}
-              disabled={!videoReady || videoGenerationBusy || item.videoGenerating || !item.videoDraftPrompt.trim()}
+              disabled={!videoReady || videoGenerationBusy || item.videoGenerating || !item.videoDraftPrompt.trim() || Boolean(durationError) || Boolean(inputModeError) || nativeAudioProviderError}
             >
               このcutを動画生成
             </Button>
@@ -1578,6 +1819,9 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
           ))}
         </Box>
       </Box>
+      <ProductionToolsPanel runId={runId} itemId={item.id} kind="video" jsonFetch={jsonFetch}
+        mediaUrl={(path, kind) => kind === 'video' ? videoFileUrl(runId, path) : fileUrl(runId, path)}
+        onVideoSelected={(path) => onPatchItem(item.id, { renderVideoPath: path, selectedVideoPath: path })} />
     </Box>
   );
 }
@@ -1915,6 +2159,13 @@ const PromptCard = React.memo(function PromptCard({
             </Box>
           </Box>
         </Box>
+        <ProductionToolsPanel runId={runId} itemId={item.id} kind="image" jsonFetch={jsonFetch}
+          mediaUrl={(path, kind) => kind === 'video' ? videoFileUrl(runId, path) : fileUrl(runId, path)}
+          onReferenceCreated={(path) => {
+            if (!item.selectedReferences.some(reference => reference.path === path)) {
+              onPatchItem(item.id, { selectedReferences: [...item.selectedReferences, { path, label: '状態差分の参照画像', available: true }] });
+            }
+          }} />
       </CardContent>
     </Card>
   );
@@ -1968,6 +2219,25 @@ const VideoCutCard = React.memo(function VideoCutCard({
   );
 });
 
+const NarrationSceneImage = React.memo(function NarrationSceneImage({ src, cutId }: { src: string | null; cutId: string }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <Box className="narrationImageColumn">
+      <Typography variant="caption" color="text.secondary">このcutの画像</Typography>
+      <Box className="narrationImageFrame">
+        {src && !failed ? (
+          <img src={src} alt={`${cutId}に対応する画像`} loading="lazy" decoding="async" onError={() => setFailed(true)} />
+        ) : (
+          <Stack alignItems="center" spacing={1} className="narrationImageEmpty">
+            <ImageIcon color="disabled" />
+            <Typography variant="body2" color="text.secondary">{failed ? '画像を読み込めませんでした' : '画像未生成'}</Typography>
+          </Stack>
+        )}
+      </Box>
+    </Box>
+  );
+});
+
 type NarrationCutCardProps = {
   item: EditableItem;
   runId: string;
@@ -2010,6 +2280,8 @@ const NarrationCutCard = React.memo(function NarrationCutCard({
     && item.narrationCandidateOutput,
   );
   const previewOutput = candidatePreviewReady ? item.narrationCandidateOutput : item.narrationOutput;
+  const imagePath = item.narrationImagePath || item.existingImage || item.output || null;
+  const imageSrc = imagePath ? fileUrl(runId, imagePath) : null;
   const previewExists = candidatePreviewReady || (item.narrationExists && Boolean(item.narrationOutput));
   const candidateCurrent = Boolean(
     item.narrationCandidateId
@@ -2036,22 +2308,29 @@ const NarrationCutCard = React.memo(function NarrationCutCard({
         </Stack>
 
         <Box className="narrationPanel">
-          <TextField
-            label="ナレーション文面"
-            multiline
-            minRows={5}
-            value={item.narrationText}
-            disabled={textLocked}
-            onChange={(event) => onPatchItem(item.id, { narrationText: event.target.value, narrationDirty: true })}
-          />
-          <TextField
-            label="TTS文面"
-            multiline
-            minRows={3}
-            value={item.narrationTtsText}
-            disabled={textLocked}
-            onChange={(event) => onPatchItem(item.id, { narrationTtsText: event.target.value, narrationDirty: true })}
-          />
+          <Box className="narrationContentGrid">
+            <NarrationSceneImage key={imageSrc || `${runId}:${item.id}`} src={imageSrc} cutId={item.id} />
+            <Box className="narrationTextColumn">
+              <TextField
+                label="ナレーション文面"
+                multiline
+                minRows={5}
+                value={item.narrationText}
+                disabled={textLocked}
+                onChange={(event) => onPatchItem(item.id, { narrationText: event.target.value, narrationDirty: true })}
+              />
+              <TextField
+                label="音声用の文面（読み方・タグ）"
+                helperText="角括弧のタグで語り方や間を指定します。読み間違いはこの欄で修正できます。"
+                multiline
+                minRows={3}
+                value={item.narrationTtsText}
+                disabled={textLocked}
+                onChange={(event) => onPatchItem(item.id, { narrationTtsText: event.target.value, narrationDirty: true })}
+              />
+              <NarrationVoiceTags text={item.narrationTtsText} silent={item.narrationTool === 'silent'} />
+            </Box>
+          </Box>
           <Box className="narrationSettingsGrid">
             <FormControl size="small">
               <InputLabel>tool</InputLabel>
@@ -2075,8 +2354,9 @@ const NarrationCutCard = React.memo(function NarrationCutCard({
             />
           </Box>
           <Box className="audioCandidateBox">
+            <Typography variant="caption" color="text.secondary">試聴用に音量を−19 LUFS目標へ調整し、cutの間を反映します。元音声は保持します。</Typography>
             {previewExists && previewOutput ? (
-              <audio src={audioFileUrl(runId, previewOutput)} controls preload="metadata" onPlay={handleAudioPlay} />
+              <audio src={`${audioFileUrl(runId, previewOutput)}&preview_item=${encodeURIComponent(item.id)}`} controls preload="metadata" onPlay={handleAudioPlay} />
             ) : (
               <Typography variant="caption" color="text.secondary">音声ファイル未生成</Typography>
             )}
@@ -2228,6 +2508,10 @@ function App() {
   const [runs, setRuns] = useState<RunFolder[]>([]);
   const [runId, setRunId] = useState('');
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('image');
+  const [soundReady, setSoundReady] = useState(false);
+  const [soundBusy, setSoundBusy] = useState(false);
+  const [mixDirty, setMixDirty] = useState(false);
+  const [mixBusy, setMixBusy] = useState(false);
   const [viewKind, setViewKind] = useState<ViewKind>('asset');
   const [assetFilter, setAssetFilter] = useState<AssetFilter>('asset');
   const [candidateCount, setCandidateCount] = useState(1);
@@ -2280,6 +2564,7 @@ function App() {
   const [createRunOpen, setCreateRunOpen] = useState(false);
   const [createRunTitle, setCreateRunTitle] = useState('');
   const [createRunSource, setCreateRunSource] = useState('');
+  const [createRunCinematicPreferences, setCreateRunCinematicPreferences] = useState('');
   const [createRunMode, setCreateRunMode] = useState<CreateRunMode>('normal');
   const [createRunSourceRunId, setCreateRunSourceRunId] = useState('');
   const [worldWalkSources, setWorldWalkSources] = useState<WorldWalkSourceRun[]>([]);
@@ -2325,6 +2610,16 @@ function App() {
   const requestKindRef = useRef<ViewKind>('asset');
   const itemsScopeRef = useRef('');
   const loadRunRequestsEpochRef = useRef(0);
+  const loadRunRequestsBaseInFlightRef = useRef(new Map<string, Promise<{
+    items: ImageRequestItem[];
+    references: ReferenceOption[];
+    progress: RunProgress;
+  }>>());
+  const loadRunRequestsNarrationInFlightRef = useRef(new Map<string, Promise<{
+    items: NarrationManifestItem[];
+    audioSetHash: string;
+    progress: RunProgress;
+  }>>());
   const narrationMutationEpochRef = useRef(0);
   const narrationMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const fullNarrationPlaybackTokenRef = useRef(0);
@@ -2334,6 +2629,15 @@ function App() {
     () => worldWalkSources.find((source) => source.id === createRunSourceRunId) ?? null,
     [createRunSourceRunId, worldWalkSources],
   );
+  useEffect(() => {
+    setSoundReady(false);
+    if (workspaceMode !== 'render' || !runId) return;
+    const controller = new AbortController();
+    void jsonFetch<SoundStatus>(`/api/image-gen/sound-design?run_id=${encodeURIComponent(runId)}`, { signal: controller.signal })
+      .then(data => { if (!controller.signal.aborted) setSoundReady(data.ready); })
+      .catch(() => { if (!controller.signal.aborted) setSoundReady(false); });
+    return () => controller.abort();
+  }, [runId, workspaceMode]);
   const requestKind = workspaceMode === 'image' ? viewKind : 'scene';
   runIdRef.current = runId;
   requestKindRef.current = requestKind;
@@ -2458,14 +2762,17 @@ function App() {
   const videoGenerationActive = videoPromptBusy
     || items.some((item) => item.videoGenerating)
     || videoTargetItems.some((item) => item.videoGenerating);
-  const generationInFlight = imageGenerationActive || narrationGenerationActive || videoGenerationActive || renderBusy;
+  const runHasTerminalFailure = isTerminalRunFailure(runProgress);
+  const generationInFlight = !runHasTerminalFailure
+    && (imageGenerationActive || narrationGenerationActive || videoGenerationActive || soundBusy || renderBusy);
   const backgroundGenerationLabel = useMemo(() => {
+    if (runHasTerminalFailure) return null;
     if (workspaceMode !== 'image' && imageGenerationActive) return '画像生成が別画面で進行中';
     if (workspaceMode !== 'narration' && narrationGenerationActive) return '音声生成が別画面で進行中';
     if (workspaceMode !== 'video' && videoGenerationActive) return '動画生成が別画面で進行中';
     if (workspaceMode !== 'render' && renderBusy) return '最終処理が別画面で進行中';
     return null;
-  }, [imageGenerationActive, narrationGenerationActive, renderBusy, videoGenerationActive, workspaceMode]);
+  }, [imageGenerationActive, narrationGenerationActive, renderBusy, runHasTerminalFailure, videoGenerationActive, workspaceMode]);
   const breadcrumb = useMemo(
     () => workspaceMode !== 'image'
       ? workspaceModeLabel(workspaceMode)
@@ -2568,42 +2875,68 @@ function App() {
       && runIdRef.current === targetRunId
       && requestKindRef.current === targetKind
     );
-    setBusy(true);
-    try {
-      const data = await jsonFetch<{ items: ImageRequestItem[]; references: ReferenceOption[]; progress: RunProgress }>(
-        `/api/image-gen/requests?run_id=${encodeURIComponent(targetRunId)}&kind=${targetKind}`,
-      );
-      let narrationById: Map<string, NarrationManifestItem> | undefined;
-      let audioSetHash = '';
-      let progress = data.progress;
-      if (targetKind === 'scene' && includeNarration) {
-        try {
-          const narrationData = await jsonFetch<{ items: NarrationManifestItem[]; audioSetHash: string; progress: RunProgress }>(
-            `/api/image-gen/narration-items?run_id=${encodeURIComponent(targetRunId)}`,
-          );
-          narrationById = new Map(narrationData.items.map((item) => [item.itemId, item]));
-          audioSetHash = narrationData.audioSetHash || '';
-          progress = narrationData.progress || progress;
-        } catch (error) {
-          console.error(error);
-        }
-      }
-      if (!requestIsCurrent()) return;
-      const loadedItems = toEditableItems(data.items, data.references, narrationById);
+    const commitLoaded = (
+      items: ImageRequestItem[],
+      references: ReferenceOption[],
+      progress: RunProgress,
+      narrationById?: Map<string, NarrationManifestItem>,
+      audioSetHash = '',
+    ) => {
+      if (!requestIsCurrent()) return false;
+      const loadedItems = toEditableItems(items, references, narrationById);
       const sameScope = itemsScopeRef.current === targetScopeKey;
       itemsScopeRef.current = targetScopeKey;
-      setReferences(data.references);
+      setReferences(references);
       setItems((prev) => sameScope ? mergeLoadedItemsWithInflight(prev, loadedItems) : loadedItems);
       setRunProgress(progress);
       if (targetKind === 'scene') setNarrationAudioSetHash(audioSetHash);
+      return true;
+    };
+
+    setBusy(true);
+    const baseKey = `${targetRunId}:${targetKind}:${narrationMutationEpoch}`;
+    let data: { items: ImageRequestItem[]; references: ReferenceOption[]; progress: RunProgress };
+    try {
+      data = await shareRequest(
+        loadRunRequestsBaseInFlightRef.current,
+        baseKey,
+        () => jsonFetch<{ items: ImageRequestItem[]; references: ReferenceOption[]; progress: RunProgress }>(
+          `/api/image-gen/requests?run_id=${encodeURIComponent(targetRunId)}&kind=${targetKind}`,
+        ),
+      );
     } catch (error) {
       console.error(error);
-      if (!requestIsCurrent()) return;
-      itemsScopeRef.current = targetScopeKey;
-      setItems([]);
-      setReferences([]);
-      setRunProgress(null);
-      if (targetKind === 'scene') setNarrationAudioSetHash('');
+      if (requestIsCurrent()) setBusy(false);
+      return;
+    }
+
+    // Commit image/request data as soon as it arrives. Narration enrichment
+    // is independent and must not blank the already usable image gallery.
+    commitLoaded(data.items, data.references, data.progress, undefined, targetKind === 'scene' ? '' : undefined);
+    if (requestIsCurrent()) setBusy(false);
+    if (!requestIsCurrent() || targetKind !== 'scene' || !includeNarration) return;
+
+    const narrationKey = `${targetRunId}:scene:${narrationMutationEpoch}`;
+    try {
+      const narrationData = await shareRequest(
+        loadRunRequestsNarrationInFlightRef.current,
+        narrationKey,
+        () => jsonFetch<{ items: NarrationManifestItem[]; audioSetHash: string; progress: RunProgress }>(
+          `/api/image-gen/narration-items?run_id=${encodeURIComponent(targetRunId)}`,
+        ),
+      );
+      const narrationById = new Map(narrationData.items.map((item) => [item.itemId, item]));
+      commitLoaded(
+        data.items,
+        data.references,
+        narrationData.progress || data.progress,
+        narrationById,
+        narrationData.audioSetHash || '',
+      );
+    } catch (error) {
+      // The image response is already committed; narration failure must not
+      // clear it or reset the selected run.
+      console.error(error);
     } finally {
       if (requestIsCurrent()) setBusy(false);
     }
@@ -2706,6 +3039,86 @@ function App() {
       window.clearInterval(timer);
     };
   }, [generationInFlight, runId]);
+
+  useEffect(() => {
+    if (!runId || !createRunBusy) return;
+    let cancelled = false;
+    const initiallyStopped = isTerminalRunFailure(runProgress);
+    let sawActiveState = !initiallyStopped;
+    const pollCreateProgress = async () => {
+      try {
+        const data = await jsonFetch<ProgressResponse>(`/api/image-gen/progress?run_id=${encodeURIComponent(runId)}`);
+        if (cancelled || runIdRef.current !== runId) return;
+        setRunProgress(data.progress);
+        const stopped = isTerminalRunFailure(data.progress);
+        if (!stopped) sawActiveState = true;
+        if (stopped && sawActiveState) {
+          setCreateRunStatus('作成失敗');
+          setCreateRunError(runFailureMessage(data.progress));
+        }
+      } catch (error) {
+        if (!cancelled) console.error(error);
+      }
+    };
+    void pollCreateProgress();
+    const timer = window.setInterval(() => {
+      void pollCreateProgress();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [createRunBusy, runId]);
+
+  useEffect(() => {
+    if (!runHasTerminalFailure) return;
+    setBulkJobId(null);
+    setBulkGenerating(false);
+    setRegenerateBusy(false);
+    setAddAssetBusy(false);
+    setVideoPromptBusy(false);
+    setNarrationBusy(false);
+    setNarrationDraftBusy(false);
+    setRenderBusy(false);
+    setItems((prev) => {
+      let changed = false;
+      const next = prev.map((item) => {
+        if (!item.generating && !item.promptGenerating && !item.narrationGenerating && !item.narrationSaving && !item.narrationApproving && !item.videoGenerating) {
+          return item;
+        }
+        changed = true;
+        return {
+          ...item,
+          generating: false,
+          promptGenerating: false,
+          narrationGenerating: false,
+          narrationSaving: false,
+          narrationApproving: false,
+          videoGenerating: false,
+        };
+      });
+      return changed ? next : prev;
+    });
+    setVideoTargetItems((prev) => {
+      let changed = false;
+      const next = prev.map((item) => {
+        if (!item.generating && !item.promptGenerating && !item.narrationGenerating && !item.narrationSaving && !item.narrationApproving && !item.videoGenerating) {
+          return item;
+        }
+        changed = true;
+        return {
+          ...item,
+          generating: false,
+          promptGenerating: false,
+          narrationGenerating: false,
+          narrationSaving: false,
+          narrationApproving: false,
+          videoGenerating: false,
+        };
+      });
+      return changed ? next : prev;
+    });
+  }, [runHasTerminalFailure]);
 
   useEffect(() => {
     if (workspaceMode !== 'video') return;
@@ -3244,9 +3657,18 @@ function App() {
     video_quality: item.videoQuality,
     video_aspect_ratio: item.videoAspectRatio,
     video_duration_seconds: Math.max(item.videoDurationSec, Math.ceil(item.narrationDurationSec || 0), 1),
-    video_first_reference: item.videoInputMode === 'reference_images' ? '' : item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output,
-    video_last_reference: item.videoLastReferencePath ?? '',
-    video_references: item.videoReferencePaths,
+    video_first_reference: videoInputReferences(item.videoTool, item.videoInputMode || 'image_to_video',
+      item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output,
+      item.videoLastReferencePath, item.videoReferencePaths).first_reference,
+    video_last_reference: videoInputReferences(item.videoTool, item.videoInputMode || 'image_to_video',
+      item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output,
+      item.videoLastReferencePath, item.videoReferencePaths).last_reference,
+    video_references: videoInputReferences(item.videoTool, item.videoInputMode || 'image_to_video',
+      item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output,
+      item.videoLastReferencePath, item.videoReferencePaths).references,
+    ...(item.videoTool === 'higgsfield' ? { video_input_mode: item.videoInputMode || 'image_to_video' } : {}),
+    ...(shouldSendNativeAudioMode(item.videoTool, item.videoDirtyFields.includes('videoNativeAudioMode'))
+      ? { video_native_audio_mode: item.videoNativeAudioMode || 'off' } : {}),
     video_tool: item.videoTool,
     narration_text: item.narrationText,
     narration_tts_text: item.narrationTtsText,
@@ -3339,13 +3761,16 @@ function App() {
   const buildVideoGenerateItem = useCallback((item: EditableItem, count = videoCandidateCount): VideoGenerateItemPayload => ({
     item_id: item.id,
     prompt: item.videoDraftPrompt,
-    first_reference: item.videoInputMode === 'reference_images' ? '' : item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output,
-    last_reference: item.videoLastReferencePath,
-    references: item.videoReferencePaths,
+    ...videoInputReferences(item.videoTool, item.videoInputMode || 'image_to_video',
+      item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output,
+      item.videoLastReferencePath, item.videoReferencePaths),
     quality: item.videoQuality,
     aspect_ratio: item.videoAspectRatio,
     duration_seconds: Math.max(item.videoDurationSec, Math.ceil(item.narrationDurationSec || 0), 1),
     tool: item.videoTool,
+    ...(item.videoTool === 'higgsfield' ? { video_input_mode: item.videoInputMode || 'image_to_video' } : {}),
+    ...(shouldSendNativeAudioMode(item.videoTool, item.videoDirtyFields.includes('videoNativeAudioMode'))
+      ? { video_native_audio_mode: item.videoNativeAudioMode || 'off' } : {}),
     candidate_count: count,
   }), [videoCandidateCount]);
 
@@ -3361,6 +3786,23 @@ function App() {
 
   const generateVideoForCut = useCallback(async (item: EditableItem) => {
     if (!runId) return;
+    const plannedDuration = Math.max(item.videoDurationSec, Math.ceil(item.narrationDurationSec || 0), 1);
+    const durationError = item.videoTool === 'higgsfield' ? higgsfieldDurationError(plannedDuration) : null;
+    const inputError = videoInputModeError(item.videoTool, item.videoInputMode || 'image_to_video',
+      item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output, item.videoReferencePaths);
+    const nativeAudioError = item.videoTool !== 'higgsfield' && Boolean(item.videoNativeAudioMode && item.videoNativeAudioMode !== 'off');
+    if (durationError) {
+      setVideoPromptStatus(`${item.id}: ${durationError}`);
+      return;
+    }
+    if (nativeAudioError) {
+      setVideoPromptStatus(`${item.id}: この動画モデルでは音声生成に対応していません。音声を「なし」にしてください。`);
+      return;
+    }
+    if (inputError) {
+      setVideoPromptStatus(`${item.id}: ${inputError}`);
+      return;
+    }
     if (!narrationReadyForVideo) {
       setVideoPromptStatus('動画生成にはcurrent音声と尺の整合が必要です');
       return;
@@ -3401,8 +3843,36 @@ function App() {
 
   const generateVideoItems = useCallback(async (targetItems: EditableItem[]) => {
     if (!runId || !targetItems.length) return;
+    const invalidHiggsfieldItem = targetItems.find((item) => item.videoTool === 'higgsfield' &&
+      higgsfieldDurationError(Math.max(item.videoDurationSec, Math.ceil(item.narrationDurationSec || 0), 1)));
+    if (invalidHiggsfieldItem) {
+      const durationError = higgsfieldDurationError(Math.max(invalidHiggsfieldItem.videoDurationSec,
+        Math.ceil(invalidHiggsfieldItem.narrationDurationSec || 0), 1));
+      setVideoPromptStatus(`${invalidHiggsfieldItem.id}: ${durationError}`);
+      return;
+    }
+    const invalidInputItem = targetItems.find((item) => videoInputModeError(item.videoTool,
+      item.videoInputMode || 'image_to_video', item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output,
+      item.videoReferencePaths));
+    if (invalidInputItem) {
+      setVideoPromptStatus(`${invalidInputItem.id}: ${videoInputModeError(invalidInputItem.videoTool,
+        invalidInputItem.videoInputMode || 'image_to_video', invalidInputItem.videoFirstReferencePath ||
+        invalidInputItem.selectedCandidatePath || invalidInputItem.existingImage || invalidInputItem.output,
+        invalidInputItem.videoReferencePaths)}`);
+      return;
+    }
+    const unsupportedNativeAudioItem = targetItems.find((item) => item.videoTool !== 'higgsfield'
+      && item.videoNativeAudioMode && item.videoNativeAudioMode !== 'off');
+    if (unsupportedNativeAudioItem) {
+      setVideoPromptStatus(`${unsupportedNativeAudioItem.id}: この動画モデルでは音声生成に対応していません。音声を「なし」にしてください。`);
+      return;
+    }
     if (!narrationReadyForVideo) {
       setVideoPromptStatus('動画生成にはcurrent音声と尺の整合が必要です');
+      return;
+    }
+    if (targetItems.length > 64 || targetItems.length * videoCandidateCount > 96) {
+      setVideoPromptStatus('一括生成は最大64項目・合計96候補です。対象または候補数を減らしてください。');
       return;
     }
     ensureVideoItemsInState(targetItems);
@@ -3415,57 +3885,37 @@ function App() {
     setVideoBulkFailedCount(0);
     setVideoTargetItems((prev) => prev.map((item) => (targetIds.has(item.id) ? { ...item, videoGenerating: true, videoCandidates: [] } : item)));
 
-    let completed = 0;
-    let failed = 0;
-    let cursor = 0;
-    const runNext = async (): Promise<void> => {
-      const item = targetItems[cursor];
-      cursor += 1;
-      if (!item) return;
-      try {
-        const data = await generateVideoRequest(item);
-        const ok = data.candidates.some((candidate) => candidate.path);
-        if (ok) completed += 1;
-        else failed += 1;
-        setVideoTargetItems((prev) =>
-          prev.map((prevItem) =>
-            prevItem.id === item.id
-              ? {
-                  ...prevItem,
-                  videoGenerating: false,
-                  videoCandidates: data.candidates,
-                  videoDurationSec: data.durationSeconds ?? prevItem.videoDurationSec,
-                  renderVideoDurationSec: data.durationSeconds ?? prevItem.renderVideoDurationSec,
-                  renderVideoPath: data.candidates.find((candidate) => candidate.path)?.path ?? prevItem.renderVideoPath,
-                  renderVideoExists: Boolean(data.candidates.find((candidate) => candidate.path)?.path ?? prevItem.renderVideoPath),
-                }
-              : prevItem,
-          ),
-        );
-      } catch (error) {
-        failed += 1;
-        setVideoTargetItems((prev) =>
-          prev.map((prevItem) =>
-            prevItem.id === item.id
-              ? {
-                  ...prevItem,
-                  videoGenerating: false,
-                  videoCandidates: [{ index: 1, status: 'failed', path: null, error: candidateErrorMessage(error) }],
-                }
-              : prevItem,
-          ),
-        );
-      } finally {
-        setVideoBulkCompletedCount(completed);
-        setVideoBulkFailedCount(failed);
-        setVideoPromptStatus(`動画生成中 ${completed + failed}/${targetItems.length}`);
-        await runNext();
-      }
-    };
-
     try {
       await materializeVideoPrompts(targetItems);
-      await Promise.all(Array.from({ length: concurrency }, () => runNext()));
+      const response = await jsonFetch<{ results: (CandidatesResponse & { itemId: string; error?: string })[] }>(
+        '/api/image-gen/video-generate-bulk', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            run_id: runId,
+            items: targetItems.map((item) => buildVideoGenerateItem(item)),
+            concurrency,
+          }),
+        },
+      );
+      let completed = 0;
+      let failed = 0;
+      for (const item of targetItems) {
+        const data = response.results.find((result) => result.itemId === item.id);
+        const candidates = data?.candidates?.length ? data.candidates
+          : [{ index: 1, status: 'failed' as const, path: null, error: data?.error || '動画生成に失敗しました' }];
+        const path = candidates.find((candidate) => candidate.path)?.path ?? item.renderVideoPath;
+        if (candidates.some((candidate) => candidate.path)) completed += 1;
+        else failed += 1;
+        patchVideoItem(item.id, {
+          videoGenerating: false, videoCandidates: candidates,
+          videoDurationSec: data?.durationSeconds ?? item.videoDurationSec,
+          renderVideoDurationSec: data?.durationSeconds ?? item.renderVideoDurationSec,
+          renderVideoPath: path, renderVideoExists: Boolean(path),
+        });
+      }
+      setVideoBulkCompletedCount(completed);
+      setVideoBulkFailedCount(failed);
       setVideoPromptStatus(`動画生成完了 ${completed}/${targetItems.length}`);
     } catch (error) {
       console.error(error);
@@ -3476,11 +3926,11 @@ function App() {
           : item
       )));
       setVideoBulkFailedCount(targetItems.length);
-      setVideoPromptStatus('動画プロンプト確定に失敗');
+      setVideoPromptStatus('動画生成に失敗');
     } finally {
       setVideoPromptBusy(false);
     }
-  }, [ensureVideoItemsInState, generateVideoRequest, materializeVideoPrompts, narrationReadyForVideo, runId]);
+  }, [buildVideoGenerateItem, ensureVideoItemsInState, materializeVideoPrompts, narrationReadyForVideo, patchVideoItem, runId, videoCandidateCount]);
 
   const generateAllVideos = useCallback(async () => {
     if (!narrationReadyForVideo) {
@@ -3940,14 +4390,14 @@ function App() {
   })), []);
 
   const freezeRenderInputs = useCallback(async () => {
-    if (!runId || !visibleItems.length || !narrationReadyForVideo) {
-      setRenderStatus('入力確定にはcurrentな全編音声と尺の整合が必要です');
+    if (!runId || !visibleItems.length || !narrationReadyForVideo || !soundReady || mixDirty || mixBusy) {
+      setRenderStatus('入力確定には全編音声・尺の整合とBGM・SEの設定確定が必要です');
       return;
     }
     setRenderBusy(true);
     setRenderStatus('レンダー入力を確定中');
-    await saveDraft();
     try {
+      await saveDraft();
       const data = await jsonFetch<RenderActionResponse>('/api/image-gen/render-inputs/freeze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3961,21 +4411,21 @@ function App() {
       setRenderStatus(data.warnings?.length ? `入力確定 / 警告 ${data.warnings.length}` : 'レンダー入力を確定しました');
     } catch (error) {
       console.error(error);
-      setRenderStatus('レンダー入力確定に失敗');
+      setRenderStatus(`レンダー入力確定に失敗: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setRenderBusy(false);
     }
-  }, [buildRenderItems, narrationReadyForVideo, runId, saveDraft, visibleItems]);
+  }, [buildRenderItems, narrationReadyForVideo, runId, saveDraft, soundReady, visibleItems, mixDirty, mixBusy]);
 
   const finalRender = useCallback(async () => {
-    if (!runId || !visibleItems.length || !narrationReadyForVideo) {
-      setRenderStatus('最終レンダーにはcurrentな全編音声と尺の整合が必要です');
+    if (!runId || !visibleItems.length || !narrationReadyForVideo || !soundReady || mixDirty || mixBusy) {
+      setRenderStatus('最終レンダーには全編音声・尺の整合とBGM・SEの設定確定が必要です');
       return;
     }
     setRenderBusy(true);
     setRenderStatus('最終レンダー中');
-    await saveDraft();
     try {
+      await saveDraft();
       const data = await jsonFetch<RenderActionResponse>('/api/image-gen/final-render', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3990,11 +4440,11 @@ function App() {
       setRenderStatus(data.finalOutput ? `最終レンダー完了 ${data.finalOutput}` : '最終レンダー完了');
     } catch (error) {
       console.error(error);
-      setRenderStatus('最終レンダー失敗');
+      setRenderStatus(`最終レンダー失敗: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setRenderBusy(false);
     }
-  }, [buildRenderItems, narrationReadyForVideo, runId, saveDraft, visibleItems]);
+  }, [buildRenderItems, narrationReadyForVideo, runId, saveDraft, soundReady, visibleItems, mixDirty, mixBusy]);
 
   const openAddCutDialog = useCallback(() => {
     const defaultAnchor = activeItem?.kind === 'scene' ? activeItem.id : visibleItems[visibleItems.length - 1]?.id || '';
@@ -4149,22 +4599,13 @@ function App() {
     const targetDurationSeconds = Number(createRunTargetDurationSeconds);
     if (!Number.isInteger(targetDurationSeconds) || targetDurationSeconds < 300 || targetDurationSeconds > 1200) return;
     const mode = createRunMode;
-    const endpoint = mode === 'world_walk'
-      ? '/api/image-gen/runs/create-world-walk'
-      : mode === 'scene_storyboard'
-        ? '/api/image-gen/runs/create/storyboard'
-        : '/api/image-gen/runs/create';
-    const body = mode === 'world_walk'
-      ? {
-          source_run_id: createRunSourceRunId,
-          title: title || null,
-          target_duration_seconds: targetDurationSeconds,
-        }
-      : {
-          title,
-          source: createRunSource.trim() || null,
-          target_duration_seconds: targetDurationSeconds,
-        };
+    const { endpoint, body } = buildCreateRunRequest(mode, {
+      title,
+      source: createRunSource,
+      cinematicPreferences: createRunCinematicPreferences,
+      targetDurationSeconds,
+      sourceRunId: createRunSourceRunId,
+    });
     setCreateRunOpen(false);
     setCreateRunBusy(true);
     setCreateRunError(null);
@@ -4189,6 +4630,7 @@ function App() {
       setRunProgress(null);
       setCreateRunTitle('');
       setCreateRunSource('');
+      setCreateRunCinematicPreferences('');
       setCreateRunSourceRunId('');
       setCreateRunMode('normal');
       setCreateRunTargetDurationSeconds('300');
@@ -4218,6 +4660,40 @@ function App() {
       setCreateRunError(error instanceof Error ? error.message : String(error));
       setCreateRunStatus('作成失敗');
       void loadRuns();
+    } finally {
+      setCreateRunBusy(false);
+    }
+  };
+
+  const resumeCurrentRun = async () => {
+    if (!runId || !canResumeRun(runProgress) || createRunBusy || generationInFlight) return;
+    const targetRunId = runId;
+    const continueWaiting = isWaitingForNarration(runProgress);
+    setCreateRunBusy(true);
+    setCreateRunError(null);
+    setCreateRunStatus(continueWaiting ? '待機中の処理を開始中' : '再開地点を確認中');
+    try {
+      await resumeRun(targetRunId, {
+        fetchJson: (url, init) => jsonFetch<CreateRunJob>(url, init),
+        sleep: () => sleep(5000),
+        onMessage: setCreateRunStatus,
+        continueWaiting,
+      });
+      setCreateRunStatus(continueWaiting ? '待機中の処理が完了しました' : '再開した処理が完了しました');
+      await loadRuns(continueWaiting ? undefined : targetRunId);
+      if (continueWaiting) {
+        if (runIdRef.current !== targetRunId) return;
+        applyWorkspaceMode('narration');
+        requestKindRef.current = 'scene';
+        await loadRunRequests(targetRunId, 'scene');
+        return;
+      }
+      if (runIdRef.current === targetRunId) {
+        await loadRunRequests(targetRunId, requestKindRef.current);
+      }
+    } catch (error) {
+      setCreateRunStatus('再開できませんでした');
+      setCreateRunError(error instanceof Error ? error.message : String(error));
     } finally {
       setCreateRunBusy(false);
     }
@@ -4291,7 +4767,7 @@ function App() {
             <Stack direction="row" spacing={0.75} alignItems="center" className="topbarActions">
               <FormControl size="small" className="topbarRunSelect">
                 <InputLabel>出力先</InputLabel>
-                <Select value={runId} label="出力先" onChange={(event) => setRunId(event.target.value)} disabled={busy || generationInFlight}>
+                <Select value={runId} label="出力先" onChange={(event) => setRunId(event.target.value)} disabled={busy || createRunBusy || generationInFlight}>
                   {runs.map((run) => (
                     <MenuItem key={run.id} value={run.id}>
                       {run.name}
@@ -4304,6 +4780,10 @@ function App() {
                   <AddIcon />
                 </IconButton>
               </Tooltip>
+              <Button size="small" onClick={resumeCurrentRun}
+                disabled={!runId || !canResumeRun(runProgress) || busy || createRunBusy || generationInFlight}>
+                {isWaitingForNarration(runProgress) ? '待機中の処理を開始' : '停止した処理を再開'}
+              </Button>
               <Tooltip title="現在の出力を再取得">
                 <IconButton onClick={refreshCurrentRun} color="primary" aria-label="現在の出力を再取得" disabled={!runId || busy}>
                   <RefreshIcon />
@@ -4335,6 +4815,7 @@ function App() {
                 <Tab value="image" label="画像" />
                 <Tab value="narration" label="音声" />
                 <Tab value="video" label="動画" />
+                <Tab value="sound" label="BGM・SE" />
                 <Tab value="render" label="最終" />
               </Tabs>
 
@@ -4349,7 +4830,7 @@ function App() {
                 <Box className="videoModeSummary">
                   {workspaceMode === 'narration' ? <RecordVoiceOverIcon fontSize="small" /> : workspaceMode === 'render' ? <FactCheckIcon fontSize="small" /> : <MovieCreationIcon fontSize="small" />}
                   <Typography variant="body2" fontWeight={800} noWrap>
-                    {workspaceMode === 'narration' ? 'シーンcut音声' : workspaceMode === 'render' ? '結合入力' : 'シーンcut動画'}
+                    {workspaceMode === 'narration' ? 'シーンcut音声' : workspaceMode === 'render' ? '結合入力' : workspaceMode === 'sound' ? 'BGM・SE' : 'シーンcut動画'}
                   </Typography>
                   <Chip size="small" label={workspaceMode === 'video' ? `${displayedItemCount}/${visibleItems.length} cut` : `${visibleItems.length} cut`} />
                 </Box>
@@ -4434,6 +4915,8 @@ function App() {
                     </Button>
                   </Stack>
                 </>
+              ) : workspaceMode === 'sound' ? (
+                <Typography variant="body2" color="text.secondary">動画承認 → 候補案 → 生成・試聴 → 設定確定</Typography>
               ) : workspaceMode === 'render' ? (
                 <>
                   <Typography variant="caption" className="stationLabel">最終レンダー</Typography>
@@ -4442,10 +4925,10 @@ function App() {
                     <Chip color="primary" label={`${visibleItems.length} cut`} />
                   </Stack>
                   <Stack direction="row" spacing={1}>
-                    <Button variant="outlined" startIcon={<FactCheckIcon />} onClick={freezeRenderInputs} disabled={!visibleItems.length || !narrationReadyForVideo || renderBusy}>
+                    <Button variant="outlined" startIcon={<FactCheckIcon />} onClick={freezeRenderInputs} disabled={!visibleItems.length || !narrationReadyForVideo || !soundReady || renderBusy || mixDirty || mixBusy}>
                       入力確定
                     </Button>
-                    <Button variant="contained" startIcon={<MovieCreationIcon />} onClick={finalRender} disabled={!visibleItems.length || !narrationReadyForVideo || renderBusy}>
+                    <Button variant="contained" startIcon={<MovieCreationIcon />} onClick={finalRender} disabled={!visibleItems.length || !narrationReadyForVideo || !soundReady || renderBusy || mixDirty || mixBusy}>
                       最終レンダー
                     </Button>
                   </Stack>
@@ -4635,6 +5118,16 @@ function App() {
               </Box>
             ) : (
               <Box className="videoCutGrid">
+                {workspaceMode === 'sound' && <SoundDesignPanel key={runId} runId={runId} jsonFetch={jsonFetch}
+                  audioFileUrl={audioFileUrl} videoFileUrl={videoFileUrl} onReady={setSoundReady} onBusy={setSoundBusy} />}
+                {workspaceMode === 'render' && <FinalAudioMixer key={runId} runId={runId} disabled={renderBusy}
+                  jsonFetch={jsonFetch} videoFileUrl={videoFileUrl} onDirty={setMixDirty} onBusy={setMixBusy} onReady={setSoundReady} />}
+                {workspaceMode === 'render' && !soundReady && <GlassPanel variant="frosted" density="spacious">
+                  <Typography>BGM・SEの設定確定が必要です。</Typography>
+                  <Button onClick={() => applyWorkspaceMode('sound')}>BGM・SEへ</Button>
+                </GlassPanel>}
+                {workspaceMode === 'video' && <Button variant="outlined" disabled={videoGenerationActive}
+                  onClick={() => applyWorkspaceMode('sound')}>動画を確認・承認してBGM・SEへ</Button>}
                 {workspaceMode === 'video' && videoSceneGroups.length > 0 && (
                   <Box className="sceneCutTabsBar">
                     <Tabs
@@ -4745,7 +5238,7 @@ function App() {
               </Typography>
             </Stack>
             <Stack direction="row" spacing={1}>
-              {workspaceMode !== 'narration' && (
+              {workspaceMode !== 'narration' && workspaceMode !== 'sound' && (
                 <Button
                   variant="outlined"
                   startIcon={<SaveIcon />}
@@ -4802,12 +5295,14 @@ function App() {
                     {fullNarrationListening ? `停止 ${fullNarrationListeningItem}` : fullNarrationListenIsCurrent ? '通し試聴済み' : '全編を通し試聴'}
                   </Button>
                 </Stack>
+              ) : workspaceMode === 'sound' ? (
+                <Typography variant="body2" color="text.secondary">動画承認 → 候補案 → 生成・試聴 → 設定確定</Typography>
               ) : workspaceMode === 'render' ? (
                 <>
-                  <Button variant="outlined" startIcon={<FactCheckIcon />} onClick={freezeRenderInputs} disabled={!visibleItems.length || !narrationReadyForVideo || renderBusy}>
+                  <Button variant="outlined" startIcon={<FactCheckIcon />} onClick={freezeRenderInputs} disabled={!visibleItems.length || !narrationReadyForVideo || !soundReady || renderBusy || mixDirty || mixBusy}>
                     入力確定
                   </Button>
-                  <Button className="insertAction" variant="contained" startIcon={<MovieCreationIcon />} onClick={finalRender} disabled={!visibleItems.length || !narrationReadyForVideo || renderBusy}>
+                  <Button className="insertAction" variant="contained" startIcon={<MovieCreationIcon />} onClick={finalRender} disabled={!visibleItems.length || !narrationReadyForVideo || !soundReady || renderBusy || mixDirty || mixBusy}>
                     最終レンダー
                   </Button>
                 </>
@@ -4962,16 +5457,32 @@ function App() {
                   fullWidth
                 />
               ) : (
-                <TextField
-                  label="中身"
-                  value={createRunSource}
-                  disabled={createRunBusy}
-                  onChange={(event) => setCreateRunSource(event.target.value)}
-                  placeholder="空欄の場合はタイトルと同じ内容で作成"
-                  multiline
-                  minRows={5}
-                  fullWidth
-                />
+                <>
+                  <TextField
+                    label="中身"
+                    value={createRunSource}
+                    disabled={createRunBusy}
+                    onChange={(event) => setCreateRunSource(event.target.value)}
+                    placeholder="空欄の場合はタイトルと同じ内容で作成"
+                    multiline
+                    minRows={5}
+                    fullWidth
+                  />
+                  <TextField
+                    label="撮影方針（任意）"
+                    value={createRunCinematicPreferences}
+                    disabled={createRunBusy}
+                    onChange={(event) => setCreateRunCinematicPreferences(event.target.value)}
+                    placeholder="例: 寒色と暖色の配色、窓からの柔らかな斜光、固定カメラ中心"
+                    multiline
+                    minRows={3}
+                    fullWidth
+                    helperText="空欄なら、作品資料をもとに撮影方針を自動で構成します。"
+                  />
+                  <Typography variant="caption" color="text.secondary">
+                    完成済み映像の撮影方針を変える場合は、明示的なp400再構築が必要です。
+                  </Typography>
+                </>
               )}
               {createRunBusy && <LinearProgress />}
               <Box className="createRunStatusRow">

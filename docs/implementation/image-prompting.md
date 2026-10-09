@@ -5,6 +5,11 @@ request-bound generation input に変換する。制作は authoring → structu
 generation で進む。画像の aesthetic quality を別 worker が採点したり、承認証跡を要求したり
 しない。
 
+画像prompt compilerは型・必須構造・参照整合性を検証する。時間帯と文章中の単語の照合、
+選択肢語、矢印、抽象語、助詞連結による内容判定は停止条件にしない。
+例えば「朝日や自発光は加えない」を、夜との矛盾として補正ループへ送らない。
+内容の判断はauthoring側が所有し、compilerは既存のprovider入力への変換を行う。
+
 ## 1. 結論（最短の型）
 
 ```text
@@ -166,7 +171,7 @@ image_generation:
   references: []
   api_prompt_payload:
     policy_version: image_api_prompt_v2
-    compiler_version: conditional_drawable_prompt_compiler_v3
+    compiler_version: conditional_drawable_prompt_compiler_v4
     provider: codex_builtin_image
     prompt: "exact provider-facing Japanese prompt"
     negative_prompt: "short concrete constraints"
@@ -215,6 +220,10 @@ of generating a new still when the current bytes and provenance match. Explorato
 
 ## 9. Human choices
 
+新しいp400契約では、作品・scene・cutの撮影方針を解決した `first_frame_visual_plan.film_language`
+から静的な色調・光・光学・質感・構図をstyleへ投影する。撮影者の動きや動的な焦点移動は
+動画側が所有する。[撮影方針の正本](cinematic-language.md)を参照。
+
 Candidate selection, image editing, and change requests are optional. Store `human_choice.*` with
 actor, timestamp, selected candidate/request revision, and edit description. Recompile and rerun
 schema, reference, hash, file, decode, and provenance checks after a choice. A user choice is not an
@@ -240,4 +249,3 @@ request provenance. Failure names the item and owning artifact so the owner can 
 - `docs/implementation/video-prompting.md`
 - `workflow/p600-scene-image-batch-spec-template.md`
 - `workflow/video-manifest-template.md`
-
