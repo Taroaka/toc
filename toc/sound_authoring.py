@@ -117,7 +117,7 @@ def source_snapshot(root: Path, repo: Path) -> tuple[dict, dict]:
 
 
 def build_prompt(snapshot: dict, context: dict, plan: dict, instructions: str) -> str:
-    from toc.source_scene_projection import decode_document
+    from toc.visual_planning_contract import decode_document
     script = decode_document(snapshot['sources']['script.md'].encode())
     scene_source = script.get('scenes', script.get('script', {}).get('scenes', []))
     from toc.immersive_manifest import is_non_renderable_manifest_node

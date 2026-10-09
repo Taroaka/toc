@@ -43,3 +43,25 @@ def test_delete_archives_media_and_does_not_reset_mixer():
     c['candidates']=[{'id':'saved','path':'assets/sound/saved.mp3'}];mix=copy.deepcopy(p['mix'])
     archive_cue(p,c['id'])
     assert not p['cues'] and p['archived_cues'][0]['candidates']==c['candidates'] and p['mix']==mix
+
+
+def test_runtime_uses_structured_read_only_author_transport(monkeypatch,tmp_path):
+    import asyncio,json
+    from types import SimpleNamespace
+    from toc import sound_authoring as author
+    import toc.story_author_runtime as runtime
+    async def fake(**kwargs):
+        assert kwargs['model']==runtime.DEFAULT_STORY_AUTHOR_MODEL
+        assert kwargs['output_schema']==runtime.STORY_AUTHOR_TRANSPORT_SCHEMA
+        assert kwargs['cwd']==tmp_path
+        return SimpleNamespace(payload={'result_json':json.dumps({'intent':'余韻','silence_regions':[],'cues':[]})},provenance=SimpleNamespace(as_dict=lambda:{'sandbox':'read-only'}))
+    monkeypatch.setattr(runtime,'run_structured_story_turn',fake)
+    payload,provenance=asyncio.run(author.author('structured prompt',tmp_path))
+    assert payload['cues']==[] and provenance['sandbox']=='read-only'
+
+
+@pytest.mark.parametrize('story',['山で再会する物語','砂漠で別れる物語'])
+def test_prompt_reads_different_stories_through_same_contract(story):
+    from toc.sound_authoring import build_prompt
+    p=build_prompt({'documents':{'policy':'音の視点を決める'},'sources':{'story.md':story,'script.md':'scenes: []'}},context(),{'cues':[]},'静けさを大切に')
+    assert story in p and '静けさを大切に' in p and 'TRANSPORT CONTRACT' in p
