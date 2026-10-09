@@ -54,6 +54,7 @@ from toc.stage_evaluation.manifest import (  # noqa: E402
     _iter_manifest_nodes,
     check_manifest_single as shared_check_manifest_single,
 )
+from toc.script_narration import is_b_roll, resolve_manifest_narration
 from toc.stage_evaluator import check_visual_value  # noqa: E402
 
 
@@ -570,8 +571,16 @@ def check_narration(run_dir: Path) -> tuple[dict[str, Any], dict[str, str]]:
     details: dict[str, Any] = {}
     expected_outputs = [str(path.relative_to(run_dir)) for path in _node_output_paths(run_dir, field_path=["audio", "narration", "output"])]
     missing = [value for value in expected_outputs if not _output_exists(run_dir, value)]
-    add_check(checks, "narration.expected_outputs", bool(expected_outputs), "manifest declares narration audio output paths")
-    add_check(checks, "narration.output_files", bool(expected_outputs) and not missing, "declared narration audio outputs exist" + (f" (missing: {','.join(missing[:8])})" if missing else ""))
+    nodes = _iter_manifest_nodes(_manifest_data_for_outputs(run_dir))
+    optional_silent = [
+        node for node in nodes
+        if is_b_roll(node)
+        and (resolve_manifest_narration(node) or {}).get("tool") == "silent"
+        and as_dict((resolve_manifest_narration(node) or {}).get("silence_contract")).get("intentional") is True
+    ]
+    has_audio_or_optional_silence = bool(expected_outputs) or bool(nodes) and len(optional_silent) == len(nodes)
+    add_check(checks, "narration.expected_outputs", has_audio_or_optional_silence, "manifest declares narration audio outputs or audio-free B-roll")
+    add_check(checks, "narration.output_files", has_audio_or_optional_silence and not missing, "declared narration audio outputs exist; B-roll may omit audio" + (f" (missing: {','.join(missing[:8])})" if missing else ""))
     if missing:
         details["missing_audio_outputs"] = missing[:20]
     details["declared_audio_outputs"] = len(expected_outputs)

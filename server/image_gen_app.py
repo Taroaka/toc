@@ -143,7 +143,7 @@ from toc.run_root_binding import (
 from toc import process_store
 from toc.providers.kling import KlingClient, KlingConfig
 from toc.providers.seedance import SeedanceClient, SeedanceConfig
-from toc.script_narration import materialize_elevenlabs_tts_text, resolve_script_cut_tts_text
+from toc.script_narration import materialize_elevenlabs_tts_text, resolve_manifest_narration, resolve_script_cut_tts_text
 from toc.narration_revision import (
     REVISION_SCHEMA_VERSION,
     NarrationRevisionConflict,
@@ -6320,7 +6320,7 @@ def _script_cut_for_manifest_target(script_data: dict[str, Any], target: dict[st
 
 def _narration_summary(target: dict[str, Any]) -> dict[str, Any]:
     node = _dict_value(target.get("cut"))
-    narration = _dict_value(_dict_value(node.get("audio")).get("narration"))
+    narration = resolve_manifest_narration(node) or {}
     revision = _dict_value(narration.get("revision"))
     generation = _dict_value(narration.get("generation"))
     audio_selection = _dict_value(narration.get("audio_selection"))
@@ -7468,8 +7468,7 @@ def _narration_audio_readiness(
     for target in _manifest_scene_targets(data):
         selector = str(target["selector"])
         node = target["cut"]
-        audio = _dict_value(node.get("audio"))
-        narration = _dict_value(audio.get("narration"))
+        narration = resolve_manifest_narration(node) or {}
         revision_aware = _dict_value(narration.get("revision")).get("schema_version") == REVISION_SCHEMA_VERSION
         if revision_aware:
             if not _narration_grounding_is_current(target, narration):
@@ -7783,7 +7782,7 @@ def _manifest_narration_items(run_dir: Path, data: dict[str, Any] | None = None)
         image_generation = node.get("image_generation") if isinstance(node.get("image_generation"), dict) else {}
         video_generation = node.get("video_generation") if isinstance(node.get("video_generation"), dict) else {}
         audio = node.get("audio") if isinstance(node.get("audio"), dict) else {}
-        narration = audio.get("narration") if isinstance(audio.get("narration"), dict) else {}
+        narration = resolve_manifest_narration(node) or {}
         render = node.get("render") if isinstance(node.get("render"), dict) else {}
         narration_tool = str(narration.get("tool") or "elevenlabs").strip()
         silence_contract = narration.get("silence_contract") if isinstance(narration.get("silence_contract"), dict) else {}
@@ -8422,7 +8421,7 @@ def _revision_aware_narration_contexts_are_current(data: dict[str, Any]) -> bool
 def _manifest_narration_audio_set_hash(data: dict[str, Any]) -> str:
     payload: list[dict[str, Any]] = []
     for target in _manifest_scene_targets(data):
-        narration = _dict_value(_dict_value(_dict_value(target["cut"]).get("audio")).get("narration"))
+        narration = resolve_manifest_narration(target["cut"]) or {}
         revision = _dict_value(narration.get("revision"))
         selection = _dict_value(narration.get("audio_selection"))
         selected_candidate_id = str(selection.get("candidate_id") or "")
@@ -8690,7 +8689,7 @@ def _apply_narration_timeline(
         )
     for target, item in zip(targets, timeline, strict=True):
         node = _dict_value(target["cut"])
-        narration = _dict_value(_dict_value(node.get("audio")).get("narration"))
+        narration = resolve_manifest_narration(node) or {}
         video_generation = _dict_value(node.get("video_generation"))
         render = _dict_value(node.get("render"))
         selected_candidate = current_audio_candidate(narration)
@@ -8735,7 +8734,7 @@ def _narration_min_duration_seconds(run_dir: Path, item_id: str) -> float | None
         return None
     node = target["cut"]
     audio = node.get("audio") if isinstance(node.get("audio"), dict) else {}
-    narration = audio.get("narration") if isinstance(audio.get("narration"), dict) else {}
+    narration = resolve_manifest_narration(node) or {}
     selected_candidate = current_audio_candidate(narration)
     output = str(narration.get("output") or (selected_candidate or {}).get("output") or "").strip()
     if not output:
@@ -9117,7 +9116,7 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
             raise ValueError(f"video manifest target not found: {item.item_id}")
         node = target["cut"]
         audio = node.get("audio") if isinstance(node.get("audio"), dict) else {}
-        narration = audio.get("narration") if isinstance(audio.get("narration"), dict) else {}
+        narration = resolve_manifest_narration(node) or {}
         selected_candidate = current_audio_candidate(narration)
         selected_narration_path = str(
             narration.get("output") or (selected_candidate or {}).get("output") or ""

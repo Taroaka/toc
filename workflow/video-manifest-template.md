@@ -168,6 +168,8 @@ scenes:
       forbidden_reveal_info_ids: []
     cut_contract:
       schema_version: '3.0'
+      # Optional discriminator; B-roll audio and subtitles may each be omitted.
+      # a_roll_or_b_roll: b_roll
       expressive_contract:
         schema_version: cut_expressive_contract_v1
         source_value_refs: []

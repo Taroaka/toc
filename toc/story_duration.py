@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from toc.script_narration import is_b_roll, resolve_manifest_narration
 from toc.immersive_manifest import is_non_renderable_manifest_node
 
 DEFAULT_TARGET_DURATION_SECONDS = 300
@@ -105,13 +106,13 @@ def _video_duration(node: dict[str, Any]) -> tuple[float | None, str]:
     return (duration, "ok") if duration is not None else (None, "invalid")
 
 
-def _confirmed_silence(narration: dict[str, Any]) -> bool:
+def _confirmed_silence(narration: dict[str, Any], *, b_roll: bool = False) -> bool:
     contract = narration.get("silence_contract")
     if not isinstance(contract, dict):
         return False
     return (
         contract.get("intentional") is True
-        and (contract.get("confirmed_by_human") is True
+        and (b_roll or contract.get("confirmed_by_human") is True
              or (contract.get("source") == "boundary_b_roll_v1" and contract.get("kind") == "b_roll"))
         and bool(str(contract.get("kind") or "").strip())
         and bool(str(contract.get("reason") or "").strip())
@@ -170,15 +171,14 @@ def measure_manifest_runtime(
             cut_id = _selector_value(node.get("cut_id"), str(cut_index + 1)) if cuts else ""
             selector = f"scene{scene_id}_cut{cut_id}" if cuts else f"scene{scene_id}"
             audio_item_count += 1
-            audio = node.get("audio")
-            narration = audio.get("narration") if isinstance(audio, dict) else None
+            narration = resolve_manifest_narration(node)
             if not isinstance(narration, dict):
                 missing.append(f"{selector}:narration")
                 continue
 
             tool = str(narration.get("tool") or "").strip().lower()
             if tool == "silent":
-                if not _confirmed_silence(narration):
+                if not _confirmed_silence(narration, b_roll=is_b_roll(node)):
                     invalid.append(f"{selector}:silence_contract")
                     continue
                 silence_seconds, silence_status = _video_duration(node)

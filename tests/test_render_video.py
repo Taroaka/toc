@@ -70,6 +70,75 @@ class TestRenderVideo(unittest.TestCase):
             cwd=REPO_ROOT,
         )
 
+    def test_broll_gap_survives_mixed_audio_render(self) -> None:
+        import array
+        import math
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "assets/scenes").mkdir(parents=True)
+            (root / "assets/audio").mkdir(parents=True)
+            self._make_video(root / "assets/scenes/broll.mp4", 1, "black")
+            self._make_video(root / "assets/scenes/spoken.mp4", 1, "blue")
+            self._make_mp3(root / "assets/audio/spoken.mp3", 1, 440)
+            manifest = {"scenes": [{"scene_id": 1, "cuts": [
+                {"cut_id": 1, "cut_contract": {"a_roll_or_b_roll": "b_roll"},
+                 "video_generation": {"output": "assets/scenes/broll.mp4", "duration_seconds": 1}},
+                {"cut_id": 2, "video_generation": {"output": "assets/scenes/spoken.mp4", "duration_seconds": 1},
+                 "audio": {"narration": {"output": "assets/audio/spoken.mp3"}}},
+            ]}]}
+            manifest_path = root / "video_manifest.md"
+            manifest_path.write_text("```yaml\n" + yaml.safe_dump(manifest) + "```\n")
+            subprocess.run(["python", str(BUILD_CLIP_LISTS_PATH), "--manifest", str(manifest_path)], check=True, capture_output=True)
+            output = root / "result.mp4"
+            subprocess.run(["bash", str(SCRIPT_PATH), "--clip-list", str(root / "video_clips.txt"),
+                            "--narration-list", str(root / "video_narration_list.txt"), "--out", str(output)], check=True, capture_output=True)
+            self.assertGreater(self._ffprobe_duration(output), 1.9)
+            samples = array.array("h", subprocess.check_output([
+                "ffmpeg", "-v", "error", "-i", str(output), "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-",
+            ]))
+            def rms(start, end):
+                segment = samples[int(start * 16000):int(end * 16000)]
+                return math.sqrt(sum(value * value for value in segment) / len(segment))
+            self.assertLess(rms(0.2, 0.8), 10)
+            self.assertGreater(rms(1.2, 1.8), 100)
+
+    def test_audio_and_subtitles_are_independently_optional(self) -> None:
+        import json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clip = root / "clip.mp4"
+            audio = root / "voice.mp3"
+            clips = root / "clips.txt"
+            srt = root / "captions.srt"
+            self._make_video(clip, duration=1, color="black")
+            self._make_mp3(audio, duration=1, frequency=440)
+            clips.write_text(f"file '{clip}'\n", encoding="utf-8")
+            srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nOptional caption\n", encoding="utf-8")
+            frames = {}
+            for has_audio in (False, True):
+                for has_subtitles in (False, True):
+                    with self.subTest(audio=has_audio, subtitles=has_subtitles):
+                        output = root / f"out_{has_audio}_{has_subtitles}.mp4"
+                        command = ["bash", str(SCRIPT_PATH), "--clip-list", str(clips), "--out", str(output)]
+                        if has_audio:
+                            command.extend(["--narration", str(audio)])
+                        if has_subtitles:
+                            command.extend(["--srt", str(srt)])
+                        subprocess.run(command, check=True, capture_output=True)
+                        streams = json.loads(subprocess.check_output([
+                            "ffprobe", "-v", "error", "-show_streams", "-of", "json", str(output),
+                        ]))["streams"]
+                        self.assertEqual(any(stream["codec_type"] == "audio" for stream in streams), has_audio)
+                        self.assertGreater(self._ffprobe_duration(output), 0.9)
+                        frames[(has_audio, has_subtitles)] = subprocess.check_output([
+                            "ffmpeg", "-v", "error", "-ss", "0.5", "-i", str(output),
+                            "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+                        ])
+                self.assertNotEqual(frames[(has_audio, False)], frames[(has_audio, True)])
+
     def test_render_video_supports_two_video_clips_and_three_narration_tracks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

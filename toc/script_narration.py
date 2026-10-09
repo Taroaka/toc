@@ -99,3 +99,50 @@ def resolve_script_metadata_elevenlabs(script_data: dict[str, Any]) -> dict[str,
             merged[key] = value
     merged["model_id"] = normalize_elevenlabs_model_id(merged.get("model_id"))
     return merged
+
+
+def is_b_roll(node: dict[str, Any]) -> bool:
+    """Read the authored discriminator, falling back to the existing shot projection."""
+    contract = _as_dict(node.get("cut_contract"))
+    if "a_roll_or_b_roll" in contract:
+        return contract["a_roll_or_b_roll"] == "b_roll"
+    image = _as_dict(node.get("image_generation"))
+    shot = _as_dict(_as_dict(image.get("api_prompt_payload")).get("shot_design_contract"))
+    return shot.get("a_roll_or_b_roll") == "b_roll"
+
+
+def resolve_manifest_narration(node: dict[str, Any]) -> dict[str, Any] | None:
+    """Treat omitted B-roll narration as visual-only, without fabricating approval.
+
+    Explicit provider/text/output/revision data remains authoritative. Invalid
+    shapes are not converted to silence. This read-only projection never touches
+    subtitles, BGM, effects, or native video audio.
+    """
+    audio = node.get("audio")
+    if audio is not None and not isinstance(audio, dict):
+        return None
+    narration = _as_dict(audio).get("narration")
+    if narration is None and isinstance(node.get("narration"), dict):
+        narration = node["narration"]
+    if narration is not None and not isinstance(narration, dict):
+        return None
+    if not is_b_roll(node):
+        return narration
+    raw = narration or {}
+    if any(key not in {"tool", "text", "tts_text", "output"} for key in raw):
+        return narration
+    if raw.get("tool") not in (None, "", "silent"):
+        return narration
+    if any(raw.get(key) not in (None, "") for key in ("text", "tts_text", "output")):
+        return narration
+    return {
+        "tool": "silent",
+        "text": "",
+        "tts_text": "",
+        "authoring_status": "silent",
+        "silence_contract": {
+            "intentional": True,
+            "kind": "b_roll",
+            "reason": "B-roll narration is optional; use the declared visual duration.",
+        },
+    }

@@ -306,6 +306,12 @@ Write a continuous spoken draft first, then split it into `narration_spans[]` an
 cuts. Preserve canonical cut order. A visual-only cut may use an explicit silence contract with a reason
 and duration. Never add narration merely to fill target duration.
 
+B-roll (`cut_contract.a_roll_or_b_roll: b_roll`) may omit narration and subtitles independently.
+Leave `narration`/`tts_text` empty and omit a voiced `narration_tool` when no speech is intended; do not
+invent spoken text, voice tags, or subtitles to satisfy a per-cut quota. Authored speech and subtitles
+remain optional choices and must be preserved. Existing manifest shot-design B-roll projections are
+also recognized; see `docs/implementation/video-integration.md` for the runtime and timing contract.
+
 ```yaml
 narration_authoring:
   schema_version: narration_authoring_v1

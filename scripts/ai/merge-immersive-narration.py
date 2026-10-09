@@ -31,7 +31,7 @@ from toc.immersive_manifest import (
 )
 from toc.runtime_locks import sync_file_lock
 from toc.harness import append_state_snapshot
-from toc.script_narration import materialize_elevenlabs_tts_text, normalize_stability_profile, normalize_voice_tags
+from toc.script_narration import is_b_roll, resolve_manifest_narration, materialize_elevenlabs_tts_text, normalize_stability_profile, normalize_voice_tags
 
 
 def now_iso() -> str:
@@ -672,6 +672,42 @@ def _main_locked(args: argparse.Namespace, run_dir: Path) -> None:
         for cut in (scene.get("cuts") if isinstance(scene.get("cuts"), list) else [scene])
     )
     script_path = run_dir / "script.md"
+    active_nodes = [
+        cut
+        for scene in raw_scenes
+        if isinstance(scene, dict) and not is_non_renderable_manifest_node(scene)
+        for cut in (scene.get("cuts") or [scene])
+        if isinstance(cut, dict) and not is_non_renderable_manifest_node(cut)
+    ]
+    visual_only_broll = bool(active_nodes) and all(
+        is_b_roll(node)
+        and (resolve_manifest_narration(node) or {}).get("tool") == "silent"
+        and (resolve_manifest_narration(node) or {}).get("silence_contract", {}).get("intentional") is True
+        for node in active_nodes
+    )
+    scratch_has_speech = any(
+        str(payload.get("text") or payload.get("tts_text") or "").strip()
+        for cuts in by_scene.values() for payload in cuts.values()
+    )
+    if script_path.is_file():
+        source_script = yaml.safe_load(extract_yaml_block(script_path.read_text(encoding="utf-8")))
+        source_cuts, _ = _script_narration_inventory(source_script) if isinstance(source_script, dict) else ([], [])
+        scratch_has_speech = scratch_has_speech or any(cut["text"] or cut["tts_text"] for cut in source_cuts)
+    audio_story_path = scratch_dir / "audio_story.yaml"
+    if audio_story_path.is_file():
+        raw_story = yaml.safe_load(audio_story_path.read_text(encoding="utf-8"))
+        if isinstance(raw_story, dict):
+            plan = raw_story.get("audio_story_plan")
+            scratch_has_speech = scratch_has_speech or bool(
+                isinstance(plan, dict) and str(plan.get("continuous_full_draft") or "").strip()
+            ) or bool(raw_story.get("narration_spans"))
+        else:
+            scratch_has_speech = True  # Preserve the normal malformed-input error.
+    if visual_only_broll and not scratch_has_speech:
+        if script_path.is_file():
+            _sync_script_projection(run_dir=run_dir, script_path=script_path)
+        print("Audio-free B-roll: no spoken draft or TTS output required.")
+        return
     audio_story = (
         _load_audio_story_scratch(scratch_dir / "audio_story.yaml")
         if script_path.is_file()

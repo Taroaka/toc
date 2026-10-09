@@ -1,0 +1,6 @@
+# Optional Codex project-config fragment; NOT loaded from this example path.
+# Review docs/implementation/higgsfield-mcp.md before merging into .codex/config.toml.
+# OAuth is performed by the user later. REST API keys do not belong here.
+[mcp_servers.higgsfield]
+url = "https://mcp.higgsfield.ai/mcp"
+enabled = false

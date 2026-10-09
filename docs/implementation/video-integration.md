@@ -92,6 +92,37 @@ narration_authoring:
 stored in the TTS request snapshot. Candidates may be generated, listened to, selected, or edited by
 the user; a changed text/settings revision invalidates old audio and reruns ordinary checks.
 
+### B-roll: audio and subtitles are independently optional
+
+A B-roll cut may contain neither narration nor subtitles, either one, or both. Do not add speech or
+captions merely because the cut exists. Preserve explicitly authored audio, BGM/effects, native clip
+audio, and subtitle content; B-roll classification does not mute or delete those values.
+
+Use the existing discriminator `a_roll_or_b_roll: b_roll`. Author it in
+`cut_contract.a_roll_or_b_roll` in script/manifest; the runtime also reads existing
+`image_generation.api_prompt_payload.shot_design_contract.a_roll_or_b_roll` projections. An explicit
+cut-contract value takes precedence. Empty character lists, shot-role prose, and `sub` cuts alone do
+not identify B-roll.
+
+```yaml
+cut_contract:
+  a_roll_or_b_roll: b_roll
+video_generation:
+  duration_seconds: 4
+# audio.narration and text_overlay may be omitted independently.
+```
+
+An absent/empty narration mapping (or only `tool: silent` and empty text) becomes intentional B-roll
+silence. No TTS provider, audio file, or per-cut human confirmation is required. A positive declared
+video duration is still required. Explicit provider, text, output, candidate, or revision data keeps
+its ordinary validation. Non-B-roll missing narration remains an error. Script sync records a silence
+contract with `kind: b_roll`; it does not fabricate `confirmed_by_human`.
+
+Subtitles remain an independent opt-in at render time (`render-video.sh --srt`). Omitting subtitles
+never forces narration, and omitting narration never creates or clears subtitles. In mixed spoken and
+visual-only sequences, render preparation materializes local silence padding to preserve the B-roll
+interval in audio concat lists; this is a render detail, not mandatory authored audio.
+
 ## 5. Request materialization
 
 Image, audio, and video requests use immutable snapshots. Each binds:
