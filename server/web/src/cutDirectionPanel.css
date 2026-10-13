@@ -1,0 +1,279 @@
+.cutDirectionPanel {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 34%),
+    rgba(16, 20, 23, 0.92);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 12px 28px rgba(0, 0, 0, 0.18);
+}
+
+.cutDirectionHeader {
+  margin-bottom: 14px;
+}
+
+.cutDirectionProgress {
+  margin: -6px 0 12px;
+}
+
+.cutDirectionAlert {
+  margin: 10px 0;
+}
+
+.cutDirectionEmpty {
+  padding: 16px 0;
+}
+
+.cutDirectionSceneSelect {
+  width: min(100%, 460px);
+  margin: 0 0 14px !important;
+}
+
+.cutDirectionStrip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  align-items: stretch;
+  margin: 0 0 18px;
+}
+
+.cutDirectionCut {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 8px;
+  color: rgba(255, 255, 255, 0.9);
+  text-align: left;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  cursor: pointer;
+  font: inherit;
+}
+
+.cutDirectionCut:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.cutDirectionCut.isSelected {
+  border-color: rgba(142, 232, 255, 0.86);
+  background:
+    linear-gradient(180deg, rgba(142, 232, 255, 0.08), transparent 44%),
+    rgba(24, 35, 39, 0.72);
+  box-shadow: 0 0 0 1px rgba(142, 232, 255, 0.22), 0 8px 22px rgba(0, 0, 0, 0.22);
+}
+
+.cutDirectionCut:focus-visible,
+.cutDirectionReferenceList a:focus-visible {
+  outline: 2px solid #f6d365;
+  outline-offset: 2px;
+}
+
+.cutDirectionCut:disabled {
+  cursor: progress;
+}
+
+.cutDirectionCutImageFrame {
+  display: grid;
+  min-height: 68px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.3);
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 0.75rem;
+}
+
+.cutDirectionCutImageFrame .cutDirectionImage {
+  width: 100%;
+  aspect-ratio: 16 / 7;
+  object-fit: cover;
+}
+
+.cutDirectionCutTitle {
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 0.88rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cutDirectionCutIntent {
+  display: -webkit-box;
+  min-height: 2.8em;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.cutDirectionCutMeta {
+  color: rgba(255, 255, 255, 0.54);
+  font-size: 0.7rem;
+}
+
+.cutDirectionShotSection {
+  display: grid;
+  gap: 10px;
+  padding: 14px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.cutDirectionShotList {
+  display: grid;
+  gap: 8px;
+}
+
+.cutDirectionShot {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.cutDirectionShotName {
+  overflow-wrap: anywhere;
+}
+
+.cutDirectionShotFacts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.cutDirectionShotFacts div {
+  min-width: 0;
+}
+
+.cutDirectionShotFacts span {
+  display: block;
+  margin-bottom: 3px;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.7rem;
+}
+
+.cutDirectionShotFacts p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.83);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.cutDirectionReferences {
+  display: grid;
+  gap: 5px;
+}
+
+.cutDirectionReferenceList {
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 1px 6px;
+}
+
+.cutDirectionReferenceList a {
+  display: grid;
+  flex: 0 0 112px;
+  gap: 4px;
+  color: rgba(255, 255, 255, 0.7);
+  text-decoration: none;
+}
+
+.cutDirectionReferenceList a:hover {
+  color: rgba(142, 232, 255, 0.95);
+}
+
+.cutDirectionReferenceList .cutDirectionImage {
+  display: block;
+  width: 112px;
+  height: 64px;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.cutDirectionReferenceList a span {
+  overflow: hidden;
+  font-size: 0.67rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cutDirectionVideo {
+  width: min(300px, 100%);
+  max-height: 180px;
+  border-radius: 6px;
+  background: #050708;
+}
+
+.cutDirectionEditor {
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.cutDirectionMode {
+  align-items: center;
+}
+
+.cutDirectionInput {
+  min-width: 0;
+}
+
+.cutDirectionInput textarea {
+  font-family: "IBM Plex Sans", "Noto Sans JP", "Helvetica Neue", sans-serif;
+  font-size: 0.83rem;
+  line-height: 1.55;
+}
+
+@media (max-width: 900px) {
+  .cutDirectionShotFacts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .cutDirectionPanel {
+    padding: 12px;
+  }
+
+  .cutDirectionStrip {
+    grid-template-columns: 1fr;
+  }
+
+  .cutDirectionCutImageFrame {
+    min-height: 90px;
+  }
+
+  .cutDirectionShotFacts {
+    grid-template-columns: 1fr;
+  }
+
+  .cutDirectionMode .MuiFormControlLabel-root {
+    margin-right: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cutDirectionPanel *,
+  .cutDirectionPanel *::before,
+  .cutDirectionPanel *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,9 @@
+# 設計方針
+
+全体のキャスト設計を個別character bibleの上流に置く。source役割と関係、人物ごとの外見と行動傾向、意図した共通点・区別点を定義する。描画可能な外見はimage promptへ、性格の根拠と所作はscene/video演技へ投影し、原作にない動機を事実として追加しない。
+
+既存のwhole-run authorとappearance_contractを調査し、既存経路を活用する。集合名だけで複数人物を一つの顔へ集約しない。状態差で顔のidentityを変えない。終了画像の一律追加はこの設計に含めない。
+
+実装: p420による人物追加が確定した後、キャラ画像生成より前に、共通Codex author経路で全キャストを一度に設計する。cast_design_v1をcinematic_directionへ保存し、source/最終resource/実参照bytesへ結び付ける。集合memberの人数とIDを検証し、顔・髪・体格・衣装と区別点を既存appearance_contract経由でp500の実promptへ送る。動画には共演人物の役割と振る舞いを補助文脈として渡す。source上の行為を上書きしない。状態variantに親の顔・年齢・髪・体格を一律固定しない。
+
+既存作品は全14キャラassetの棚卸しと比較上の問題だけをrunのlogs/cast_designへ記録した。人物の年齢・顔・性格を新しい採用版として確定したり画像を作り直したりはしていない。

@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- akapen-format: v3 -->
+
+<title>意図から演技と撮り方を選ぶ — 赤ペン</title>
+
+<style>
+:root{--ink:#212529;--muted:#64707C;--line:#DEE2E6;--paper:#FFFFFF;--paper-dim:#F6F8FA;--accent:#2563EB;--red:#DC2626}
+*{box-sizing:border-box}
+body{background:var(--paper);color:var(--ink);font-family:'IBM Plex Sans JP','Hiragino Kaku Gothic ProN','Hiragino Sans',-apple-system,sans-serif;font-size:14.5px;line-height:1.9;margin:0;border-top:3px solid var(--red);padding:0 16px 40px}
+main{max-width:760px;margin:0 auto}
+.kicker{font-family:'IBM Plex Mono',Menlo,monospace;font-size:12.5px;letter-spacing:.08em;color:var(--red);font-weight:600}
+h1{font-size:25px;line-height:1.45;margin:8px 0 12px}
+h2{font-size:19px;line-height:1.45;margin:30px 0 8px;padding-bottom:4px;border-bottom:1px solid var(--line)}
+h3{font-size:15px;line-height:1.5;margin:0 0 8px}
+p{margin:8px 0}
+a{color:var(--accent)}
+.concl{border:1px solid var(--line);border-left:3px solid var(--red);border-radius:10px;padding:14px 18px}
+.red{color:var(--red)}
+.m{color:var(--muted);font-size:12.5px;line-height:1.7}
+.mono{font-family:'IBM Plex Mono',Menlo,monospace;font-size:13.5px}
+.gl{font-size:12.5px;color:var(--muted);line-height:1.75;border-left:2px solid var(--line);padding-left:10px;margin:8px 0}
+.btn{display:inline-block;border:1px solid var(--accent);color:var(--accent);background:var(--paper);border-radius:8px;padding:4px 14px;font-size:13px;text-decoration:none;cursor:pointer;font-family:inherit;line-height:1.7}
+.btn:hover{background:var(--paper-dim)}
+figure{margin:14px 0 6px}
+figcaption{font-size:12.5px;color:var(--muted);line-height:1.6;padding-top:4px}
+svg{max-width:100%;height:auto;display:block}
+table{border-collapse:collapse;width:100%;font-size:13.5px;line-height:1.6;margin:8px 0}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{font-size:11.5px;letter-spacing:.06em;color:var(--muted);font-weight:500;white-space:nowrap;border-bottom:1.5px solid var(--ink)}
+td.n{font-family:'IBM Plex Mono',Menlo,monospace;font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
+details{border:1px solid var(--line);border-radius:10px;padding:10px 16px;margin:10px 0}
+summary{cursor:pointer;color:var(--accent);font-weight:500;font-size:13.5px}
+/* 問いカード (自己完結 — シート側の判断材料。答える場所は下の .q) */
+.qcard{border:1px solid var(--line);border-left:3px solid var(--red);border-radius:10px;padding:12px 16px;margin:12px 0}
+.qcard .qt{font-weight:700;margin:0 0 6px}
+.qcard ul{margin:4px 0;padding-left:1.3em}.qcard li{margin:4px 0}
+.rec{font-family:'IBM Plex Mono',Menlo,monospace;font-size:11px;color:var(--red);border:1px solid var(--red);border-radius:4px;padding:0 5px;margin-left:4px;white-space:nowrap}
+/* overlay 注記 (赤を画像の上に乗せる部品 — 座標は画像に対する %) */
+.shotwrap{position:relative;line-height:0;margin:8px 0 4px}
+.shotwrap img{width:100%;border:1px solid var(--line);border-radius:8px;display:block}
+.shotwrap .mark{position:absolute;transform:translate(-50%,-50%);width:26px;height:26px;border:2.5px solid var(--red);border-radius:50%;background:rgba(255,255,255,.78);color:var(--red);font:600 13px/21px 'IBM Plex Mono',Menlo,monospace;text-align:center}
+.shotwrap .lbl{position:absolute;transform:translateX(-50%);background:var(--red);color:#fff;font:700 11px/1.5 sans-serif;padding:2px 8px;border-radius:4px;white-space:nowrap}
+/* A/B 対比 (choice の対立軸を並べる部品) */
+.ab{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.ab figure{margin:0}.ab figcaption{font-size:12.5px;color:var(--muted);line-height:1.6;padding-top:4px}
+@media (max-width:640px){.ab{grid-template-columns:1fr}}
+del{color:var(--muted)}
+footer{margin-top:28px;border-top:1px solid var(--line);padding-top:10px}
+
+
+/* ---- シート ---- */
+#akSheet{position:relative;padding-top:8px}
+
+/* ---- 回答フォーム ---- */
+#akForm{margin-top:36px}
+.q{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0;background:var(--paper)}
+.q label{display:block;border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin:6px 0;cursor:pointer;line-height:1.7}
+.q label:has(input:checked){border-color:var(--red);background:rgba(220,38,38,.06)}
+.q input[type=radio]{margin:0 8px 0 0;accent-color:#DC2626;vertical-align:-1px}
+.q .opt-d{color:var(--muted);font-size:12.5px;margin:2px 0 0 22px;line-height:1.6}
+/* 選択肢の絵 (.thumb) — 見た目が違う選択肢には、シート本文の .ab / SVG と同じ絵をここにも置く。無彩色枝、選択中はラベルと同じ淡赤 */
+.q label .thumb{display:flex;flex-direction:column;justify-content:center;min-height:120px;margin:8px 0 2px 22px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--paper-dim)}
+.q label .thumb svg{width:100%;height:150px;max-width:100%}
+.q label .thumb img{display:block;max-width:100%;max-height:160px;margin:0 auto}
+.q label .thumb figcaption{font-size:12px;color:var(--muted);line-height:1.5;padding-top:4px}
+.q label:has(input:checked) .thumb{border-color:var(--red);background:rgba(220,38,38,.04)}
+textarea{width:100%;min-height:54px;margin-top:8px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--paper);color:var(--ink);font-family:inherit;font-size:13.5px;line-height:1.7;resize:vertical}
+textarea:focus{outline:none;border-color:var(--red)}
+.redpen textarea{min-height:110px}
+.clearsel{display:inline-block;margin-top:8px;color:var(--muted);font-size:12px;cursor:pointer;text-decoration:underline}
+.sendbar{position:sticky;bottom:0;background:linear-gradient(rgba(255,255,255,0),var(--paper) 30%);padding:20px 0 12px;text-align:center}
+#genBtn{background:var(--accent);color:#fff;border:0;border-radius:10px;padding:11px 32px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit}
+#genBtn:hover{filter:brightness(.95)}
+.status{margin-top:8px;font-size:12.5px;color:var(--muted);min-height:18px}
+.status.ok{color:var(--ink)}.status.err{color:var(--muted)}
+#out{display:none;font-family:'IBM Plex Mono',Menlo,monospace;font-size:12.5px;min-height:170px;margin-top:10px;text-align:left}
+@media print{.akbar,#akForm{display:none}summary{color:var(--ink)}details{border:none;padding:0}details[open] summary{display:none}}
+code{font-size:12.5px} .ab svg{width:100%} .q label .thumb svg{height:auto;max-height:180px} li{margin:5px 0} @media(max-width:480px){h1{font-size:22px}table{font-size:12px}th,td{padding:6px 4px}}
+</style></head>
+<body><main>
+
+
+
+<section id="akSheet">
+<div class="kicker">✎ AKAPEN — 2026-10-10</div>
+<h1>伝えたいことから、人物の演技と撮り方を選ぶ。</h1>
+<div class="concl"><b>結論:</b> cutの意図から「人物が何を望み、いつ何を見せるか」を設計し、選んだ撮り方をJSONに残します。開始画の被写体とcut全体の参加者を分け、顔・足元・背中・画面外も扱います。ナレーションを維持し、画像と動画へ同じ設計から必要な情報を渡します。</div>
+<p class="m">設計案です。productionの実装・既存作品の変更・生成APIの実行は、今回行っていません。</p>
+<div class="gl"><b>このシートの用語</b><br><b>shot</b>：カメラの画が途切れず続く映像単位。<b>cut</b>：現在のToCで管理する区間。<br><b>clip</b>：1回のAPI生成で返る動画。<b>参照</b>：人物・衣装などを同じ見た目に保つため、生成時に渡す画像。<b>投影</b>：設計から画像用・動画用の情報をそれぞれ取り出す処理。</div>
+<figure><svg viewBox="0 0 720 290" role="img" aria-label="意図を決めてから画と演技を設計し、JSONを共通の生成処理へ渡す全体図">
+<g font-family="sans-serif" fill="var(--ink)">
+<text x="16" y="25" font-size="16" font-weight="700">意図を先に決め、JSONには選んだ撮り方を残す</text>
+<g fill="var(--paper-dim)" stroke="var(--line)"><rect x="16" y="44" width="688" height="40" rx="6"/></g>
+<text x="30" y="69" font-size="13">原作・前後のcut・人物と衣装の状態・採用済みナレーション</text>
+<text x="350" y="102" font-size="18">↓</text>
+<g fill="var(--paper)" stroke="var(--red)"><rect x="16" y="114" width="209" height="65" rx="6"/><rect x="255" y="114" width="210" height="65" rx="6"/><rect x="495" y="114" width="209" height="65" rx="6"/></g>
+<text x="30" y="138" font-size="13">何を届けたいか</text><text x="30" y="162" font-size="12">人物が望むこと・感情・演技</text>
+<text x="235" y="150" font-size="17">→</text>
+<text x="269" y="138" font-size="13">いつ、どこを映すか</text><text x="269" y="162" font-size="12">画角・身体部分・焦点・動き</text>
+<text x="473" y="150" font-size="17">→</text>
+<text x="509" y="138" font-size="13">定型JSON → 実API入力</text><text x="509" y="162" font-size="12">開始画／動画を別々に構築</text>
+<text x="278" y="204" fill="var(--red)" font-size="13">① 音声区間とshotの割当て</text>
+<rect x="16" y="218" width="688" height="52" rx="6" fill="var(--paper-dim)" stroke="var(--red)"/>
+<text x="30" y="240" font-size="13" fill="var(--red)">② 前後のcutを見て訂正　　③ 新方式を適用する範囲</text>
+<text x="30" y="260" font-size="12">フロントとCodex会話から、同じ設計・同じ参照・同じ送信内容を使う</text>
+</g></svg><figcaption>図1 — 意図→撮影→生成を一本につなぐ。赤の①②③が、今回選んでほしい範囲です。</figcaption></figure>
+
+<h2>変えるのは、選択肢を狭めている結び付き</h2>
+<p>現状は同じ人物一覧が、開始画の被写体・参照画像・cutの素材依存へ流れます。途中で登場する人物まで最初から描かれやすい構造です。<span class="red">「そのcutに関わる人」と「今、この画に見える人・部位」を別にします。</span></p>
+<figure><svg viewBox="0 0 720 193" role="img" aria-label="顔、背中、足元は同じ人物を違う範囲で映す。抽象的な構図例">
+<g font-family="sans-serif" fill="var(--ink)">
+<text x="16" y="22" font-size="15" font-weight="700">同じ人物でも、見せる部分と受け取る情報は選べる</text>
+<g fill="var(--paper-dim)" stroke="var(--line)"><rect x="16" y="38" width="218" height="115" rx="4"/><rect x="251" y="38" width="218" height="115" rx="4"/><rect x="486" y="38" width="218" height="115" rx="4"/></g>
+<g fill="none" stroke="var(--muted)" stroke-width="3">
+<ellipse cx="125" cy="89" rx="39" ry="44"/><path d="M95 91h13m35 0h13m-43 27q12 7 24 0"/>
+<circle cx="360" cy="73" r="19"/><path d="M320 142q-3-53 40-47 43-6 40 47M336 102v35m48-35v35"/>
+<path d="M542 57v44l-15 21q-4 10 20 8l23-18V57M600 57v51l15 15q7 11 23 3l-13-27V57M510 141h170"/>
+</g>
+<g fill="var(--red)" font-size="13"><text x="32" y="177">顔：気持ちや気づきを読む</text><text x="267" y="177">背中：向きや距離を読む</text><text x="502" y="177">足元：行為やためらいを読む</text></g>
+</g></svg><figcaption>図2 — 構図を説明する模式図。新しい物語や生成画像ではありません。画角を毎回変える規則にはせず、意図に合えば同じ画や固定カメラも選びます。</figcaption></figure>
+<p>「もっとこっちを向いて」は、相手への目的です。必要な人物について目的・感情・きっかけを踏まえ、視線を探す、手振りで呼びかける、相手の反応を待つなどの演技を作者が選びます。<b>感情の名前を、決まった身振りへ機械的に置き換えません。</b></p>
+
+<table><thead><tr><th>現状の結び付き</th><th>提案する分け方</th></tr></thead><tbody>
+<tr><td>人物一覧 → 開始画にも展開</td><td><span class="red">全cutの参加者／各時点の可視範囲</span></td></tr>
+<tr><td>人物の外観維持 → 動きも固定されやすい</td><td><span class="red">衣装・同一性の維持／許可した演技</span></td></tr>
+<tr><td>補助cut＝人物なし</td><td><span class="red">編集上の役割／人物・手足が見えるか</span></td></tr>
+<tr><td>動作・カメラ指示を共通ルールで制限</td><td><span class="red">演出上の選択／実APIの必須条件</span></td></tr>
+</tbody></table>
+
+<h2>JSONは定型に保ち、不要な指定を埋めさせない</h2>
+<p>固定の外枠は「意図・参加者・世界の状態・各shot・音声区間・参照」です。各shotには、最初に見える範囲、必要な演技、カメラ、途中の登場や退出を残します。<b>顔が見えなければ表情の指定は不要</b>です。</p>
+<table><thead><tr><th>値</th><th>契約で定める意味</th></tr></thead><tbody>
+<tr><td><code>null</code></td><td>その項目を意図的に指定しない。例：焦点距離の数値は指定しない。</td></tr>
+<tr><td><code>[]</code></td><td>一覧に項目がない。例：この画で個別に描く人物はいない。</td></tr>
+<tr><td>必須参照が未解決</td><td><span class="red">nullでごまかさず、該当shotを送信する前に解決する。</span></td></tr>
+</tbody></table>
+<p>最初に映らない人物も、後から映すための参照を保持します。開始画像用の参照へ混ぜず、選んだモデルが扱える入力や終了画像、分割先shotに割り当てます。<b>対応できない参照を黙って落としません。</b></p>
+<p class="m">HiggsfieldのKling Standardには開始画像・任意の終了画像・3〜15秒の仕様があります。ただし人物参照用elementsの登録/併用条件は追加確認が必要です。現在の共通バックエンドのhiggsfield分岐はSeedance用で、Klingとの接続も実装範囲に含めます。</p>
+
+<h2>決めてほしいこと（3問）</h2>
+<p>どの案でもナレーションは維持します。未選択はお任せとして扱い、<b>回答を貼り戻した時点で</b>推奨案を採用します。</p>
+<div class="qcard"><p class="qt">問1. 既存ナレーションの1区間を、複数のshotに分けてよいですか？</p><ul><li><b>A. 必要なら複数shotを使う</b><span class="rec">推奨</span><br>利点：伝える内容に合わせて顔→足元などへ編集できる。音声と総尺は維持。<br>代償：画像・動画の生成回数や編集処理が増える場合がある。</li><li><b>B. 当初は1区間1shotにする</b><br>利点：生成構成が単純で、shotごとの確認作業を抑えやすい。<br>代償：区間内の撮り方は連続したカメラ移動に限られ、画を切り替える表現は後回し。</li></ul><div class="ab"><figure><svg viewBox="0 0 340 166" role="img" aria-label="A 複数ショットを許可" xmlns="http://www.w3.org/2000/svg"><g font-family="sans-serif" fill="var(--ink)"><text x="12" y="22" font-size="13" fill="var(--red)">音声は1本のまま、必要な場所で画を切る</text><rect x="12" y="38" width="316" height="28" rx="5" fill="var(--paper-dim)" stroke="var(--line)"/><text x="28" y="57" font-size="13">採用済み音声 ───────── 同じ総尺</text><rect x="12" y="88" width="145" height="52" rx="5" fill="var(--paper-dim)" stroke="var(--red)"/><rect x="170" y="88" width="158" height="52" rx="5" fill="var(--paper-dim)" stroke="var(--red)"/><text x="28" y="118" font-size="13">shot A：顔の寄り</text><text x="183" y="118" font-size="13">shot B：足元</text><text x="12" y="158" font-size="11">2回の動画生成・編集が必要になる場合がある</text></g></svg><figcaption>A — 必要なら複数shotを使う</figcaption></figure><figure><svg viewBox="0 0 340 166" role="img" aria-label="B ひと続きのショット" xmlns="http://www.w3.org/2000/svg"><g font-family="sans-serif" fill="var(--ink)"><text x="12" y="22" font-size="13">音声1区間を、ひと続きの画で見せる</text><rect x="12" y="38" width="316" height="28" rx="5" fill="var(--paper-dim)" stroke="var(--line)"/><text x="28" y="57" font-size="13">採用済み音声 ───────── 同じ総尺</text><rect x="12" y="88" width="316" height="52" rx="5" fill="var(--paper-dim)" stroke="var(--line)"/><text x="28" y="118" font-size="13">1つのshot：固定／連続したカメラ移動</text><text x="12" y="158" font-size="11">画の切替はしない。API尺上限のclip分割は別</text></g></svg><figcaption>B — 当初は1区間1shotにする</figcaption></figure></div><details><summary>問1の判断材料になった実装箇所</summary><p class="m">toc/p400_authoring.py:662 は beat と cut の1対1固定を求めていない。一方、toc/p400_projection.py:192 はcut単位で音声を出力する。採用音声を保持するための割当てを追加するかが論点。</p></details></div><div class="qcard"><p class="qt">問2. 前後のcutを並べる確認画面を、最初の実装に含めますか？</p><ul><li><b>A. 一覧画面まで含める</b><span class="rec">推奨</span><br>利点：画の単調さや見せる順序を、前後の画像と意図を並べて判断・訂正できる。<br>代償：バックエンドに加え、新しい一覧UIの実装・検証が必要。</li><li><b>B. まず共通の生成経路を改善する</b><br>利点：既存の個別previewを使い、設計→画像→動画への受け渡しを先に完成できる。<br>代償：前後の撮り方を並べる画面は次段階。初期は個別に切り替えて確認する。</li></ul><div class="ab"><figure><svg viewBox="0 0 340 166" role="img" aria-label="A 前後のcutを並べる新画面の概念図" xmlns="http://www.w3.org/2000/svg"><g font-family="sans-serif" fill="var(--ink)"><text x="12" y="22" font-size="13" fill="var(--red)">前後を並べて、撮り方の関係を見る</text><rect x="12" y="38" width="93" height="67" rx="5" fill="var(--paper-dim)" stroke="var(--line)"/><rect x="116" y="38" width="106" height="67" rx="5" fill="var(--paper-dim)" stroke="var(--red)"/><rect x="233" y="38" width="95" height="67" rx="5" fill="var(--paper-dim)" stroke="var(--line)"/><text x="23" y="61" font-size="12">前のcut</text><text x="23" y="85" font-size="12">全景</text><text x="127" y="61" font-size="12" fill="var(--red)">選択中</text><text x="127" y="85" font-size="12">顔の寄り</text><text x="244" y="61" font-size="12">次のcut</text><text x="244" y="85" font-size="12">足元</text><rect x="12" y="117" width="316" height="31" rx="5" fill="var(--paper-dim)" stroke="var(--red)"/><text x="24" y="138" font-size="11">意図・演技・見える範囲・参照を開いて直す</text></g></svg><figcaption>A — 一覧画面まで含める</figcaption></figure><figure><svg viewBox="0 0 340 166" role="img" aria-label="B 既存の個別確認を使う構成図" xmlns="http://www.w3.org/2000/svg"><g font-family="sans-serif" fill="var(--ink)"><text x="12" y="22" font-size="13">まず生成経路を改善し、個別に確認する</text><rect x="12" y="38" width="316" height="67" rx="5" fill="var(--paper-dim)" stroke="var(--line)"/><text x="26" y="61" font-size="12">選択したcutの画像・prompt・参照</text><text x="26" y="85" font-size="12">前後との関係は切り替えて確認</text><rect x="12" y="117" width="316" height="31" rx="5" fill="var(--paper-dim)" stroke="var(--line)"/><text x="25" y="138" font-size="12">共通バックエンド → 既存の個別preview</text></g></svg><figcaption>B — まず共通の生成経路を改善する</figcaption></figure></div><p class="m">構成の模式図です。現行UIの再現ではありません。</p><details><summary>問2の判断材料になった実装箇所</summary><p class="m">toc/p400_authoring.py:663 は前後cutを考慮する。server/image_gen_app.py:9653 と :10852 は共通video compilerを呼ぶ既存接点。新画面の有無にかかわらず同じデータへ接続する。</p></details></div><div class="qcard"><p class="qt">問3. 新方式を既存作品のどこまで適用しますか？</p><ul><li><b>A. 新規制作と、選んだcutから</b><span class="rec">推奨</span><br>利点：既存作品への影響を絞り、結果を見ながら広げられる。<br>代償：同じ作品に旧方式と新方式が一時的に混在する。</li><li><b>B. 未生成のcutをまとめて再設計</b><br>利点：既存作品の未生成部分を、一貫した新しい撮影計画にそろえられる。<br>代償：確認すべき設計差分が増え、先に作った画像の作り直しが必要と判定される場合がある。</li></ul><p><b>どちらも、採用済みナレーションと生成済み映像は自動再生成しません。</b></p><details><summary>問3の判断材料になった実装箇所</summary><p class="m">toc/p400_authoring.py:811 はauthor policyと入力に基づいて設計を再利用する。toc/p400_projection.py:211 は画像依存も書き出す。既存計画を新版へ更新する範囲を選ぶ。</p></details></div>
+
+<details><summary>実装する順序と、費用をかけずに確認する項目</summary>
+<ol><li>新しいJSON契約と旧データとの互換性を定義する。</li><li>cutの作者が、前後の画・人物の目的・見せる順序を同時に設計する。</li><li>開始画と動画へ別々に投影し、衣装・途中登場・部分描写の参照を接続する。</li><li>モデル別の送信処理で尺・参照・実promptを固定する。</li><li>フロント/CLI/Codex会話を同じ処理へつなぎ、選んだ範囲のUIを実装する。</li></ol>
+<p>最初は人物の途中登場、足元、背中、環境だけ、受け渡し後の反応、変身、null、音声維持をテスト用データで検証します。生成した画の自然さは別途確認が必要で、JSONだけで成功を保証する設計ではありません。</p>
+</details>
+<details><summary>調査根拠：ローカル実装と公式資料</summary>
+<p class="m">同じ人物一覧の投影：toc/p400_projection.py:52, :139, :146, :184。人物なしsub：toc/p400_authoring.py:325。カメラ指示の切捨て：toc/video_prompt_compiler.py:1005。既存nullによる継承解除：toc/cinematic_language.py:79。Higgsfieldのモデル判定：toc/video_provider_capabilities.py:65。</p>
+<ul><li><a href="https://www.adobe.com/uk/creativecloud/video/production/cinematography/camera-shots-and-angles/close-up-shot.html">Adobe — 寄り・insertと前後の編集</a>：顔以外の細部で行為を伝える根拠。</li>
+<li><a href="https://help.runwayml.com/hc/en-us/articles/48324313115155-Image-to-Video-Prompting-Guide">Runway — 画像から動画へのprompt</a>：開始画と動作・時間進行の分担。Klingの性能保証としては扱わない。</li>
+<li><a href="https://json-schema.org/understanding-json-schema/reference/null">JSON Schema — null</a>：nullとキーの欠落を区別。</li>
+<li><a href="https://open.higgsfield.ai/models/kling-video/v3.0/std/image-to-video/api-reference">Higgsfield — Kling 3.0 Standard</a>：必須画像、任意終了画像、尺の実API仕様。</li></ul>
+<p><a href="file:///Users/kantaro/Downloads/toc/.steering/20261010-intent-to-shot-design/design.md">設計書全文</a> ／ <a href="file:///Users/kantaro/Downloads/toc/.steering/20261010-intent-to-shot-design/research.md">調査メモと未確認事項</a></p>
+</details>
+<footer class="m">調査日：2026-10-10。依頼内容とローカルコード、上記一次資料をもとに作成。Astraのサブエージェント利用に関するご指定に従い、独立試問は未実施。スキルの5項目は自己点検しています。</footer>
+</section>
+
+
+
+<section id="akForm"><h2>回答（未回答＝お任せ＝推奨案）</h2><p class="m">選択と補足を入力し、最後の「貼り付ける文章を作る」を押してください。出た【赤ペン回答】をこのCodexチャットへ貼り戻すと、実装へ進めます。</p><div class="q" data-qid="q1"><h3>Q1. 既存ナレーションの1区間を、複数のshotに分けてよいですか？</h3><label><input type="radio" name="q1" value="A"><b>A. 必要なら複数shotを使う</b><span class="rec">推奨</span><div class="opt-d">利点：伝える内容に合わせて顔→足元などへ編集できる。音声と総尺は維持。<br>代償：画像・動画の生成回数や編集処理が増える場合がある。</div><figure class="thumb"><svg viewBox="0 0 340 166" role="img" aria-label="A 複数ショットを許可" xmlns="http://www.w3.org/2000/svg"><g font-family="sans-serif" fill="var(--ink)"><text x="12" y="22" font-size="13" fill="var(--red)">音声は1本のまま、必要な場所で画を切る</text><rect x="12" y="38" width="316" height="28" rx="5" fill="var(--paper-dim)" stroke="var(--line)"/><text x="28" y="57" font-size="13">採用済み音声 ───────── 同じ総尺</text><rect x="12" y="88" width="145" height="52" rx="5" fill="var(--paper-dim)" stroke="var(--red)"/><rect x="170" y="88" width="158" height="52" rx="5" fill="var(--paper-dim)" stroke="var(--red)"/><text x="28" y="118" font-size="13">shot A：顔の寄り</text><text x="183" y="118" font-size="13">shot B：足元</text><text x="12" y="158" font-size="11">2回の動画生成・編集が必要になる場合がある</text></g></svg></figure></label><label><input type="radio" name="q1" value="B"><b>B. 当初は1区間1shotにする</b><div class="opt-d">利点：生成構成が単純で、shotごとの確認作業を抑えやすい。<br>代償：区間内の撮り方は連続したカメラ移動に限られ、画を切り替える表現は後回し。</div><figure class="thumb"><svg viewBox="0 0 340 166" role="img" aria-label="B ひと続きのショット" xmlns="http://www.w3.org/2000/svg"><g font-family="sans-serif" fill="var(--ink)"><text x="12" y="22" font-size="13">音声1区間を、ひと続きの画で見せる</text><rect x="12" y="38" width="316" height="28" rx="5" fill="var(--paper-dim)" stroke="var(--line)"/><text x="28" y="57" font-size="13">採用済み音声 ───────── 同じ総尺</text><rect x="12" y="88" width="316" height="52" rx="5" fill="var(--paper-dim)" stroke="var(--line)"/><text x="28" y="118" font-size="13">1つのshot：固定／連続したカメラ移動</text><text x="12" y="158" font-size="11">画の切替はしない。API尺上限のclip分割は別</text></g></svg></figure></label><textarea name="q1_note" aria-label="問1の補足" placeholder="補足（任意）"></textarea></div><div class="q" data-qid="q2"><h3>Q2. 前後のcutを並べる確認画面を、最初の実装に含めますか？</h3><label><input type="radio" name="q2" value="A"><b>A. 一覧画面まで含める</b><span class="rec">推奨</span><div class="opt-d">利点：画の単調さや見せる順序を、前後の画像と意図を並べて判断・訂正できる。<br>代償：バックエンドに加え、新しい一覧UIの実装・検証が必要。</div><figure class="thumb"><svg viewBox="0 0 340 166" role="img" aria-label="A 前後のcutを並べる新画面の概念図" xmlns="http://www.w3.org/2000/svg"><g font-family="sans-serif" fill="var(--ink)"><text x="12" y="22" font-size="13" fill="var(--red)">前後を並べて、撮り方の関係を見る</text><rect x="12" y="38" width="93" height="67" rx="5" fill="var(--paper-dim)" stroke="var(--line)"/><rect x="116" y="38" width="106" height="67" rx="5" fill="var(--paper-dim)" stroke="var(--red)"/><rect x="233" y="38" width="95" height="67" rx="5" fill="var(--paper-dim)" stroke="var(--line)"/><text x="23" y="61" font-size="12">前のcut</text><text x="23" y="85" font-size="12">全景</text><text x="127" y="61" font-size="12" fill="var(--red)">選択中</text><text x="127" y="85" font-size="12">顔の寄り</text><text x="244" y="61" font-size="12">次のcut</text><text x="244" y="85" font-size="12">足元</text><rect x="12" y="117" width="316" height="31" rx="5" fill="var(--paper-dim)" stroke="var(--red)"/><text x="24" y="138" font-size="11">意図・演技・見える範囲・参照を開いて直す</text></g></svg></figure></label><label><input type="radio" name="q2" value="B"><b>B. まず共通の生成経路を改善する</b><div class="opt-d">利点：既存の個別previewを使い、設計→画像→動画への受け渡しを先に完成できる。<br>代償：前後の撮り方を並べる画面は次段階。初期は個別に切り替えて確認する。</div><figure class="thumb"><svg viewBox="0 0 340 166" role="img" aria-label="B 既存の個別確認を使う構成図" xmlns="http://www.w3.org/2000/svg"><g font-family="sans-serif" fill="var(--ink)"><text x="12" y="22" font-size="13">まず生成経路を改善し、個別に確認する</text><rect x="12" y="38" width="316" height="67" rx="5" fill="var(--paper-dim)" stroke="var(--line)"/><text x="26" y="61" font-size="12">選択したcutの画像・prompt・参照</text><text x="26" y="85" font-size="12">前後との関係は切り替えて確認</text><rect x="12" y="117" width="316" height="31" rx="5" fill="var(--paper-dim)" stroke="var(--line)"/><text x="25" y="138" font-size="12">共通バックエンド → 既存の個別preview</text></g></svg></figure></label><textarea name="q2_note" aria-label="問2の補足" placeholder="補足（任意）"></textarea></div><div class="q" data-qid="q3"><h3>Q3. 新方式を既存作品のどこまで適用しますか？</h3><label><input type="radio" name="q3" value="A"><b>A. 新規制作と、選んだcutから</b><span class="rec">推奨</span><div class="opt-d">利点：既存作品への影響を絞り、結果を見ながら広げられる。<br>代償：同じ作品に旧方式と新方式が一時的に混在する。</div></label><label><input type="radio" name="q3" value="B"><b>B. 未生成のcutをまとめて再設計</b><div class="opt-d">利点：既存作品の未生成部分を、一貫した新しい撮影計画にそろえられる。<br>代償：確認すべき設計差分が増え、先に作った画像の作り直しが必要と判定される場合がある。</div></label><p class="m">どちらも採用済み音声・生成済み映像は自動再生成しません。</p><textarea name="q3_note" aria-label="問3の補足" placeholder="補足（任意）"></textarea></div>
+<h2>全体への赤ペン</h2><div class="q redpen"><p class="m">訂正・追加要望・「そもそも」の指摘を自由に書けます。</p><textarea name="global_note" aria-label="全体への赤ペン"></textarea></div>
+<div class="sendbar"><button id="genBtn" type="button" onclick="generatePrompt()">貼り付ける文章を作る</button><div id="status" class="status" aria-live="polite"></div><textarea id="out" readonly aria-label="チャットへ貼る回答文" onclick="this.select()"></textarea></div></section>
+
+</main>
+<script>
+var QUESTIONS = {"q1": "Q1. 既存ナレーションの1区間を、複数のshotに分けてよいですか？", "q2": "Q2. 前後のcutを並べる確認画面を、最初の実装に含めますか？", "q3": "Q3. 新方式を既存作品のどこまで適用しますか？"};
+var DRAFT_KEY = "akapen-toc-intent-to-shot-20261010-01";
+var DOC = "toc-intent-to-shot-01";
+
+/* ---------- 下書き (radio・textarea) ---------- */
+function saveDraft() {
+  try {
+    var d = {};
+    document.querySelectorAll("#akForm input[type=radio]:checked").forEach(function (el) { d[el.name] = el.value; });
+    document.querySelectorAll("#akForm textarea").forEach(function (el) {
+      if (el.id !== "out" && el.name && el.value) d[el.name] = el.value;
+    });
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(d));
+  } catch (e) {}
+}
+function loadDraft() {
+  try {
+    var d = JSON.parse(localStorage.getItem(DRAFT_KEY) || "{}");
+    Object.keys(d).forEach(function (k) {
+      if (k === "pins") return;   // 別部品の下書き (部品が無ければ無視)
+      try {
+        // radio の値は英数のみ。textarea の値 (改行や引用符入り) をセレクタに埋め込まない
+        if (!/_note$/.test(k) && k !== "global_note" && /^[A-Za-z0-9]+$/.test(String(d[k]))) {
+          var r = document.querySelector('#akForm input[name="' + k + '"][value="' + d[k] + '"]');
+          if (r) { r.checked = true; return; }
+        }
+        var t = document.querySelector('#akForm textarea[name="' + k + '"]');
+        if (t) t.value = d[k];
+      } catch (e) {}
+    });
+  } catch (e) {}
+}
+document.getElementById("akForm").addEventListener("change", saveDraft);
+document.getElementById("akForm").addEventListener("input", saveDraft);
+
+// 各質問に「選択を解除」を付ける (誤クリックの取り消し = お任せに戻す)
+document.querySelectorAll("#akForm .q[data-qid]").forEach(function (q) {
+  var radios = q.querySelectorAll("input[type=radio]");
+  if (!radios.length) return;
+  var a = document.createElement("a");
+  a.textContent = "選択を解除 (お任せに戻す)";
+  a.className = "clearsel";
+  a.onclick = function () { radios.forEach(function (r) { r.checked = false; }); saveDraft(); };
+  q.appendChild(a);
+});
+
+
+/* ---------- 回答プロンプト (references/reply-format.md の固定形) ---------- */
+function oneLine(s) { return s.trim().replace(/\s*\n\s*/g, " "); }
+function buildPrompt() {
+  var lines = ["【赤ペン回答】" + DOC];
+  Object.keys(QUESTIONS).forEach(function (qid) {
+    var choiceEl = document.querySelector('#akForm input[name="' + qid + '"]:checked');
+    var noteEl = document.querySelector('#akForm textarea[name="' + qid + '_note"]');
+    var note = noteEl ? noteEl.value.trim() : "";
+    var line = QUESTIONS[qid] + ": ";
+    if (choiceEl) {
+      var lab = choiceEl.closest("label");
+      var b = lab ? lab.querySelector("b") : null;
+      var lbl = b ? b.innerText.trim() : "";
+      // 太字が "A. 選択肢" 形式なら先頭の記号を剥がす (A — A. の重複防止)
+      lbl = lbl.replace(new RegExp("^" + choiceEl.value + "[.．]\\s*"), "");
+      line += choiceEl.value + " — " + (lbl || choiceEl.value);
+    } else {
+      line += "(未選択 = お任せ)";
+    }
+    if (note) line += " / 補足: " + oneLine(note);
+    lines.push(line);
+  });
+  var g = document.querySelector('#akForm textarea[name="global_note"]');
+  var gv = g ? g.value.trim() : "";
+  lines.push("全体への赤ペン: " + (gv || "(なし)"));
+  lines.push("---");
+  lines.push("上の回答を反映して作業を続けてください。お任せの項目は推奨案で確定してください。");
+  return lines.join("\n");
+}
+function generatePrompt() {
+  var text = buildPrompt();
+  copyPrompt(text, "");
+}
+function copyPrompt(text, prefix) {
+  var out = document.getElementById("out");
+  out.style.display = "block";
+  out.value = text;
+  var done = function (copied) {
+    setStatus(prefix + (copied
+      ? "✓ コピーしました — このCodexチャットへ貼り戻してください"
+      : "下のテキストを選択してコピーし、このCodexチャットへ貼り戻してください"), copied ? "ok" : "err");
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+  } else {
+    try { out.select(); done(document.execCommand("copy")); } catch (e) { done(false); }
+  }
+}
+function setStatus(msg, cls) {
+  var el = document.getElementById("status");
+  el.textContent = msg;
+  el.className = "status " + cls;
+}
+
+
+loadDraft();
+</script>
+</body>
+</html>

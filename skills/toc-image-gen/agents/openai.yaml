@@ -1,0 +1,4 @@
+interface:
+  display_name: "ToC 画像生成"
+  short_description: "スレッドからの画像生成依頼で、物語の状態と採用素材・参照を照合して実行する"
+  default_prompt: "$toc-image-gen を使い、この物語の最新の進行状況と採用素材を確認して、指定範囲を生成してください。"

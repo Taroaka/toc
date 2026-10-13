@@ -15,7 +15,7 @@ from toc.video_prompt_projection_registry import (
 
 
 VIDEO_API_PROMPT_POLICY_VERSION = "video_api_prompt_v1"
-VIDEO_PROMPT_COMPILER_VERSION = "conditional_video_prompt_compiler_v5"
+VIDEO_PROMPT_COMPILER_VERSION = "conditional_video_prompt_compiler_v6"
 VIDEO_PROMPT_IR_SCHEMA_VERSION = "video_prompt_ir_v2"
 _MISSING = object()
 
@@ -373,7 +373,8 @@ def compile_video_api_prompt_v1(
         cut_contract=cut_contract,
         scene_contract=scene_contract,
     )
-    unpeopled = contract.get("cut_role") == "sub"
+    directed_shot = _mapping(contract.get('shot_direction')).get('schema_version') == 'shot_direction_v1'
+    unpeopled = contract.get("cut_role") == "sub" and not directed_shot
     if unpeopled:
         if (_mapping(contract.get("asset_dependency")).get("character_ids_required")
                 or _mapping(contract.get("continuity_contract")).get("character_ids")
@@ -477,7 +478,8 @@ def compile_video_api_prompt_v1(
         else:
             # Preserve the existing contract when replaying legacy requests.
             primary = "一つの明確な動作だけを自然な速度で行う"
-    primary = _limit_primary_motion(primary, provider)
+    if not directed_shot:
+        primary = _limit_primary_motion(primary, provider)
 
     camera = _first_camera_value(
         motion.get("camera_motion"),
@@ -555,7 +557,9 @@ def compile_video_api_prompt_v1(
         for item in reference_role_bindings
     )
     continuity_lines.extend(_sentences(continuity_values, limit=5))
-    if unpeopled:
+    if directed_shot:
+        continuity_lines.append("指定した衣装・個体・道具の同一性を保ち、演技とカメラで見える範囲は指示どおりに変える。画角外の顔や身体を補うために全景へ戻さない。")
+    elif unpeopled:
         continuity_lines.append("建築、素材、物の位置関係、光源方向を一貫させる。")
     elif allowed_new_reveal_elements:
         continuity_lines.append(
@@ -629,7 +633,9 @@ def compile_video_api_prompt_v1(
         constraint_lines.append(
             "開始画像にない人物、重要な小道具、建築、物語上のrevealを新しく出さない。"
         )
-    if _is_kling(provider):
+    if directed_shot:
+        constraint_lines.append("指定した行為と相手の反応を順序どおりに見せる。このshot内は連続した画とし、編集上の切替はshotの境界で行う。")
+    elif _is_kling(provider):
         constraint_lines.append(
             "主動作は一つに絞り、単一の連続ショットとして見せる。急なcamera回転や視点ジャンプを行わず、フェードしない、暗転しない、ディゾルブしない、別ショットへ切り替えない。"
         )
@@ -679,7 +685,7 @@ def compile_video_api_prompt_v1(
         "constraints": "\n".join(_dedupe(constraint_lines)),
     }
     camera_budget = 2
-    if _is_kling(provider):
+    if _is_kling(provider) and not directed_shot:
         non_camera_operations = sum(
             _explicit_camera_operation_count(non_camera_fragment_values[group])
             for group in (
@@ -697,7 +703,7 @@ def compile_video_api_prompt_v1(
     fragment_values: dict[str, str] = {
         **non_camera_fragment_values,
         "camera_motion": _ensure_sentence(
-            _limit_camera(camera, provider, max_operations=camera_budget)
+            camera if directed_shot else _limit_camera(camera, provider, max_operations=camera_budget)
         ),
     }
     execution = dict(_mapping(_mapping(contract.get('cinematic_contract')).get('execution')))
@@ -729,7 +735,7 @@ def compile_video_api_prompt_v1(
     )
     provider_policy = {
         "one_clip_one_intent": True,
-        "max_camera_instructions": 2 if _is_kling(provider) else None,
+        "max_camera_instructions": 2 if _is_kling(provider) and not directed_shot else None,
         "single_continuous_shot": True,
         "first_last_frame_boundary": bool(first and last),
         "multimodal_reference": bool(reference_bindings),
@@ -798,7 +804,7 @@ def compile_video_api_prompt_v1(
         ),
     }
     if execution:
-        source_payload['execution_compiler_version'] = 'cinematic_execution_compiler_v1'
+        source_payload['execution_compiler_version'] = 'cinematic_execution_compiler_v2'
     source_digest = _sha256_json(source_payload)
     ir = {
         "schema_version": VIDEO_PROMPT_IR_SCHEMA_VERSION,
@@ -822,7 +828,7 @@ def compile_video_api_prompt_v1(
     return {
         "policy_version": VIDEO_API_PROMPT_POLICY_VERSION,
         "compiler_version": VIDEO_PROMPT_COMPILER_VERSION,
-        **({'execution_compiler_version': 'cinematic_execution_compiler_v1'} if execution else {}),
+        **({'execution_compiler_version': 'cinematic_execution_compiler_v2'} if execution else {}),
         "projection_registry_version": projection["registry_version"],
         "provider": provider,
         "mode": mode,

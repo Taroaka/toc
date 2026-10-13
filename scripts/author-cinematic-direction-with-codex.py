@@ -47,7 +47,7 @@ async def run(args):
             require_chatgpt_account=True, require_chatgpt_pro=True)
     resources = json.loads(read_regular_file_nofollow(run_dir, "logs/authoring/p400/resources.json"))
     await author_cinematic_direction(run_dir=run_dir, resources=resources, grounding=grounding, client_factory=factory,
-        model=args.model, timeout_seconds=args.timeout_seconds, enable_film_language=True)
+        model=args.model, timeout_seconds=args.timeout_seconds, enable_film_language=True, enable_cast_design=True)
 
 
 def main():

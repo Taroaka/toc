@@ -14,6 +14,7 @@ keys.  Unknown keys are retained rather than discarded.
 from __future__ import annotations
 
 from toc.story_selection import selected_event_order, StorySelectionError
+from toc.scene_entry_guidance import SCENE_ENTRY_GUIDANCE
 
 from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
@@ -436,6 +437,7 @@ SCENE_CAUSAL_CONNECTION_INSTRUCTION = (
 # Runtime counterpart of docs/story-creation.md: 観客の理解と意味の設計.
 # Shared by planning, single/batched scene authoring, and bounded repair.
 AUDIENCE_MEANING_INSTRUCTION = (
+    SCENE_ENTRY_GUIDANCE + "\n" +
     "Consider audience understanding and meaning as optional authoring tools, "
     "not another plot formula. Plan what the audience can initially understand, "
     "which source-grounded experiences support or question that understanding, "

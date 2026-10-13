@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ProductionToolsPanel } from './ProductionToolsPanel';
 import { createRoot } from 'react-dom/client';
 import {
+  Alert,
   AppBar,
   Autocomplete,
   Avatar,
@@ -59,8 +60,9 @@ import { canResumeRun, isRunRepairing, isTerminalRunFailure, isWaitingForNarrati
 import { shareRequest } from './requestLoader';
 import { NarrationVoiceTags } from './NarrationVoiceTags';
 import { SoundDesignPanel, type SoundStatus } from './SoundDesignPanel';
+import { CutDirectionPanel, cutItemIdForDirectionSelection, type CutDirectionCut, type CutDirectionScene } from './CutDirectionPanel';
 import { FinalAudioMixer } from './FinalAudioMixer';
-import { higgsfieldDurationError, nativeAudioModeAfterProviderSwitch, shouldSendNativeAudioMode, videoInputModeError, videoInputReferences, type VideoInputMode, type VideoNativeAudioMode } from './HiggsfieldSettings';
+import { nativeAudioModeAfterProviderSwitch, shouldSendNativeAudioMode, videoDurationBounds, videoDurationError, videoInputModeError, videoInputReferences, usesModelDefaultVideoQuality, type VideoInputMode, type VideoNativeAudioMode } from './HiggsfieldSettings';
 import './styles.css';
 
 const MAX_CUT_VIDEO_DURATION_SECONDS = 60;
@@ -99,7 +101,12 @@ type ImageRequestItem = {
   videoDurationSeconds?: number | null;
   configuredVideoDurationSeconds?: number;
   videoTool?: string;
-  videoQuality?: string;
+  videoModel?: string | null;
+  hasShots?: boolean;
+  parentSelector?: string | null;
+  shotIds?: string[];
+  shotTargets?: VideoShotTarget[];
+  videoQuality?: string | null;
   videoAspectRatio?: string;
   videoInputMode?: VideoInputMode;
   videoNativeAudioMode?: VideoNativeAudioMode;
@@ -124,6 +131,19 @@ type Candidate = {
   revisedPrompt?: string | null;
   mtimeMs?: number;
 };
+
+type VideoShotTarget = {
+  itemId: string;
+  videoTool: string;
+  videoModel: string | null;
+  providerDurationSeconds: number;
+  timelineStartSeconds: number;
+  timelineDurationSeconds: number;
+};
+
+function isShotPlanParent(item: Pick<EditableItem, 'hasShots' | 'parentSelector'>): boolean {
+  return Boolean(item.hasShots && !item.parentSelector);
+}
 
 type CinematicDirection = {
   film_language?: { fields?: Record<string, unknown>; origins?: unknown } | null;
@@ -231,7 +251,7 @@ type EditableItem = ImageRequestItem & {
   videoGenerating: boolean;
   videoDirtyFields: VideoDraftField[];
   videoDraftPrompt: string;
-  videoQuality: string;
+  videoQuality?: string | null;
   videoAspectRatio: string;
   videoDurationSec: number;
   videoFirstReferencePath: string | null;
@@ -335,7 +355,7 @@ type VideoGenerateItemPayload = {
   first_reference: string | null;
   last_reference: string | null;
   references: string[];
-  quality: string;
+  quality?: string;
   aspect_ratio: string;
   duration_seconds: number;
   tool: string;
@@ -356,6 +376,10 @@ type NarrationManifestItem = {
   configuredVideoDurationSeconds: number;
   videoPrompt: string;
   videoTool: string;
+  videoModel?: string | null;
+  hasShots?: boolean;
+  shotIds?: string[];
+  shotTargets?: VideoShotTarget[];
   videoInputMode: VideoInputMode;
   videoNativeAudioMode: VideoNativeAudioMode;
   videoHasDialogue: boolean;
@@ -776,6 +800,7 @@ function toEditableItems(items: ImageRequestItem[], refs: ReferenceOption[], nar
       narrationMinDuration,
     );
     const videoPrompt = narration?.videoPrompt?.trim() || item.videoPrompt?.trim() || defaultVideoPrompt(item);
+    const videoModel = narration?.videoModel || item.videoModel || null;
     const referenceImageMode = item.videoInputMode === 'reference_images';
     return {
       ...item,
@@ -790,7 +815,13 @@ function toEditableItems(items: ImageRequestItem[], refs: ReferenceOption[], nar
       videoGenerating: false,
       videoDirtyFields: [],
       videoDraftPrompt: videoPrompt,
-      videoQuality: narration?.videoQuality || item.videoQuality || '1080p',
+      videoQuality: usesModelDefaultVideoQuality(videoModel)
+        ? 'model_default'
+        : narration?.videoQuality || item.videoQuality || '1080p',
+      videoModel,
+      hasShots: Boolean(narration?.hasShots ?? item.hasShots),
+      shotIds: narration?.shotIds || item.shotIds || [],
+      shotTargets: narration?.shotTargets || item.shotTargets || [],
       videoAspectRatio: narration?.videoAspectRatio || item.videoAspectRatio || '16:9',
       videoDurationSec: configuredVideoDuration,
       videoFirstReferencePath: referenceImageMode
@@ -1546,10 +1577,13 @@ type SceneVideoPanelProps = {
   videoCandidateCount: number;
   onPatchItem: (itemId: string, patch: Partial<EditableItem>) => void;
   onGenerateVideo: (item: EditableItem) => void;
+  onOpenShotDirection: (item: EditableItem) => void;
 };
 
-function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoReady, videoCandidateCount, onPatchItem, onGenerateVideo }: SceneVideoPanelProps) {
+function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoReady, videoCandidateCount, onPatchItem, onGenerateVideo, onOpenShotDirection }: SceneVideoPanelProps) {
   const higgsfield = item.videoTool === 'higgsfield';
+  const isShotTarget = Boolean(item.parentSelector);
+  const modelDefaultQuality = usesModelDefaultVideoQuality(item.videoModel);
   const referenceImageMode = item.videoInputMode === 'reference_images';
   const options = useMemo(() => videoReferenceOptions(item, references), [item, references]);
   const byPath = useMemo(() => new Map(options.map((option) => [option.path, option])), [options]);
@@ -1560,7 +1594,8 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
   const videoSlots = useMemo(() => videoCandidateSlots(item, videoCandidateCount), [item, videoCandidateCount]);
   const narrationMinDuration = Math.max(1, Math.ceil(item.narrationDurationSec || 0));
   const requestedDuration = Math.max(item.videoDurationSec, narrationMinDuration, 1);
-  const durationError = higgsfield ? higgsfieldDurationError(requestedDuration) : null;
+  const durationBounds = videoDurationBounds(item.videoTool, item.videoModel);
+  const durationError = videoDurationError(requestedDuration, item.videoTool, item.videoModel);
   const inputModeError = videoInputModeError(item.videoTool, item.videoInputMode || 'image_to_video',
     item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output, item.videoReferencePaths);
   const nativeAudioProviderError = !higgsfield && Boolean(item.videoNativeAudioMode && item.videoNativeAudioMode !== 'off');
@@ -1576,6 +1611,30 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
     ),
   );
   const handleGenerateVideo = useCallback(() => onGenerateVideo(item), [item, onGenerateVideo]);
+  if (isShotPlanParent(item)) {
+    return (
+      <Box className="sceneVideoPanel">
+        <Alert severity="info">
+          このcutは複数のショットで構成されています。親cutを単一の動画リクエストとして生成・尺変更せず、ショット設計から個別に調整してください。
+        </Alert>
+        {item.shotTargets?.length ? (
+          <Box className="shotProviderSummary">
+            {item.shotTargets.map((shot) => (
+              <Box key={shot.itemId} className="shotProviderSummaryItem">
+                <Typography variant="body2" fontWeight={800}>{shot.itemId}</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {shot.videoModel || shot.videoTool} · provider {shot.providerDurationSeconds}s · timeline {shot.timelineStartSeconds}–{shot.timelineStartSeconds + shot.timelineDurationSeconds}s
+                </Typography>
+              </Box>
+            ))}
+          </Box>
+        ) : null}
+        <Button variant="outlined" onClick={() => onOpenShotDirection(item)} disabled={videoGenerationBusy}>
+          ショット設計を開く
+        </Button>
+      </Box>
+    );
+  }
   return (
     <Box className="sceneVideoPanel">
       <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
@@ -1587,7 +1646,7 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
         </Box>
         <Stack direction="row" spacing={0.75} alignItems="center">
           {item.narrationDurationSec ? <Chip size="small" label={`音声 ${item.narrationDurationSec.toFixed(1)}s`} /> : null}
-          <Chip size="small" color="primary" label={`${item.videoQuality} / ${item.videoAspectRatio}`} />
+          <Chip size="small" color="primary" label={`${modelDefaultQuality ? 'モデル既定' : item.videoQuality} / ${item.videoAspectRatio}`} />
         </Stack>
       </Stack>
 
@@ -1614,19 +1673,26 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
       </Box>}
 
       <Box className="videoSettingsGrid">
-        <FormControl size="small">
+        {modelDefaultQuality ? (
+          <Box className="videoModelDefaultQuality">
+            <Typography variant="caption" color="text.secondary">画質</Typography>
+            <Chip size="small" label="モデル既定" />
+          </Box>
+        ) : (
+          <FormControl size="small">
             <InputLabel>画質</InputLabel>
-          <Select
-            label="画質"
-            value={item.videoQuality}
-            onChange={(event) => onPatchItem(item.id, { videoQuality: event.target.value })}
-          >
-            <MenuItem value="720p">720p</MenuItem>
-            <MenuItem value="1080p">1080p</MenuItem>
-            <MenuItem value="4K">4K</MenuItem>
-            {higgsfield && <MenuItem value="480p">480p</MenuItem>}
-          </Select>
-        </FormControl>
+            <Select
+              label="画質"
+              value={item.videoQuality}
+              onChange={(event) => onPatchItem(item.id, { videoQuality: event.target.value })}
+            >
+              <MenuItem value="720p">720p</MenuItem>
+              <MenuItem value="1080p">1080p</MenuItem>
+              <MenuItem value="4K">4K</MenuItem>
+              {higgsfield && <MenuItem value="480p">480p</MenuItem>}
+            </Select>
+          </FormControl>
+        )}
         <FormControl size="small">
           <InputLabel>比率</InputLabel>
           <Select
@@ -1652,6 +1718,8 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
               const nextAudioMode = nativeAudioModeAfterProviderSwitch(nextTool, item.videoNativeAudioMode || 'off');
               onPatchItem(item.id, {
                 videoTool: nextTool,
+                videoModel: null,
+                videoQuality: usesModelDefaultVideoQuality(item.videoModel) ? '1080p' : item.videoQuality || '1080p',
                 ...(nextTool === 'higgsfield' ? { videoInputMode: item.videoInputMode || 'image_to_video' } : {}),
                 ...(nextAudioMode !== item.videoNativeAudioMode ? { videoNativeAudioMode: nextAudioMode } : {}),
               });
@@ -1662,6 +1730,7 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
             <MenuItem value="seedance">Seedance</MenuItem>
             <MenuItem value="higgsfield">Higgsfield / Seedance 2.5</MenuItem>
           </Select>
+          {item.videoModel && <FormHelperText>実行モデル: {item.videoModel}</FormHelperText>}
         </FormControl>
         {higgsfield && <FormControl size="small">
           <InputLabel>入力方法</InputLabel>
@@ -1693,9 +1762,13 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
           label="秒数"
           type="number"
           value={item.videoDurationSec}
-          inputProps={{ min: higgsfield ? 4 : narrationMinDuration, max: higgsfield ? 30 : MAX_CUT_VIDEO_DURATION_SECONDS }}
+          disabled={isShotTarget}
+          inputProps={{
+            min: durationBounds ? Math.max(durationBounds.min, narrationMinDuration) : narrationMinDuration,
+            max: durationBounds?.max ?? MAX_CUT_VIDEO_DURATION_SECONDS,
+          }}
           onChange={(event) => {
-            if (higgsfield) {
+            if (durationBounds) {
               onPatchItem(item.id, { videoDurationSec: Number(event.target.value) });
               return;
             }
@@ -1706,7 +1779,10 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
             onPatchItem(item.id, { videoDurationSec: next });
           }}
         />
+        {durationBounds && <Typography variant="caption" color="text.secondary">{durationBounds.label}</Typography>}
+        {isShotTarget && <Typography variant="caption" color="text.secondary">ショットのprovider尺はtimelineから決まります。時間を変える場合は親cutのショット設計を編集してください。</Typography>}
       </Box>
+      {isShotTarget && <Button size="small" variant="outlined" onClick={() => onOpenShotDirection(item)}>親cutのショット設計を開く</Button>}
       {durationError && <FormHelperText error>{durationError}</FormHelperText>}
       {inputModeError && <FormHelperText error>{inputModeError}</FormHelperText>}
 
@@ -1813,7 +1889,7 @@ function SceneVideoPanel({ item, runId, references, videoGenerationBusy, videoRe
                 </Typography>
               )}
               <Typography variant="caption" className="videoSlotLabel">
-                候補 {candidate.index} / {item.videoQuality}
+                候補 {candidate.index} / {usesModelDefaultVideoQuality(item.videoModel) ? 'モデル既定' : item.videoQuality}
               </Typography>
             </Box>
           ))}
@@ -2180,6 +2256,7 @@ type VideoCutCardProps = {
   videoCandidateCount: number;
   onPatchItem: (itemId: string, patch: Partial<EditableItem>) => void;
   onGenerateVideo: (item: EditableItem) => void;
+  onOpenShotDirection: (item: EditableItem) => void;
 };
 
 const VideoCutCard = React.memo(function VideoCutCard({
@@ -2191,6 +2268,7 @@ const VideoCutCard = React.memo(function VideoCutCard({
   videoCandidateCount,
   onPatchItem,
   onGenerateVideo,
+  onOpenShotDirection,
 }: VideoCutCardProps) {
   return (
     <Card className="videoCutCard" variant="outlined">
@@ -2202,7 +2280,12 @@ const VideoCutCard = React.memo(function VideoCutCard({
               {item.output || '出力先未設定'}
             </Typography>
           </Box>
-          <Chip size="small" color="primary" label={`${item.videoQuality} / ${item.videoAspectRatio}`} />
+          <Chip
+            size="small"
+            color="primary"
+            title={item.videoModel || undefined}
+            label={`${usesModelDefaultVideoQuality(item.videoModel) ? 'モデル既定' : item.videoQuality} / ${item.videoAspectRatio}`}
+          />
         </Stack>
         <SceneVideoPanel
           item={item}
@@ -2213,6 +2296,7 @@ const VideoCutCard = React.memo(function VideoCutCard({
           videoCandidateCount={videoCandidateCount}
           onPatchItem={onPatchItem}
           onGenerateVideo={onGenerateVideo}
+          onOpenShotDirection={onOpenShotDirection}
         />
       </CardContent>
     </Card>
@@ -2401,9 +2485,10 @@ type RenderCutCardProps = {
   item: EditableItem;
   runId: string;
   onPatchItem: (itemId: string, patch: Partial<EditableItem>) => void;
+  onOpenShotDirection: (item: EditableItem) => void;
 };
 
-const RenderCutCard = React.memo(function RenderCutCard({ item, runId, onPatchItem }: RenderCutCardProps) {
+const RenderCutCard = React.memo(function RenderCutCard({ item, runId, onPatchItem, onOpenShotDirection }: RenderCutCardProps) {
   const handleAudioPlay = useCallback((event: React.SyntheticEvent<HTMLAudioElement>) => {
     document.querySelectorAll('audio').forEach((audio) => {
       if (audio !== event.currentTarget) audio.pause();
@@ -2452,6 +2537,7 @@ const RenderCutCard = React.memo(function RenderCutCard({ item, runId, onPatchIt
               label="動画秒数"
               type="number"
               value={item.renderVideoDurationSec}
+              disabled={isShotPlanParent(item)}
               inputProps={{ min: Math.min(minVideoDuration, MAX_CUT_VIDEO_DURATION_SECONDS), max: MAX_CUT_VIDEO_DURATION_SECONDS }}
               onChange={(event) => {
                 const boundedMinimum = Math.min(minVideoDuration, MAX_CUT_VIDEO_DURATION_SECONDS);
@@ -2491,6 +2577,12 @@ const RenderCutCard = React.memo(function RenderCutCard({ item, runId, onPatchIt
               onChange={(event) => onPatchItem(item.id, { renderNarrationPath: event.target.value || null })}
             />
           </Box>
+          {isShotPlanParent(item) && (
+            <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+              <FormHelperText>親cutの尺はshot timelineの合計です。個別の長さはショット設計で編集してください。</FormHelperText>
+              <Button size="small" variant="outlined" onClick={() => onOpenShotDirection(item)}>ショット設計を開く</Button>
+            </Stack>
+          )}
           {narrationExceedsVideoDurationLimit ? (
             <Chip size="small" color="error" label={`音声+offset ${minVideoDuration}s。60秒以内のcutへ分割してください`} />
           ) : configuredVideoExceedsDurationLimit ? (
@@ -2520,6 +2612,7 @@ function App() {
   const [videoCandidateCountDraft, setVideoCandidateCountDraft] = useState(3);
   const [activeImageSceneKey, setActiveImageSceneKey] = useState('');
   const [activeImageCutId, setActiveImageCutId] = useState('');
+  const [shotDirectionFocusCutId, setShotDirectionFocusCutId] = useState('');
   const [activeVideoSceneKey, setActiveVideoSceneKey] = useState('');
   const [items, setItems] = useState<EditableItem[]>([]);
   const [videoTargetItems, setVideoTargetItems] = useState<EditableItem[]>([]);
@@ -2691,6 +2784,22 @@ function App() {
     return index >= 0 ? index : 0;
   }, [activeImageCutId, imageSceneItems]);
   const activeImageCutItem = activeImageCutIndex >= 0 ? imageSceneItems[activeImageCutIndex] : null;
+  useEffect(() => {
+    if (
+      !shotDirectionFocusCutId
+      || workspaceMode !== 'image'
+      || viewKind !== 'scene'
+      || activeImageCutItem?.id !== shotDirectionFocusCutId
+    ) return;
+    const panel = document.getElementById('cut-direction-panel');
+    if (!panel) return;
+    panel.scrollIntoView({
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+      block: 'start',
+    });
+    panel.focus({ preventScroll: true });
+    setShotDirectionFocusCutId('');
+  }, [activeImageCutItem?.id, shotDirectionFocusCutId, viewKind, workspaceMode]);
   const imageDisplayItems = workspaceMode === 'image' && viewKind === 'scene'
     ? activeImageCutItem ? [activeImageCutItem] : []
     : visibleItems;
@@ -3245,6 +3354,15 @@ function App() {
   }, []);
 
   const setActiveItemIdStable = useCallback((itemId: string) => setActiveItemId(itemId), []);
+  const openShotDirection = useCallback((item: EditableItem) => {
+    const parentCutId = item.parentSelector || item.id;
+    setViewKind('scene');
+    setWorkspaceMode('image');
+    if (item.sceneKey) setActiveImageSceneKey(item.sceneKey);
+    setActiveImageCutId(parentCutId);
+    setActiveItemIdStable(parentCutId);
+    setShotDirectionFocusCutId(parentCutId);
+  }, [setActiveItemIdStable]);
   const openEnlargedImage = useCallback((image: EnlargedImage) => setEnlargedImage(image), []);
   const closeEnlargedImage = useCallback(() => setEnlargedImage(null), []);
 
@@ -3654,7 +3772,7 @@ function App() {
     selected_candidate_path: item.selectedCandidatePath,
     existing_image: item.existingImage,
     video_prompt: item.videoDraftPrompt,
-    video_quality: item.videoQuality,
+    video_quality: usesModelDefaultVideoQuality(item.videoModel) ? null : item.videoQuality || '1080p',
     video_aspect_ratio: item.videoAspectRatio,
     video_duration_seconds: Math.max(item.videoDurationSec, Math.ceil(item.narrationDurationSec || 0), 1),
     video_first_reference: videoInputReferences(item.videoTool, item.videoInputMode || 'image_to_video',
@@ -3764,7 +3882,7 @@ function App() {
     ...videoInputReferences(item.videoTool, item.videoInputMode || 'image_to_video',
       item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output,
       item.videoLastReferencePath, item.videoReferencePaths),
-    quality: item.videoQuality,
+    ...(usesModelDefaultVideoQuality(item.videoModel) ? {} : { quality: item.videoQuality || '1080p' }),
     aspect_ratio: item.videoAspectRatio,
     duration_seconds: Math.max(item.videoDurationSec, Math.ceil(item.narrationDurationSec || 0), 1),
     tool: item.videoTool,
@@ -3786,8 +3904,13 @@ function App() {
 
   const generateVideoForCut = useCallback(async (item: EditableItem) => {
     if (!runId) return;
+    if (isShotPlanParent(item)) {
+      setVideoPromptStatus(`${item.id}: 親cutの一括動画生成は使えません。ショット設計を開きます。`);
+      openShotDirection(item);
+      return;
+    }
     const plannedDuration = Math.max(item.videoDurationSec, Math.ceil(item.narrationDurationSec || 0), 1);
-    const durationError = item.videoTool === 'higgsfield' ? higgsfieldDurationError(plannedDuration) : null;
+    const durationError = videoDurationError(plannedDuration, item.videoTool, item.videoModel);
     const inputError = videoInputModeError(item.videoTool, item.videoInputMode || 'image_to_video',
       item.videoFirstReferencePath || item.selectedCandidatePath || item.existingImage || item.output, item.videoReferencePaths);
     const nativeAudioError = item.videoTool !== 'higgsfield' && Boolean(item.videoNativeAudioMode && item.videoNativeAudioMode !== 'off');
@@ -3839,16 +3962,25 @@ function App() {
       patchVideoItem(item.id, { videoGenerating: false });
       setVideoPromptBusy(false);
     }
-  }, [ensureVideoItemsInState, generateVideoRequest, materializeVideoPrompts, narrationReadyForVideo, patchVideoItem, runId]);
+  }, [ensureVideoItemsInState, generateVideoRequest, materializeVideoPrompts, narrationReadyForVideo, openShotDirection, patchVideoItem, runId]);
 
   const generateVideoItems = useCallback(async (targetItems: EditableItem[]) => {
     if (!runId || !targetItems.length) return;
-    const invalidHiggsfieldItem = targetItems.find((item) => item.videoTool === 'higgsfield' &&
-      higgsfieldDurationError(Math.max(item.videoDurationSec, Math.ceil(item.narrationDurationSec || 0), 1)));
-    if (invalidHiggsfieldItem) {
-      const durationError = higgsfieldDurationError(Math.max(invalidHiggsfieldItem.videoDurationSec,
-        Math.ceil(invalidHiggsfieldItem.narrationDurationSec || 0), 1));
-      setVideoPromptStatus(`${invalidHiggsfieldItem.id}: ${durationError}`);
+    const shotPlanParent = targetItems.find(isShotPlanParent);
+    if (shotPlanParent) {
+      setVideoPromptStatus(`${shotPlanParent.id}: 親cutの一括動画生成は使えません。ショット設計を開きます。`);
+      openShotDirection(shotPlanParent);
+      return;
+    }
+    const invalidDurationItem = targetItems.find((item) => videoDurationError(
+      Math.max(item.videoDurationSec, Math.ceil(item.narrationDurationSec || 0), 1),
+      item.videoTool,
+      item.videoModel,
+    ));
+    if (invalidDurationItem) {
+      const durationError = videoDurationError(Math.max(invalidDurationItem.videoDurationSec,
+        Math.ceil(invalidDurationItem.narrationDurationSec || 0), 1), invalidDurationItem.videoTool, invalidDurationItem.videoModel);
+      setVideoPromptStatus(`${invalidDurationItem.id}: ${durationError}`);
       return;
     }
     const invalidInputItem = targetItems.find((item) => videoInputModeError(item.videoTool,
@@ -3930,7 +4062,7 @@ function App() {
     } finally {
       setVideoPromptBusy(false);
     }
-  }, [buildVideoGenerateItem, ensureVideoItemsInState, materializeVideoPrompts, narrationReadyForVideo, patchVideoItem, runId, videoCandidateCount]);
+  }, [buildVideoGenerateItem, ensureVideoItemsInState, materializeVideoPrompts, narrationReadyForVideo, openShotDirection, patchVideoItem, runId, videoCandidateCount]);
 
   const generateAllVideos = useCallback(async () => {
     if (!narrationReadyForVideo) {
@@ -5091,6 +5223,25 @@ function App() {
                       onOpenImage={openEnlargedImage}
                     />
                   ))}
+                {viewKind === 'scene' && Boolean(runId) && imageSceneGroups.length > 0 && (
+                  <CutDirectionPanel
+                    key={runId}
+                    runId={runId}
+                    jsonFetch={jsonFetch}
+                    imageFileUrl={fileUrl}
+                    videoFileUrl={videoFileUrl}
+                    selectedCutId={activeImageCutItem?.id || ''}
+                    onSelectCut={(_scene: CutDirectionScene, cut: CutDirectionCut) => {
+                      const selectedItemId = cutItemIdForDirectionSelection(cut, new Set(visibleItems.map((item) => item.id)));
+                      const matchingItem = visibleItems.find((item) => item.id === selectedItemId);
+                      if (!matchingItem) return;
+                      if (matchingItem.sceneKey) setActiveImageSceneKey(matchingItem.sceneKey);
+                      setActiveImageCutId(matchingItem.id);
+                      setActiveItemIdStable(matchingItem.id);
+                    }}
+                    onRefresh={refreshCurrentRun}
+                  />
+                )}
                 {!busy && viewKind === 'asset' && Boolean(runId) && (
                   <GlassPanel variant="frosted" density="spacious" className="addCutCard">
                     <AddCircleOutlineIcon className="addCutIcon" />
@@ -5188,6 +5339,7 @@ function App() {
                     videoCandidateCount={videoCandidateCount}
                     onPatchItem={patchVideoDraftItem}
                     onGenerateVideo={generateVideoForCut}
+                    onOpenShotDirection={openShotDirection}
                   />
                 ))}
                 {workspaceMode === 'render' && visibleItems.map((item) => (
@@ -5196,6 +5348,7 @@ function App() {
                     item={item}
                     runId={runId}
                     onPatchItem={patchItem}
+                    onOpenShotDirection={openShotDirection}
                   />
                 ))}
               </Box>

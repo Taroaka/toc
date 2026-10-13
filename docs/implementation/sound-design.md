@@ -18,12 +18,33 @@ BGM/SEの役割は、観客の感情だけでなく、注意、人物理解、�
 - 音楽なし・環境音のみ・全無音を区別する。元動画音声との重複、語りや台詞の聞き取り、終幕のフレーズと余韻を確認する。
 - 終幕の感動を音量最大化と同一視しない。高揚、安心、切なさ、未解決など作品の結末に合う狙いを選ぶ。
 
-### 現在の初期案の限界
+### LLMが演出を判断し、コードが再現する
 
-`new_plan`の全編BGM1案＋各targetのSE案は編集開始用の下書きであり、音響演出の完成形ではない。
-生成前に上の判断で採否とprompt/配置を見直す。全編loopや各cut冒頭のSEを無条件に採用しない。
-今回の更新は設計・参照資料の改善であり、複数BGMの自動構成、cue追加UI、source trim、任意gain automation、stem分離を実装したものではない。
-未対応の設計が必要なら別編集/追加実装と明示する。通常の生成操作に新しいLLM評価gateは追加しない。
+新規動画承認ではBGM/SEを自動で決めず、空のcue配列から始める。既存作品のcue/採用音源は保持する。
+「LLMで音響案を設計して追加」は研究・本設計・spotting手引き/テンプレート全文、story、全active script cutの語り/音響/動作/開示契約、確定動画timeline、現在のcueと元動画音声、ユーザー要望を読み込む。
+既存のread-only author runtimeと既定authorモデルを使用する。コードに感情→曲種の対応表は置かない。
+
+LLMは`SoundDesignDraft`の全編intent、silence_regions、任意数のcueを返す。0cueも許可。
+cueにはkind/label/source_selector/purpose/perspective/timing_reasonと生成指示・生成尺・配置尺・開始秒・音量・fade・loopを持たせる。
+音源path、候補、採用状態は生成させない。コードは既知selector、有限の数値、provider尺、全編内の配置、fade等を検証する。
+source_selectorは`full_run`または確定動画target。render unitはunitを参照し、元cutの出来事を理由欄で説明する。
+一つのtargetに複数SE/BGMを置ける。配置時刻は全編の絶対秒で、cueはcutをまたいでよい。
+
+提案は新規の未採用cueとして追加する。再設計でも既存cue、候補、mix、native_tracksは変更しない。
+不要な下書きは明示削除する。silence_regionsは演出意図のメモであり、既存採用音を自動muteする指定ではない。
+音源生成は別ボタンで行う。LLM設計失敗/不正出力を定型案で代替しない。
+
+`logs/sound_design/design_<id>.request.json`に入力原本/設計書hash、revision、video hash、実promptを保存し、結果とauthor provenance、反映statusを別ファイルに残す。
+LLM処理中はrun書込lockを解放し、反映直前にrevision/video hash/原本と設計書hash/plan hashを再確認する。
+変更があれば出力だけを記録して反映を拒否する。同一runの同時設計は拒否する。通信切断/プロセス停止時にLLMを自動再送しない。
+
+手動追加にも同じcue検証を使う。cue IDはサーバー側UUID。削除は`archived_cues`へ保存し音源bytesを削除しない。
+生成中に削除されたcueの結果はstaleとして履歴へ保存し、active cueを復活させない。
+メタデータのみの編集では音源を再生成しない。prompt/生成尺等が変わる場合は既存の候補無効化を適用する。
+変更後はp860をdraft、p910/p920をpendingへ戻す。設計しただけで音源生成・採用・mixが完了したとは扱わない。
+
+gain automation、source trim、stem分離は今回の対象外。必要なら別編集/追加実装と明示する。
+通常の生成操作にLLMの感動採点や新しい承認gateは追加しない。
 
 ## 入力と承認
 
@@ -44,8 +65,7 @@ BGM/SEの役割は、観客の感情だけでなく、注意、人物理解、�
 - `status`: draft/completed。設定の変更はdraftへ戻す。候補追加だけでは採用や設定確定を変更しない。
 - `mix`: 最終合成の `narration` / `se` / `bgm` ごとの `volume_db`（−60〜+36dB）と `muted`。未指定は0dB・非ミュートで旧planと互換。個別cueの音量に加算し、元動画音声はSE系統に含める。個別cueも+36dBまで増幅可能。
 
-承認直後に、canonicalな動画の場面・動作の記述から全編BGMと各動画targetのSEの編集可能な案を作る。
-初期案は生成前の下書きであり、providerは呼ばない。作品固有の分岐や固定対応表は設けない。
+承認直後は音楽/SEを決めない。LLMで設計するか手動で追加する。設計結果は未採用の下書きであり、音声providerは呼ばない。作品固有の分岐や固定対応表は設けない。
 生成ボタンを押すと実際の音声候補を1本生成する。繰り返して複数候補を比較できる。
 生成は自動採用しない。採用後に音量・位置などを保存し、「採用した音で確定」でp860を完了する。
 不要な案は未採用のまま完了できる。追加音なしの場合は「BGM・SEなしで確定」を明示的に選ぶ。
@@ -72,14 +92,17 @@ APIキーは保存しない。ffprobe、音声decodeとhashを検証し、`asset
 | Method / suffix | 操作 |
 | --- | --- |
 | GET（run_id） | 動画一式、承認状態、案、候補、設定、結合可否 |
-| POST /approve-video | current動画の承認と初期案作成 |
-| POST /cue | 指示・採用候補・mix設定の保存 |
+| POST /approve-video | current動画の承認。新規BGM/SEは空から開始 |
+| POST /design | 設計書を読むLLMで新規音響案を作り、未採用cueとして追記 |
+| POST /cue-create | 独立したBGM/SEを手動追加。同じtargetへの複数追加可 |
+| POST /cue-delete | cueをarchiveへ移す。音源ファイルは保持 |
+| POST /cue | 指示・採用候補・配置と、任意のmetadata（名前/対象/狙い/視点/タイミング理由）を保存 |
 | POST /generate | 保存された指示から候補生成 |
 | POST /complete | 使用音の確定、または明示的な追加音なし |
 | POST /mix | 3系統の音量とミュートを保存。revision/hash競合を拒否し、最終レンダーを未完に戻す |
 | POST /mix-preview | 未保存の3系統設定を使った試聴動画をローカル作成。manifest/採用候補/工程完了状態を変更しない |
 
-POSTはrun_id、video_set_hash、revisionを必須とし、generate/cueはitem_idを持つ。
+POSTはrun_id、video_set_hash、revisionを必須とし、generate/cue/削除はitem_idを持つ。designはinstructions、cue-createはCueDraftを持つ。
 動画タブから「動画を確認・承認してBGM・SEへ」で進める。
 最終タブはp860の確定を確認し、未確定ならBGM・SEへ誘導する。API側でも同じ条件を検証する。
 

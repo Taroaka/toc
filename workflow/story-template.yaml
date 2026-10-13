@@ -219,6 +219,8 @@ script:
           visible_evidence: ["変化を画面で確認できる証拠"]
         causal_turn: "次sceneを発生させる不可逆な出来事"
       start_state:
+        # 思考の手がかり: 何をしたいか・何を届けたいかが先。必要なら入口の手がかりを補う。
+        # 全sceneへの導入・四機能・回答を義務付けず、意図した省略や唐突さも選べる。
         state_id: "scene_01_start"
         characters: []
         relationships: []
@@ -268,6 +270,7 @@ script:
         transitions: []
         state_after: {}
       handoff_chain:
+        # 起承転結は作者の意図に役立つ場合だけ使う考え方。全sceneの必須構成ではない。
         incoming:
           producer_scene_id: null
           state_id: "scene_01_start"

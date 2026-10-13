@@ -1,0 +1,32 @@
+[
+  {
+    "skill": "toc-video-gen",
+    "source": "/Users/kantaro/Downloads/toc/skills/toc-video-gen",
+    "installed": "/Users/kantaro/.codex/skills/toc-video-gen",
+    "sha256": "ebd711f123f630ed50c8a7b94c5c88f079cce36b6eb8733d82c3c4365f0986b1"
+  },
+  {
+    "skill": "toc-image-gen",
+    "source": "/Users/kantaro/Downloads/toc/skills/toc-image-gen",
+    "installed": "/Users/kantaro/.codex/skills/toc-image-gen",
+    "sha256": "cdbbfb1f8200d64d85541d33594c1d50ff30010d4318624ed7ac1dae6645dd83"
+  },
+  {
+    "skill": "toc-narration-gen",
+    "source": "/Users/kantaro/Downloads/toc/skills/toc-narration-gen",
+    "installed": "/Users/kantaro/.codex/skills/toc-narration-gen",
+    "sha256": "5b5a1006ceb02c583c21227d037fec797b912159ba5d644ba47ba372a254effb"
+  },
+  {
+    "skill": "toc-bgm-gen",
+    "source": "/Users/kantaro/Downloads/toc/skills/toc-bgm-gen",
+    "installed": "/Users/kantaro/.codex/skills/toc-bgm-gen",
+    "sha256": "e3aaafc339c04ece8dbc150293d456236aff1705cf30e76f4c56399109058c25"
+  },
+  {
+    "skill": "toc-se-gen",
+    "source": "/Users/kantaro/Downloads/toc/skills/toc-se-gen",
+    "installed": "/Users/kantaro/.codex/skills/toc-se-gen",
+    "sha256": "f239ab56017e48c64a328fd97fd445ce84ee0938780d0ff4a90b19b787c1a40d"
+  }
+]

@@ -1849,7 +1849,7 @@ scenes:
 
         video_payload = MODULE._video_api_prompt_payload_for_scene(scene, prefix="", suffix="")
         self.assertEqual(video_payload["policy_version"], "video_api_prompt_v1")
-        self.assertEqual(video_payload["compiler_version"], "conditional_video_prompt_compiler_v5")
+        self.assertEqual(video_payload["compiler_version"], "conditional_video_prompt_compiler_v6")
         self.assertEqual(video_payload["prompt"], video_prompt)
         self.assertEqual(len(video_payload["sha256"]), 64)
         self.assertEqual(

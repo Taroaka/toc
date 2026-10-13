@@ -46,7 +46,7 @@ from toc.harness import (
 )
 from toc.source_scene_projection import source_first_profile, source_blueprint, source_scene_intent, source_scene_event
 from toc.authored_cut_projection import authored_cut_plan
-from toc.p400_authoring import ARTIFACT as CINEMATIC_ARTIFACT, CONTRACT as CINEMATIC_CONTRACT, load_direction, direction_projection_file_issues
+from toc.p400_authoring import ARTIFACT as CINEMATIC_ARTIFACT, CONTRACT as CINEMATIC_CONTRACT, DIRECTION_AUTHOR_POLICY, load_direction, direction_projection_file_issues
 from toc.p400_projection import project_scene as project_cinematic_scene
 from toc.p420_assets import extend_asset_bibles
 from toc.b_roll import scene_boundary, materialize_b_roll
@@ -57,6 +57,7 @@ from toc.adaptation_value_contract import (
     visual_value_adaptation_issues,
 )
 from toc.asset_prompt_compiler import compile_asset_prompt
+from toc.asset_state_variants import required_state_variant_plan_entries
 from toc.cut_context_packet import materialize_cut_context_packet
 from toc.image_prompt_compiler import compile_image_api_prompt_v2
 from toc.cut_design_logging import (
@@ -8479,9 +8480,11 @@ def _cinematic_resources(profile: dict[str, Any]) -> dict[str, Any]:
     protagonist = profile["protagonist_asset_id"]
     characters = {protagonist: {"name": profile["protagonist_name"],
         "references": [f"assets/characters/{protagonist}.png"],
+        "subject_contract": {"identity_scope": "individual", "subject_count": 1, "member_ids": []},
         "appearance_contract": _protagonist_appearance_contract(profile),
         "appearance_continuity": {"costume_state": _protagonist_appearance_contract(profile)["occasion_or_state"]}}}
     characters.update({s["character_id"]: {"name": s["name"], "references": list(s["reference_images"]),
+        "subject_contract": deepcopy(s.get("subject_contract") or {"identity_scope": "individual", "subject_count": 1, "member_ids": []}),
         "appearance_contract": deepcopy(s.get("appearance_contract") or {}),
         "appearance_continuity": deepcopy(s.get("appearance_continuity") or {})}
         for s in _supporting_character_asset_specs(profile)})
@@ -10058,7 +10061,15 @@ def _build_script_and_manifest(
                 scene_generation=record["scene_generation"], acceptance_draft=draft,
                 acceptance_binding=binding, previous_selector=previous_selector,
                 next_selector=next_selector, story_time=str(profile.get("story_time") or ""),
-                film_language=profile['cinematic_direction'].get('film_language'))
+                film_language=profile['cinematic_direction'].get('film_language'),
+                cast_design=profile['cinematic_direction'].get('cast_design'),
+                available_state_variants=[
+                    variant
+                    for direction_scene in profile['cinematic_direction'].get('scenes', [])
+                    if isinstance(direction_scene, dict)
+                    for variant in direction_scene.get('state_variants', []) or []
+                    if isinstance(variant, dict)
+                ])
             script_scenes.append(script_scene)
             manifest_scenes.append(manifest_scene)
             selectors.extend(c["selector"] for c in manifest_scene["cuts"])
@@ -11816,6 +11827,8 @@ def _build_script_and_manifest(
         for document, metadata in ((script, "script_metadata"), (manifest, "video_metadata")):
             document[metadata]["cinematic_direction_contract"] = CINEMATIC_CONTRACT
             document[metadata]["source_cinematic_direction"] = deepcopy(profile["cinematic_binding"])
+            if metadata == "video_metadata":
+                document[metadata]["video_preparation_policy"] = "scene_video_preparation_v1"
     manifest["video_metadata"]["time"] = str(profile.get("story_time") or "").strip()
     _bind_experience_metadata(
         manifest,
@@ -12080,6 +12093,11 @@ def _write_orchestration(
 
 
 def _used_selectors_by_asset_id(manifest: dict[str, Any], field_name: str) -> dict[str, list[str]]:
+    result_state_asset_keys = {
+        "character_ids": "character",
+        "object_ids": "object",
+        "location_ids": "location",
+    }
     used: dict[str, list[str]] = {}
     for scene in manifest.get("scenes", []):
         if not isinstance(scene, dict):
@@ -12091,6 +12109,19 @@ def _used_selectors_by_asset_id(manifest: dict[str, Any], field_name: str) -> di
             image_generation = cut.get("image_generation") if isinstance(cut.get("image_generation"), dict) else {}
             for asset_id in image_generation.get(field_name, []) or []:
                 key = str(asset_id).strip()
+                if key and selector:
+                    used.setdefault(key, []).append(selector)
+            video_generation = cut.get("video_generation") if isinstance(cut.get("video_generation"), dict) else {}
+            result_frame = video_generation.get("result_frame") if isinstance(video_generation.get("result_frame"), dict) else {}
+            result_image = result_frame.get("image_generation") if isinstance(result_frame.get("image_generation"), dict) else {}
+            for asset_id in result_image.get(field_name, []) or []:
+                key = str(asset_id).strip()
+                if key and selector:
+                    used.setdefault(key, []).append(selector)
+            result_binding = video_generation.get("result_state_reference") if isinstance(video_generation.get("result_state_reference"), dict) else {}
+            expected_type = result_state_asset_keys.get(field_name, "")
+            if str(result_binding.get("entity_type") or "").strip() == expected_type:
+                key = str(result_binding.get("asset_id") or "").strip()
                 if key and selector:
                     used.setdefault(key, []).append(selector)
     return used
@@ -12171,6 +12202,25 @@ def _build_asset_artifacts_from_manifest(
         coverage["locations"].append(asset_id)
         inventory_items.append({"item_id": asset_id, "category": "locations", "source_script_selectors": selectors, "story_purpose": f"{location_name}の空間・光・質感を固定する", "reusable_reason": "同じ場所のcutで背景と空気感を保つ", "recommended_asset_type": "location_reference"})
         plan_entries.append({"asset_id": asset_id, "asset_type": "location_reference", "source_script_selectors": selectors, "story_purpose": f"{location_name}の空間構造と固定素材を保つ", "fixed_prompts": fixed_prompts, "generation_prompt": str(entry.get("generation_prompt") or "").strip(), "reuse_contract": deepcopy(entry.get("reuse_contract") or {"mode": "neutral_anchor"}), "visual_spec": {"subject": location_subject, "style": "photorealistic live-action cinematic location still", "forbidden": ["文字", "ロゴ", "人物主役", "アニメ"]}, "generation_plan": {"execution_lane": "bootstrap_builtin", "bootstrap_allowed": True, "required_views": ["wide"], "reference_inputs": [], "output": output}})
+
+    for state_entry in required_state_variant_plan_entries(manifest):
+        plan_entries.append(state_entry)
+        coverage_key = {
+            "character_reference": "characters",
+            "object_reference": "story_specific_items",
+            "location_reference": "locations",
+        }.get(str(state_entry.get("asset_type") or ""), "story_specific_items")
+        coverage[coverage_key].append(str(state_entry.get("asset_id") or ""))
+        inventory_items.append({
+            "item_id": str(state_entry.get("asset_id") or ""),
+            "category": "state_variants",
+            "source_script_selectors": list(state_entry.get("source_script_selectors") or []),
+            "story_purpose": str(state_entry.get("story_purpose") or ""),
+            "reusable_reason": "source-grounded transformation state and continuity reference",
+            "recommended_asset_type": str(state_entry.get("asset_type") or "object_reference"),
+            "parent_asset_id": str(state_entry.get("parent_asset_id") or ""),
+            "reference_variant_id": str(state_entry.get("reference_variant_id") or ""),
+        })
 
     by_id = {entry.get(key): entry for group, key in (("character_bible", "character_id"), ("object_bible", "object_id"), ("location_bible", "location_id"))
         for entry in assets.get(group, []) or [] if isinstance(entry, dict)}
@@ -12405,7 +12455,9 @@ def materialize_run(
         elif stage == 'visual_value':
             errors = validate_visual_value_files(run_dir)
         else:
-            load_direction(run_dir, _cinematic_resources(profile))
+            saved_direction = load_direction(run_dir, _cinematic_resources(profile))
+            if saved_direction.get('metadata', {}).get('author_policy') != DIRECTION_AUTHOR_POLICY:
+                raise ValueError('cinematic direction checkpoint predates the current p420 field contract')
         if errors:
             raise AuthoringValidationError('; '.join(errors),
                 owner_stage={'story': 'p220', 'visual_value': 'p330', 'cinematic': 'p420'}[stage])

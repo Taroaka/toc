@@ -6,6 +6,8 @@ asset_plan_metadata:
   source_script: "output/<topic>_<timestamp>/script.md"
   created_at: "ISO8601"
   purpose: "reusable asset design before cut image generation"
+  # 全キャスト比較の正本は cinematic_direction.json の cast_design。
+  # 個別のappearance_contractはその設計から投影し、合格済み参照を保持する。
 
 assets:
   characters:
@@ -18,6 +20,12 @@ assets:
         subject_count: 1
         member_ids: []
       appearance_contract:
+        age_impression: ""
+        face_shape: ""
+        hair: ""
+        build_silhouette: ""
+        palette_costume: ""
+        identifying_features: ""
         social_position: ""
         occupation_or_role: ""
         occasion_or_state: ""
@@ -124,4 +132,25 @@ asset_plan_validation:
 # - bootstrap_builtin is the no-reference built-in lane; derived assets use standard.
 # - neutral_anchor does not include scene-specific time-of-day light; use an explicit time_variant instead.
 # - p550 prompt body uses visible people, places, objects, and actions, never scene/request metadata.
-
+# - A manifest reference_variants[] entry with state_transition is projected into one derived p500 asset request.
+#   Keep its authored generation_prompt, parent lineage, source selectors, and output path bound as below.
+#   The parent asset is generated before the variant when generation_plan.reference_inputs names that output.
+# Example projected state variant asset entry (represented by one member of the p500 assets list):
+# - asset_id: object_01__state__object_damaged
+#   parent_asset_id: object_01
+#   reference_variant_id: object_damaged
+#   asset_type: object_reference
+#   source_script_selectors: [scene01_cut02]
+#   state_transition:
+#     transition_id: object_damage_transition
+#     source_event_beat_ids: [beat_03]
+#     from_state: "完全な表面"
+#     to_state: "片側の縁が欠けた状態"
+#   generation_prompt: "同じ物体の形状と材質を保ち、破損後の状態を具体的に描く。"
+#   reuse_contract: {mode: state_variant, derived_from_asset_id: object_01}
+#   generation_plan:
+#     execution_lane: standard
+#     bootstrap_allowed: false
+#     reference_inputs: [assets/objects/object_01.png]
+#     derived_from_asset_id: object_01
+#     output: assets/objects/object_01__object_damaged.png

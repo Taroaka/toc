@@ -106,6 +106,11 @@ first_frame_visual_plan:
 The plan is derived from the scene/cut contract. It describes what is currently visible, not a
 summary of the whole scene and not a video action list.
 
+When a parent cut has `shot_plan`, compile a separate still request from each shot's `initial_view`;
+only that shot's listed visible subjects and body parts belong in its starting image. An optional
+`end_view` creates a same-cut auxiliary still. See [Cut内ショット設計](shot-direction.md) for the
+timeline, reference, and preservation contract.
+
 ## 4. Drawable Prompt IR
 
 ```yaml
@@ -149,6 +154,12 @@ run-relative, exists, has an allowed image type, and is hashed before provider e
 scene-specific time-of-day to a reusable asset unless an explicit variant requires it.
 
 ### 5.3 First frame boundary
+
+開始/終了画像を組として使う場合は、生成前の既存参照と生成後の結果を
+[画像ペアの実画像照合](conversation-media-generation.md#開始画像と終了画像の差を実画像で照合する)
+で確認する。個々の画像の描画品質だけでは、衣装のレースや留め具等の細かな不一致は防げない。
+意図した姿勢/状態変化と、維持すべき形状・付着位置を分けてから動画入力へ渡す。
+行為後の反応が目的の終了画像は、その瞬間の表情・視線・手元を描き、動作列は動画へ渡す。
 
 Do not draw the completed action, future reveal, unlisted character, new location, or motion trail in
 the first frame. `must_not_add[]` and `not_yet_happened_in_still[]` are structural constraints that
@@ -217,6 +228,21 @@ p500 asset planning creates stable reusable IDs and reference files. p600 scene 
 projects one cut into a first-frame plan and image request. A reusable anchor may be selected instead
 of generating a new still when the current bytes and provenance match. Exploratory variants belong in
 `assets/test/` and are never silently promoted.
+
+### Transformation result stills
+
+When a cut declares `video_generation.result_state_reference.required: true`, p400 also authors a
+scene-specific `video_generation.result_frame.image_generation` target. The shared p600 materializer
+projects that nested target as a second image request with a stable `*_result_frame` selector. It uses
+the primary scene image as a layout anchor and the selected state variant as an identity/state anchor;
+the result-frame brief and end-state facts define the changed scene composition.
+This is an image-only output inside the same cut; it adds no cut, narration, audio, or render duration.
+The neutral p500 state reference itself is never substituted as this scene still.
+
+The ordinary image request snapshot binds the result-frame prompt, reference image bytes, and
+destination. Missing variant paths or stale prompt/reference hashes fail before generation.
+For an authored later cut that begins in the changed state rather than ending the transition clip,
+`image_generation.*_variant_ids` selects the same asset variant on its ordinary first-frame request.
 
 ## 9. Human choices
 

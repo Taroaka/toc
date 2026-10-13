@@ -86,7 +86,7 @@ def video_context(root: Path, data: dict[str, Any] | None = None) -> dict[str, A
         api._assert_current_video_candidate_path(root, selector, path)
         source = sound.safe_path(root, path)
         measured = api._probe_media_duration_seconds(source)
-        duration = float((None if target.get("is_render_unit") else render.get("video_duration_seconds")) or generation.get("duration_seconds") or 0)
+        duration = float(target.get('timeline_duration_seconds') or (None if target.get("is_render_unit") else render.get("video_duration_seconds")) or generation.get("duration_seconds") or 0)
         if measured is None or duration <= 0 or measured + 0.35 < duration:
             raise ValueError(f"{selector}: 生成動画の尺が未確定か不足しています")
         scene = target["scene"]
@@ -277,6 +277,8 @@ async def author_design(req: SoundAuthorRequest) -> dict[str, Any]:
     try:
         async with api._serialized_run_write(root, 'run_artifacts'):
             plan, context = await asyncio.to_thread(require_request, root, req)
+            from toc.grounding import run_stage_grounding
+            await asyncio.to_thread(run_stage_grounding, root, 'sound_design', retries=0, mark_stage_failure=False)
             snapshot, hashes = await asyncio.to_thread(authoring.source_snapshot, root, api.ROOT)
             plan_hash = sound.digest(plan)
             prompt = authoring.build_prompt(snapshot, context, plan, req.instructions)

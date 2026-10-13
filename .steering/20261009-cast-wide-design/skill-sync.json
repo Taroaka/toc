@@ -1,0 +1,12 @@
+[
+  {
+    "skill": "toc-image-gen",
+    "installed": "/Users/kantaro/.codex/skills/toc-image-gen/SKILL.md",
+    "sha256": "d402ad9bbb569c9c6bb0c6f75db712b72f3e59d0a02745e4054bb34ab87df549"
+  },
+  {
+    "skill": "toc-video-gen",
+    "installed": "/Users/kantaro/.codex/skills/toc-video-gen/SKILL.md",
+    "sha256": "412fb2eaa52e660c24fe080d6cf70dfa5a92d2c469e4481e42a6a50832a437c8"
+  }
+]

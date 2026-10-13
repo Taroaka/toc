@@ -41,7 +41,8 @@ When execution is needed, explicitly use `$codex-parallel-image-batch`.
 3. Missing new metadata defaults to `standard`, not `bootstrap_builtin`.
 4. Any asset with `reference_inputs[]` must stay on the standard lane, still using `tool: codex_builtin_image`.
 5. Any asset with `derived_from_asset_id` must stay on the standard lane, still using `tool: codex_builtin_image`.
-6. Bootstrap outputs become canonical when the request-bound output, file, decode, and provenance checks pass.
+6. A `reference_variants[]` entry with `state_transition` is a derived p500 asset. Generate it from its parent reference on the standard lane before p600 uses it.
+7. Bootstrap outputs become canonical when the request-bound output, file, decode, and provenance checks pass.
 
 ## Execution Workflow
 

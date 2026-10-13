@@ -6,6 +6,8 @@ import re
 import unicodedata
 
 from toc.visual_planning_contract import _pointer, story_scenes
+from toc.asset_state_variants import state_variant_output_path
+from toc.cast_design import appearance_contract_from_design, validate_cast_design
 
 ASSET_RESOLUTION_CONTRACT = 'source_asset_requests_v1'
 KINDS = {'character': ('characters', 'character_ids'), 'object': ('objects', 'object_ids'), 'location': ('locations', 'location_id')}
@@ -215,6 +217,19 @@ def resolve_asset_requests(rows, story, research, base_resources):
                 if len(set(converted)) != len(converted):
                     _fail('duplicate_cut_asset')
                 cut[field] = converted[0] if field == 'location_id' else converted
+            if isinstance(cut.get('shot_plan'), dict):
+                def resolve_shot_ids(value, key=''):
+                    if isinstance(value, dict):
+                        return {k: resolve_shot_ids(v, k) for k, v in value.items()}
+                    if isinstance(value, list):
+                        return [resolve_shot_ids(v, key) for v in value]
+                    if key in ('entity_id', 'entity_ids', 'actor_id', 'target_id') and isinstance(value, str) and value.startswith('request:'):
+                        binding = aliases.get(value.removeprefix('request:'))
+                        if not binding:
+                            _fail('shot_request_reference_unknown')
+                        return binding[1]
+                    return value
+                cut['shot_plan'] = resolve_shot_ids(cut['shot_plan'])
         for request, field, aid in bindings:
             actual = [c['cut_id'] for c in cuts if aid == c.get(field) or (isinstance(c.get(field), list) and aid in c[field])]
             if set(actual) != set(request['used_in_cuts']):
@@ -251,6 +266,68 @@ def extend_asset_bibles(manifest, direction):
                 entry['kind'] = 'setpiece'
             bible.append(entry); present.add(aid)
 
+    cast_design = direction.get('cast_design') if isinstance(direction, dict) else None
+    if cast_design is not None:
+        issues = validate_cast_design(
+            cast_design,
+            direction.get('resources', {}),
+            expected_source_bindings=direction.get('metadata', {}).get('source_bindings'),
+        )
+        if issues:
+            _fail('cast_design_invalid:' + ';'.join(issues))
+        by_id = {entry.get('character_id'): entry for entry in assets.get('character_bible', [])
+                 if isinstance(entry, dict)}
+        for character_id, record in cast_design['characters'].items():
+            target = by_id.get(character_id)
+            if target is None:
+                _fail('cast_design_character_bible_missing')
+            appearance = target.get('appearance_contract')
+            appearance = deepcopy(appearance) if isinstance(appearance, dict) else {}
+            appearance.update(appearance_contract_from_design(
+                record, all_records=cast_design.get('characters', {})))
+            target['appearance_contract'] = appearance
+            target['subject_contract'] = deepcopy(record['subject_contract'])
+
+    for scene in direction.get('scenes', []) if isinstance(direction, dict) else []:
+        if not isinstance(scene, dict):
+            continue
+        for raw_variant in scene.get('state_variants', []) or []:
+            if not isinstance(raw_variant, dict):
+                continue
+            kind = str(raw_variant.get('entity_type') or '').strip()
+            if kind not in KINDS:
+                _fail('state_variant_entity_type_invalid')
+            group, _field = KINDS[kind]
+            asset_id = str(raw_variant.get('asset_id') or '').strip()
+            variant_id = str(raw_variant.get('variant_id') or '').strip()
+            resource = direction.get('resources', {}).get(group, {}).get(asset_id)
+            if not asset_id or not variant_id or not isinstance(resource, dict):
+                _fail('state_variant_asset_unknown')
+            output = state_variant_output_path(kind, asset_id, variant_id)
+            transition = {key: deepcopy(raw_variant.get(key)) for key in (
+                'transition_id', 'source_event_beat_ids', 'from_state', 'to_state'
+            )}
+            state_record = {
+                'variant_id': variant_id,
+                'reference_images': [output],
+                'generation_references': list(resource.get('references') or []),
+                'generation_prompt': str(raw_variant.get('generation_prompt') or '').strip(),
+                'fixed_prompts': [],
+                'state_transition': transition,
+            }
+            id_key = f'{kind}_id'
+            parent = next((item for item in assets[f'{kind}_bible'] if item.get(id_key) == asset_id), None)
+            if parent is None:
+                _fail('state_variant_parent_bible_missing')
+            variants = parent.setdefault('reference_variants', [])
+            if not isinstance(variants, list):
+                _fail('state_variant_reference_list_invalid')
+            existing = next((item for item in variants if isinstance(item, dict) and item.get('variant_id') == variant_id), None)
+            if existing is not None and existing != state_record:
+                _fail('state_variant_projection_conflict')
+            if existing is None:
+                variants.append(state_record)
+
 
 def asset_projection_issues(data, direction, *, manifest=False):
     if direction.get('metadata', {}).get('asset_resolution_contract') != ASSET_RESOLUTION_CONTRACT:
@@ -273,4 +350,33 @@ def asset_projection_issues(data, direction, *, manifest=False):
             matches = [item for item in actual if isinstance(item, dict) and item.get(key) == entry[key]]
             if len(matches) != 1 or any(matches[0].get(field) != value for field, value in entry.items()):
                 errors.append('asset_request:bible_projection_missing_or_changed:' + entry[key])
+    for scene in direction.get('scenes', []) or []:
+        if not isinstance(scene, dict):
+            continue
+        for raw_variant in scene.get('state_variants', []) or []:
+            if not isinstance(raw_variant, dict):
+                continue
+            kind = str(raw_variant.get('entity_type') or '').strip()
+            if kind not in KINDS:
+                continue
+            group, _field = KINDS[kind]
+            asset_id = str(raw_variant.get('asset_id') or '').strip()
+            variant_id = str(raw_variant.get('variant_id') or '').strip()
+            bible = data.get('assets', {}).get(f'{kind}_bible', [])
+            parent = next((item for item in bible if isinstance(item, dict) and item.get(f'{kind}_id') == asset_id), None)
+            actual = next((item for item in (parent or {}).get('reference_variants', [])
+                           if isinstance(item, dict) and item.get('variant_id') == variant_id), None)
+            resource = direction.get('resources', {}).get(group, {}).get(asset_id, {})
+            expected_variant = {
+                'variant_id': variant_id,
+                'reference_images': [state_variant_output_path(kind, asset_id, variant_id)],
+                'generation_references': list(resource.get('references') or []),
+                'generation_prompt': str(raw_variant.get('generation_prompt') or '').strip(),
+                'fixed_prompts': [],
+                'state_transition': {key: deepcopy(raw_variant.get(key)) for key in (
+                    'transition_id', 'source_event_beat_ids', 'from_state', 'to_state'
+                )},
+            }
+            if actual != expected_variant:
+                errors.append('asset_request:state_variant_projection_missing_or_changed:' + f'{asset_id}/{variant_id}')
     return errors

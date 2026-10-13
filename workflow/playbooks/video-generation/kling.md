@@ -20,7 +20,7 @@ provider を選ぶ。Kling payload の mode は text_to_video|image_to_video|fir
 
 ```text
 cut_contract + first/last frame + continuity + settings
-  → video_prompt_projection_registry_v5
+  → video_prompt_projection_registry_v7
   → compile_video_api_prompt_v1
   → video_api_prompt_v1
   → immutable request snapshot
@@ -53,6 +53,12 @@ cut/render unit を分ける。
 
 first frame は人物、構図、物の位置、光の departure state。last frame は一つの連続運動で
 到達する arrival state。last frame を別 shot として挿入しない。
+
+Source-groundedな状態変化で`result_state_reference.required`が立つcutは、p500で生成したvariantを
+参照するscene-specific p600 `result_frame` stillを用意し、その出力をlast_frameとして送る。
+neutralなasset reference sheetをlast_frameに流用しない。result frame stillは同じcutの追加image
+requestで、別cutやrender時間は作らない。参照image modeを選ぶ場合、対応modelにfirst/last境界がない場合、
+state variantやresult frameのpathが欠ける場合はmaterializeで停止し、last_frameを黙って省かない。
 
 ## Motion fields
 
@@ -119,4 +125,3 @@ ownership.
 - docs/implementation/video-prompting.md
 - docs/video-generation.md
 - workflow/video-manifest-template.md
-

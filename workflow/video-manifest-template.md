@@ -8,6 +8,8 @@ v2はmetadataの版・source_visual_value bindingと、sceneのsource_story_scen
 既存物語ではコメントのadaptation markerを有効化し、source valueの参照を一方向に保持する。
 レビュー文書や点数・承認証跡を生成条件にしない。
 
+既存cutを任意に複数shotへ分けるときは、親cutに `shot_plan: shot_direction_v1` と、その計画から投影した `shots[]` を記録する。親cutの音声・尺を保ったままshot timelineを分ける契約は[Cut内ショット設計](../docs/implementation/shot-direction.md)を参照する。このテンプレートでは実例データを省略する。
+
 ```yaml
 manifest_phase: skeleton|production
 video_metadata:
@@ -53,11 +55,30 @@ request_materialization:
 assets:
   character_bible:
   - character_id: character_01
-    reference_images:
-    - assets/characters/character_01_front.png
-    fixed_prompts: []
+      reference_images:
+      - assets/characters/character_01_front.png
+      reference_variants:
+      - variant_id: character_state_after
+        reference_images: [assets/characters/character_01__character_state_after.png]
+        generation_references: [assets/characters/character_01_front.png]
+        generation_prompt: ''
+        state_transition:
+          transition_id: source_state_transition_01
+          source_event_beat_ids: [scene_01_beat_01]
+          from_state: ''
+          to_state: ''
+      fixed_prompts: []
     source_refs: []
-    variants: []
+    reference_variants:
+    - variant_id: character_state_after
+      reference_images: [assets/characters/character_01__character_state_after.png]
+      generation_references: [assets/characters/character_01_front.png]
+      generation_prompt: ''
+      state_transition:
+        transition_id: source_state_transition_01
+        source_event_beat_ids: [scene_01_beat_01]
+        from_state: ''
+        to_state: ''
   object_bible: []
   location_bible: []
   style_guide:
@@ -230,6 +251,7 @@ scenes:
       character_variant_ids: []
       object_ids: []
       object_variant_ids: []
+      # Select an after-state asset variant on this cut's normal first image when needed.
       references: []
       api_prompt_payload:
         policy_version: image_api_prompt_v2
@@ -253,11 +275,36 @@ scenes:
       mode: image_to_video
       first_frame: assets/scenes/scene_01_cut_01.png
       last_frame: ''
+      # Optional. When required, p600 generates an image-only result frame in this same cut.
+      # Its scene context and state-variant reference are compiled as an ordinary image request.
+      result_state_reference:
+        required: true
+        state_variant_refs:
+        - entity_type: character|object|location
+          asset_id: character_01
+          variant_id: character_state_after
+          transition_id: source_state_transition_01
+          consumer_source_event_beat_ids: [scene_01_beat_01]
+      result_frame:
+        output: assets/scenes/scene_01_cut_01_result.png
+        image_generation:
+          character_ids: [character_01]
+          character_variant_ids: [character_state_after]
+          object_ids: []
+          object_variant_ids: []
+          location_ids: []
+          location_variant_ids: []
+          references:
+          - assets/scenes/scene_01_cut_01.png
+          - assets/characters/character_01__character_state_after.png
+          first_frame_visual_plan: {}
+          api_prompt_payload: {}
+          output: assets/scenes/scene_01_cut_01_result.png
       duration_seconds: 8
       api_prompt_payload:
         policy_version: video_api_prompt_v1
-        compiler_version: conditional_video_prompt_compiler_v5
-        projection_registry_version: video_prompt_projection_registry_v5
+        compiler_version: conditional_video_prompt_compiler_v6
+        projection_registry_version: video_prompt_projection_registry_v7
         provider: kling_3_0
         prompt: ''
         negative_prompt: ''

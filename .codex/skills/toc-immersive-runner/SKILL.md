@@ -30,6 +30,12 @@ For `world_walk`, require the source run and follow the experience-specific cano
 
 The runner owns stage sequencing, prepared source context, structural validation, materialized requests, image execution, and output/provenance checks. Keep canonical artifacts/state/index single-writer and follow the active agent policy. Manual/chat authoring uses `scripts/prepare-stage-context.py` for the selected stage.
 
+The p400 author reads story/script events for reusable visible state changes. p500 generates authored
+`reference_variants[]` with `state_transition` from their parent asset references. p600 includes any
+required same-cut `result_frame` as an image-only request using that variant and the scene context.
+At p680, verify request-bound outputs for both the cut still and every required result frame. A state
+asset sheet alone does not satisfy a scene result frame.
+
 Use the repository's image execution lanes and their reference-dependency order. Preserve request identity and generation provenance; procedural placeholder images cannot satisfy generation. `--materialize-only` is for explicit diagnostics/tests and does not establish media completion.
 
 Continue through the requested stop target and its checks. Diagnose and repair a failed prerequisite before retrying the affected item; use the resume route for an existing run. Report a concrete blocker if progress needs missing input or an external change. This image workflow ends before TTS, video generation, or final render.

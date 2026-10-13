@@ -4,6 +4,10 @@ Asset bible は character、object、location、setpiece、phenomenon の reusab
 を定義する。asset は単なる便利画像ではなく、複数 scene/cut の continuity anchor である。
 生成は asset authoring → structural validation → request-bound generation の順で行う。
 
+キャラ画像は、個人の設計に先立って[全キャストの人物設計](cast-design.md)を行う。
+全員の役割・関係・性格の根拠・外見を比較し、意図した共通点と見分ける特徴を決めてから、
+個別character bibleと実際のp500画像生成promptへ引き継ぐ。
+
 ## 1. Asset stage → manifest
 
 p500 の active slots:
@@ -53,6 +57,47 @@ Asset identity fields:
 `neutral_anchor` に scene 固有の time-of-day を焼き込まない。時間帯差分や state difference が
 reusable である場合だけ explicit variant として定義する。variant は main reference から派生し、
 別 identity を暗黙に作らない。
+
+Sourceにある視覚状態変化で後続画像にも同一性anchorが必要なときは、既存の
+`reference_variants[]` を使う。
+
+```yaml
+reference_variants:
+  - variant_id: object_damaged
+    reference_images: [assets/objects/object_01__object_damaged.png]
+    generation_references: [assets/objects/object_01.png]
+    generation_prompt: "同じ物体の形状と材質を保ち、sourceにある破損後の状態を具体的に描く。"
+    state_transition:
+      transition_id: object_damage_transition
+      source_event_beat_ids: [beat_03]
+      from_state: "完全な表面"
+      to_state: "片側の縁が欠けた状態"
+```
+
+`state_transition` を持つvariantはp500で自動的にderived asset requestへ投影される。参照画像は1枚、
+run-relativeな `assets/` pathとし、`generation_references` は省略時にparent assetの
+`reference_images[]` を使う。p500 request groupingはparent outputが同じrunで生成される場合、
+parentを先に生成してからvariantを派生させる。既存のvariantで `state_transition` のないものは
+従来どおり扱う。
+
+variant参照画像は再利用可能な状態anchorであり、scene stillやvideo last frameではない。
+場面specificな結果画はp600が生成し、物語上の場所・構図・blockingを保ったうえでvariantを参照する。
+
+### 衣装状態と集合人物の同一性
+
+衣装は「変化を見せる瞬間」だけの素材ではなく、以後の場面で再利用する状態anchorでもある。
+人物の顔/体格と衣装状態を区別し、既存のappearance contract / reference variantに、
+人物またはmemberとの対応、主要色・形・袖・装飾・靴、適用区間と採用参照の根拠を残す。
+新しいschemaや全cut分の素材生成を必須化する指示ではない。
+
+集合名のassetは、宣言した人数と実画像の人数・各memberの同一性が対応するか確認する。
+一人の画像を複数人の衣装・顔の共通正本として扱わない。集合画像を使う場合も、
+各memberの顔と衣装の対応を持たせ、構図上の左右が変わっても入れ替えない。
+
+採用済み場面で衣装が変更されている場合は、初期のneutral anchorへ服装だけを戻さず、
+その状態の参照を後続p600/p800へ渡す。衣装変更のないcutに変身動作を作らない。
+実行時の照合は[会話生成の衣装引き継ぎ](conversation-media-generation.md#衣装は人物ごとに引き継ぐ状態)に従う。
+具体的な人物名・色の組み合わせ・参照画像は各runの資料に置く。
 
 ## 3. Asset request
 

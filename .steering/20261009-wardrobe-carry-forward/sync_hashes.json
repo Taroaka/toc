@@ -1,0 +1,10 @@
+{
+  "toc-video-gen": {
+    "installed_before_sha256": "ebd711f123f630ed50c8a7b94c5c88f079cce36b6eb8733d82c3c4365f0986b1",
+    "repo_after_sha256": "80c6eaa4882ee5197940b0fc72b645279289755b847fce241cfec3839e7b2660"
+  },
+  "toc-image-gen": {
+    "installed_before_sha256": "cdbbfb1f8200d64d85541d33594c1d50ff30010d4318624ed7ac1dae6645dd83",
+    "repo_after_sha256": "671ed5a04d9103fd36341e59e3bade63a7ca532a4188a8526ebd8bba24297783"
+  }
+}

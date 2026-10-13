@@ -85,11 +85,12 @@ Do not silently mix test and production paths in the same batch.
 4. Verify that each item has a unique output path.
 5. When using built-in image generation with local reference images, make those images visible in the conversation before generation and label their continuity role.
 6. Treat built-in reference-guided generation as request-bound image generation. Do not assume exact reproduction of face, costume, or prop identity from conversation-visible images alone.
-7. When likeness matters, validate the main subject in an isolated continuity test before moving to full scene cuts.
-8. If the user explicitly wants parallel generation, invoke `$codex-parallel-image-batch` in parallel mode.
-9. If the user did not ask for parallel generation, you may still prepare the batch here, but do not force subagent fan-out.
-10. After built-in generation, move or copy selected outputs into the repo `target path` when the built-in tool initially saved elsewhere.
-11. After generation, produce a compact summary of:
+7. A request selector ending in `_result_frame` is an image-only end-state still inside its parent cut. Generate it from its exact request prompt/references and write it to the declared run-relative target path; do not add a story cut, narration, or render duration.
+8. When likeness matters, validate the main subject in an isolated continuity test before moving to full scene cuts.
+9. If the user explicitly wants parallel generation, invoke `$codex-parallel-image-batch` in parallel mode.
+10. If the user did not ask for parallel generation, you may still prepare the batch here, but do not force subagent fan-out.
+11. After built-in generation, move or copy selected outputs into the repo `target path` when the built-in tool initially saved elsewhere.
+12. After generation, produce a compact summary of:
    - completed items
    - failed items
    - saved paths

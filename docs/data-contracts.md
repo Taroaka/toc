@@ -186,6 +186,13 @@ image requests are immutable snapshots containing the exact prompt, settings, re
 digest, and destination. Generated files are accepted only when their request-bound provenance
 matches the snapshot.
 
+`p400 state_variants[]` records source-grounded, reusable visual states and maps each state to an
+existing character/object/location identity. The p500 request is derived from that parent asset.
+When video needs a visible result boundary, p400 also declares `video_generation.result_frame` as an
+image-only request inside the same cut. p600 generates the scene-specific result image with the state
+variant reference; p800 binds that output as `last_frame`. The reusable asset reference itself is not
+a scene frame.
+
 ### Narration and video
 
 Narration uses `script.md` as the text source, records TTS text separately, and measures generated
@@ -315,8 +322,8 @@ image_generation:
       reference_content_sha256: {}
 ```
 
-Video generation uses `video_prompt_projection_registry_v5` and
-`conditional_video_prompt_compiler_v5` to create a saved `video_api_prompt_v1` payload. The payload
+Video generation uses `video_prompt_projection_registry_v7` and
+`conditional_video_prompt_compiler_v6` to create a saved `video_api_prompt_v1` payload. The payload
 contains exact prompt/negative prompt hashes, provider settings, first/last frame bindings, ordered
 reference roles, source digest, and execution options. Current canonical design is recompiled before
 provider execution; any drift makes the request stale.

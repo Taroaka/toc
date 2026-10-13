@@ -1,0 +1,20 @@
+"""Shared authoring guidance; not an additional schema or quality gate."""
+
+SCENE_ENTRY_GUIDANCE = (
+    "The artistic intent comes before a structural pattern: what does the author want to do "
+    "here, why does this moment matter to this work, and what understanding, feeling, question "
+    "or experience should reach the audience? Let that intent guide presentation. These are "
+    "prose thinking aids, not required answers or checks for every scene. "
+    "Ki-sho-ten-ketsu, an introduction, anticipation, a turn, a reaction or an aftertaste are "
+    "optional means; use, combine or omit them when they serve the intended experience. "
+    "Neither four shots nor four functional stages are required in each scene. A sustained "
+    "moment, silence, abrupt entry, disorientation or an unresolved ending can be intentional. "
+    "When missing context would obstruct what the author wants to convey, consider whether "
+    "a location, participant, gaze or encounter needs orientation. An existing asset does not "
+    "mean the audience has met its subject, but this is not a rule to introduce everyone. "
+    "Preserve intentional mystery, economical ellipses and source reveal order. Do not invent "
+    "events or motives to fill a structure, require new schema fields, or impose a per-scene "
+    "checklist or quality gate. Express useful choices in existing intent/direction fields "
+    "when helpful. Intended audience experience is not a guarantee of experienced emotion. "
+    "Preserve approved media and fixed narration unless their revision is requested."
+)

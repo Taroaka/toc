@@ -15,6 +15,9 @@ class VideoProviderCapabilities:
     native_audio: bool = False
     reference_audio: bool = False
     reference_limit_verified: bool = True
+    first_last_frame_supported: bool = False
+    multi_shots_supported: bool = False
+    elements_supported: bool = False
 
 
 def _canonical_video_tool(tool: str) -> str:
@@ -64,12 +67,30 @@ def resolve_video_provider_capabilities(
     if normalized_tool == 'higgsfield':
         image_model = 'bytedance/seedance-2.5/image-to-video'
         reference_model = 'bytedance/seedance-2.5/reference-to-video'
+        kling_image_model = 'kling-video/v3.0/std/image-to-video'
+        if normalized_model == kling_image_model:
+            valid_mode = not reference_mode and normalized_mode in {
+                'image_to_video', 'first_last_frame'
+            }
+            return VideoProviderCapabilities(
+                3, 15, 0, 0,
+                supported=valid_mode,
+                unsupported_reason='' if valid_mode else 'Higgsfield model/input operation is not supported',
+                native_audio=True,
+                reference_audio=False,
+                first_last_frame_supported=valid_mode,
+                multi_shots_supported=False,
+                elements_supported=False,
+            )
         expected = reference_model if reference_mode else image_model
         valid_mode = reference_mode or normalized_mode in {'image_to_video', 'first_last_frame'}
         supported = valid_mode and normalized_model == expected
         return VideoProviderCapabilities(4, 30, 1 if reference_mode else 0, 32 if reference_mode else 0,
             supported=supported, unsupported_reason='' if supported else 'Higgsfield model/input operation is not supported',
-            native_audio=True, reference_audio=False, reference_limit_verified=not reference_mode)
+            native_audio=True, reference_audio=False, reference_limit_verified=not reference_mode,
+            first_last_frame_supported=(
+                supported and not reference_mode and normalized_model == image_model
+            ))
 
     if normalized_tool == "seedance":
         # Current Seedance 1.0 endpoints share the 2–12 second task window.
@@ -84,6 +105,7 @@ def resolve_video_provider_capabilities(
                 duration_max_seconds=12,
                 reference_images_min=1 if reference_mode else 0,
                 reference_images_max=4 if reference_mode else 0,
+                first_last_frame_supported=not reference_mode,
             )
         return VideoProviderCapabilities(
             duration_min_seconds=2,
@@ -102,6 +124,7 @@ def resolve_video_provider_capabilities(
             duration_max_seconds=60,
             reference_images_min=0,
             reference_images_max=0,
+            first_last_frame_supported=True,
         )
 
     return VideoProviderCapabilities(

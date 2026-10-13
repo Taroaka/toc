@@ -1,5 +1,5 @@
-- [ ] domainと競合の失敗テスト
-- [ ] read-only LLM設計と原本hash束縛
-- [ ] cue追加・編集・削除API
-- [ ] フロントから設計と複数cue管理
-- [ ] 回帰テスト/build/UI確認と設計書更新
+- [x] domainと競合の失敗テスト
+- [x] read-only LLM設計と原本hash束縛
+- [x] cue追加・編集・削除API
+- [x] フロントから設計と複数cue管理
+- [x] 回帰テスト/build/UI確認と設計書更新

@@ -1,0 +1,4 @@
+interface:
+  display_name: "ToC ナレーション生成"
+  short_description: "スレッドからのTTS生成・音源採用依頼で、原稿・声・読み方・尺を照合する"
+  default_prompt: "$toc-narration-gen を使い、この物語の最新の進行状況と採用素材を確認して、指定範囲を生成してください。"

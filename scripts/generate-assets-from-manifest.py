@@ -25,7 +25,8 @@ import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlsplit, urlunsplit
@@ -42,6 +43,10 @@ if str(REPO_ROOT) not in sys.path:
 from toc.script_narration import is_b_roll, resolve_manifest_narration
 from toc.env import load_env_files
 from toc.asset_prompt_compiler import ASSET_PROMPT_COMPILER_VERSION
+from toc.asset_state_variants import (
+    AssetStateVariantError,
+    validate_result_state_references,
+)
 from toc.harness import append_state_snapshot, load_structured_document, parse_state_file
 from toc.http import HttpError, request_bytes
 from toc.image_prompt_compiler import (
@@ -65,6 +70,7 @@ from toc.image_request_snapshot import (
     sha256_canonical_json,
     write_request_snapshot_atomic,
 )
+from toc.shot_timeline import ShotTimelineError, validate_projected_shot_schedule
 from toc.immersive_manifest import (
     dotted_id_slug,
     is_non_renderable_manifest_node,
@@ -85,6 +91,13 @@ from toc.providers.elevenlabs import (
 )
 from toc.providers.evolink import EvoLinkClient, EvoLinkConfig
 from toc.providers.gemini import GeminiClient, GeminiConfig
+from toc.providers.higgsfield import (
+    IMAGE_MODEL as HIGGSFIELD_SEEDANCE_IMAGE_MODEL,
+    KLING_IMAGE_MODEL as HIGGSFIELD_KLING_IMAGE_MODEL,
+    REFERENCE_MODEL as HIGGSFIELD_SEEDANCE_REFERENCE_MODEL,
+    SUPPORTED_MODELS as HIGGSFIELD_SUPPORTED_MODELS,
+    HiggsfieldClient,
+)
 from toc.providers.kling import KlingClient, KlingConfig
 from toc.providers.seedance import SeedanceClient, SeedanceConfig
 from toc.providers.seadream import SeaDreamClient, SeaDreamConfig
@@ -236,6 +249,8 @@ class SceneSpec:
     video_quality: str | None = None
     video_aspect_ratio: str | None = None
     video_reference_roles: list[dict[str, Any]] = field(default_factory=list)
+    parent_cut_selector: str | None = None
+    parent_cut_aliases: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -265,6 +280,10 @@ class VideoRenderTargetSpec:
     video_aspect_ratio: str | None = None
     video_input_mode: str | None = None
     video_reference_roles: list[dict[str, Any]] = field(default_factory=list)
+    timeline_start_seconds: float | None = None
+    timeline_duration_seconds: float | None = None
+    parent_selector: str | None = None
+    shot_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -707,6 +726,118 @@ def _coerce_still_assets(raw_node: Any) -> list[dict[str, Any]]:
     return [item for item in raw_assets if isinstance(item, dict)]
 
 
+def _result_frame_scene_specs(
+    scenes: list[SceneSpec],
+    frame_specs: list[dict[str, Any]],
+) -> list[SceneSpec]:
+    """Expose cut- and shot-level result frames as image-only p600 requests."""
+
+    def selector_key(value: Any) -> str:
+        normalized = str(value or "").strip()
+        match = re.match(r"^(.*_cut)0*(\d+)$", normalized)
+        return f"{match.group(1)}{int(match.group(2))}" if match else normalized
+
+    by_selector = {
+        selector_key(scene.selector): scene
+        for scene in scenes
+        if scene.selector
+    }
+    result: list[SceneSpec] = []
+    for spec in frame_specs:
+        selector = str(spec.get("selector") or "").strip()
+        source_node = spec.get("source_node")
+        if isinstance(source_node, dict) and source_node.get("shot_id") is not None:
+            parent_selector = str(source_node.get("parent_selector") or "").strip()
+            parent = by_selector.get(selector_key(parent_selector))
+            if parent is None:
+                raise AssetStateVariantError(
+                    f"{selector or '<unknown>'}: shot result-frame source cut is missing from the parsed manifest"
+                )
+            video = _dict_value(source_node.get("video_generation"))
+            try:
+                api_duration = int(video.get("duration_seconds"))
+            except (TypeError, ValueError, OverflowError):
+                raise AssetStateVariantError(
+                    f"{selector}: shot result-frame source has no provider duration"
+                ) from None
+            source = _shot_scene_spec(
+                parent,
+                source_node,
+                selector=selector,
+                api_duration=api_duration,
+            )
+        else:
+            source = by_selector.get(selector_key(selector))
+        if source is None:
+            raise AssetStateVariantError(
+                f"{selector or '<unknown>'}: result_frame source cut is missing from the parsed manifest"
+            )
+        image = _dict_value(spec.get("image_generation"))
+        output = str(spec.get("output") or "").strip()
+        if not output:
+            raise AssetStateVariantError(f"{selector}: result_frame output is missing")
+        result_selector = f"{selector}_result_frame"
+        result.append(replace(
+            source,
+            selector=result_selector,
+            kind="reusable_still",
+            reference_id=None,
+            still_image_plan_mode="generate_still",
+            image_tool=_as_opt_str(image.get("tool")) or CODEX_BUILTIN_IMAGE_TOOL,
+            image_prompt=_as_opt_str(image.get("prompt")),
+            image_output=output,
+            image_references=_ensure_str_list(image.get("references")),
+            image_character_ids=_ensure_str_list(image.get("character_ids")),
+            image_character_ids_present=True,
+            image_character_variant_ids=_ensure_str_list(image.get("character_variant_ids")),
+            image_character_variant_ids_present=True,
+            image_object_ids=_ensure_str_list(image.get("object_ids")),
+            image_object_ids_present=True,
+            image_object_variant_ids=_ensure_str_list(image.get("object_variant_ids")),
+            image_object_variant_ids_present=True,
+            image_location_ids=_ensure_str_list(image.get("location_ids")),
+            image_location_ids_present=True,
+            image_location_variant_ids=_ensure_str_list(image.get("location_variant_ids")),
+            image_location_variant_ids_present=True,
+            image_aspect_ratio=_as_opt_str(image.get("aspect_ratio")) or source.image_aspect_ratio,
+            image_size=_as_opt_str(image.get("image_size")) or source.image_size,
+            video_tool=None,
+            video_input_image=None,
+            video_first_frame=None,
+            video_last_frame=None,
+            video_motion_prompt=None,
+            video_output=None,
+            narration_tool=None,
+            narration_text=None,
+            narration_tts_text=None,
+            narration_output=None,
+            narration_normalize_to_scene_duration=False,
+            narration_silence_intentional=False,
+            narration_silence_confirmed_by_human=False,
+            narration_silence_kind=None,
+            narration_silence_reason=None,
+            still_assets=[],
+            image_asset_id=result_selector,
+            image_asset_type="result_frame",
+            image_execution_lane="standard",
+            image_bootstrap_allowed=False,
+            image_bootstrap_reason=None,
+            image_review_status=None,
+            still_image_generation_status="missing",
+            still_image_plan_source="video_generation.result_frame",
+            image_api_prompt_payload=_dict_value(image.get("api_prompt_payload")),
+            image_first_frame_visual_plan=_dict_value(image.get("first_frame_visual_plan")),
+            video_prompt_authoring_source=None,
+            video_api_prompt_payload={},
+            video_references=[],
+            video_generation_contract={},
+            video_quality=None,
+            video_aspect_ratio=None,
+            video_reference_roles=[],
+        ))
+    return result
+
+
 def _select_primary_still_asset(still_assets: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not still_assets:
         return None
@@ -980,6 +1111,14 @@ def _effective_video_target_frame_paths(
     enable_last_frame: bool,
 ) -> tuple[Path | None, Path | None]:
     target = ordered_targets[index]
+    required_result_frame = (
+        _dict_value(target.video_generation_contract.get("result_state_reference")).get("required")
+        is True
+    )
+    if required_result_frame and (target.video_input_mode or "").strip() == "reference_images":
+        raise SystemExit(
+            f"{target.selector}: required transformation result frame is unsupported in reference-image video mode"
+        )
     first_frame = _video_target_first_frame_path(base_dir, target)
     if (
         chain_first_frame_from_prev_video
@@ -999,7 +1138,11 @@ def _effective_video_target_frame_paths(
         first_frame = previous_output.with_name(
             previous_output.stem + "_chain_first_frame.png"
         )
-    last_frame = _video_target_last_frame_path(base_dir, target) if enable_last_frame else None
+    last_frame = _video_target_last_frame_path(base_dir, target) if (enable_last_frame or required_result_frame) else None
+    if required_result_frame and last_frame is None:
+        raise SystemExit(
+            f"{target.selector}: required scene-specific result frame could not be resolved to a last-frame image"
+        )
     return first_frame, last_frame
 
 
@@ -1870,14 +2013,15 @@ def parse_manifest_yaml(yaml_text: str) -> tuple[dict, list[SceneSpec]]:
 
 
 def _scene_matches_filter(scene: SceneSpec, scene_filter: set[str] | None) -> bool:
-    return selector_matches(
-        scene_selector_tokens(
+    tokens = scene_selector_tokens(
             operational_scene_id=scene.scene_id,
             manifest_scene_id=scene.manifest_scene_id,
             reference_id=scene.reference_id,
-        ),
-        scene_filter,
-    )
+        )
+    if scene.parent_cut_selector:
+        tokens.add(scene.parent_cut_selector)
+    tokens.update(str(value) for value in scene.parent_cut_aliases if value)
+    return selector_matches(tokens, scene_filter)
 
 
 def _render_unit_selector(scene_id: str, unit_id: str) -> str:
@@ -2100,8 +2244,15 @@ def _video_generation_provider_context(
 ) -> tuple[str, str, str]:
     tool = str(video_generation.get("tool") or "kling_3_0").strip()
     payload = _dict_value(video_generation.get("api_prompt_payload"))
-    model = _materialized_video_model(video_generation)
-    mode = str(input_mode or payload.get("mode") or "").strip()
+    model = _materialized_video_model(video_generation) or str(
+        video_generation.get("model") or ""
+    ).strip()
+    mode = str(
+        input_mode
+        or payload.get("mode")
+        or video_generation.get("input_mode")
+        or ""
+    ).strip()
     if not mode:
         references = _list_value(video_generation.get("references"))
         first_frame = str(
@@ -2109,7 +2260,16 @@ def _video_generation_provider_context(
             or video_generation.get("input_image")
             or ""
         ).strip()
-        mode = "reference_images" if references and not first_frame else ""
+        last_frame = str(video_generation.get("last_frame") or "").strip()
+        mode = (
+            "reference_to_video"
+            if references and not first_frame
+            else "first_last_frame"
+            if first_frame and last_frame
+            else "image_to_video"
+            if first_frame
+            else "text_to_video"
+        )
     return tool, model, mode
 
 
@@ -2192,12 +2352,280 @@ def _validate_effective_video_provider_capabilities(
         )
 
 
+def _validated_shot_entries(
+    cut: dict[str, Any], *, parent_selector: str
+) -> list[tuple[dict[str, Any], str, Decimal, Decimal, int]]:
+    try:
+        entries = validate_projected_shot_schedule(
+            cut,
+            parent_selector=parent_selector,
+        )
+    except ShotTimelineError as exc:
+        raise SystemExit(str(exc)) from exc
+    return [
+        (
+            entry["shot"],
+            str(entry["selector"]),
+            entry["start_seconds"],
+            entry["duration_seconds"],
+            int(entry["provider_duration_seconds"]),
+        )
+        for entry in entries
+    ]
+
+
+def _shot_scene_spec(
+    parent: SceneSpec,
+    shot: dict[str, Any],
+    *,
+    selector: str,
+    api_duration: int,
+) -> SceneSpec:
+    image = _dict_value(shot.get("image_generation"))
+    video = _dict_value(shot.get("video_generation"))
+    still_assets = _coerce_still_assets(shot)
+    stage_meta = _extract_asset_stage_image_metadata(
+        raw_node=shot,
+        still_assets=still_assets,
+        image_output=_as_opt_str(image.get("output")),
+    )
+    return replace(
+        parent,
+        scene_id=selector,
+        selector=selector,
+        duration_seconds=api_duration,
+        still_image_plan_mode="generate_still",
+        image_tool=_as_opt_str(image.get("tool")) or CODEX_BUILTIN_IMAGE_TOOL,
+        image_prompt=_as_opt_str(image.get("prompt")),
+        image_output=_as_opt_str(image.get("output")),
+        image_references=_ensure_str_list(image.get("references")),
+        image_character_ids=_ensure_str_list(image.get("character_ids")),
+        image_character_ids_present="character_ids" in image,
+        image_character_variant_ids=_ensure_str_list(image.get("character_variant_ids")),
+        image_character_variant_ids_present="character_variant_ids" in image,
+        image_object_ids=_ensure_str_list(image.get("object_ids")),
+        image_object_ids_present="object_ids" in image,
+        image_object_variant_ids=_ensure_str_list(image.get("object_variant_ids")),
+        image_object_variant_ids_present="object_variant_ids" in image,
+        image_location_ids=_ensure_str_list(image.get("location_ids")),
+        image_location_ids_present="location_ids" in image,
+        image_location_variant_ids=_ensure_str_list(image.get("location_variant_ids")),
+        image_location_variant_ids_present="location_variant_ids" in image,
+        image_aspect_ratio=_as_opt_str(image.get("aspect_ratio")) or parent.image_aspect_ratio,
+        image_size=_as_opt_str(image.get("image_size")) or parent.image_size,
+        image_api_prompt_payload=deepcopy(_dict_value(image.get("api_prompt_payload"))),
+        image_first_frame_visual_plan=deepcopy(_dict_value(image.get("first_frame_visual_plan"))),
+        image_applied_request_ids=_ensure_str_list(image.get("applied_request_ids")),
+        video_tool=_as_opt_str(video.get("tool")) or "kling_3_0",
+        video_input_image=_as_opt_str(video.get("input_image")),
+        video_first_frame=_as_opt_str(video.get("first_frame")),
+        video_last_frame=_as_opt_str(video.get("last_frame")),
+        video_motion_prompt=_as_opt_str(video.get("motion_prompt")),
+        video_prompt_authoring_source=_as_opt_str(video.get("prompt_authoring_source")),
+        video_api_prompt_payload=deepcopy(_dict_value(video.get("api_prompt_payload"))),
+        video_references=_ensure_str_list(video.get("references")),
+        video_generation_contract=deepcopy(video),
+        video_quality=_as_opt_str(video.get("quality")),
+        video_aspect_ratio=_as_opt_str(video.get("aspect_ratio")),
+        video_output=_as_opt_str(video.get("output")),
+        video_applied_request_ids=_ensure_str_list(video.get("applied_request_ids")),
+        narration_tool=None,
+        narration_text=None,
+        narration_tts_text=None,
+        narration_output=None,
+        narration_normalize_to_scene_duration=False,
+        narration_silence_intentional=False,
+        narration_silence_confirmed_by_human=False,
+        narration_silence_kind=None,
+        narration_silence_reason=None,
+        still_assets=still_assets,
+        is_b_roll=is_b_roll(shot),
+        image_asset_id=stage_meta["asset_id"],
+        image_asset_type=stage_meta["asset_type"],
+        image_execution_lane=_as_opt_str(image.get("execution_lane")) or stage_meta["execution_lane"],
+        image_bootstrap_allowed=stage_meta["bootstrap_allowed"],
+        image_bootstrap_reason=stage_meta["bootstrap_reason"],
+        image_review_status=stage_meta["review_status"],
+        manifest_cut_id=parent.manifest_cut_id,
+        cut_contract=deepcopy(_node_cut_contract(shot)),
+        parent_cut_selector=parent.selector,
+        parent_cut_aliases=list(
+            dict.fromkeys(
+                [
+                    parent.selector,
+                    str(shot.get("parent_selector") or parent.selector),
+                ]
+            )
+        ),
+    )
+
+
+def _project_shot_image_scenes(
+    *, manifest: dict[str, Any], scenes: list[SceneSpec]
+) -> list[SceneSpec]:
+    by_selector = {scene.selector: scene for scene in scenes if scene.selector}
+    projected: list[SceneSpec] = []
+    for raw_scene in _list_value(manifest.get("scenes")):
+        if not isinstance(raw_scene, dict):
+            continue
+        scene_id = normalize_dotted_id(raw_scene.get("scene_id"))
+        if scene_id is None:
+            continue
+        for cut_index, cut in enumerate(_list_value(raw_scene.get("cuts")), start=1):
+            if not isinstance(cut, dict) or cut.get("shot_plan") is None:
+                continue
+            cut_id = normalize_dotted_id(cut.get("cut_id")) or str(cut_index)
+            parent_selector = make_scene_cut_selector(scene_id, cut_id)
+            authored_parent_selector = str(cut.get("selector") or parent_selector).strip()
+            parent = by_selector.get(parent_selector)
+            if parent is None:
+                raise SystemExit(f"{parent_selector}: parsed parent cut is missing for its shot plan")
+            for shot, selector, _start, _duration, api_duration in _validated_shot_entries(
+                cut, parent_selector=authored_parent_selector
+            ):
+                projected.append(
+                    _shot_scene_spec(
+                        parent,
+                        shot,
+                        selector=selector,
+                        api_duration=api_duration,
+                    )
+                )
+    return projected
+
+
+def _project_shot_result_frame_scenes(
+    *, manifest: dict[str, Any], scenes: list[SceneSpec]
+) -> list[SceneSpec]:
+    by_selector = {scene.selector: scene for scene in scenes if scene.selector}
+    projected: list[SceneSpec] = []
+    for raw_scene in _list_value(manifest.get("scenes")):
+        if not isinstance(raw_scene, dict):
+            continue
+        scene_id = normalize_dotted_id(raw_scene.get("scene_id"))
+        if scene_id is None:
+            continue
+        for cut_index, cut in enumerate(_list_value(raw_scene.get("cuts")), start=1):
+            if not isinstance(cut, dict) or cut.get("shot_plan") is None:
+                continue
+            cut_id = normalize_dotted_id(cut.get("cut_id")) or str(cut_index)
+            canonical_parent_selector = make_scene_cut_selector(scene_id, cut_id)
+            parent_scene = by_selector.get(canonical_parent_selector)
+            if parent_scene is None:
+                raise SystemExit(
+                    f"{canonical_parent_selector}: parsed parent cut is missing for its shot plan"
+                )
+            authored_parent_selector = str(
+                cut.get("selector") or canonical_parent_selector
+            ).strip()
+            for shot, shot_selector, _start, _duration, api_duration in _validated_shot_entries(
+                cut,
+                parent_selector=authored_parent_selector,
+            ):
+                video = _dict_value(shot.get("video_generation"))
+                result_frame = video.get("result_frame")
+                if not isinstance(result_frame, dict):
+                    if _dict_value(video.get("result_state_reference")).get("required") is True:
+                        raise SystemExit(f"{shot_selector}: required result_frame is missing")
+                    continue
+                image = _dict_value(result_frame.get("image_generation"))
+                output = str(result_frame.get("output") or image.get("output") or "").strip()
+                if not output:
+                    if _dict_value(video.get("result_state_reference")).get("required") is True:
+                        raise SystemExit(f"{shot_selector}: required result_frame.output is missing")
+                    continue
+                if image.get("output") != output:
+                    raise SystemExit(
+                        f"{shot_selector}: result_frame output must match image_generation.output"
+                    )
+                source = _shot_scene_spec(
+                    parent_scene,
+                    shot,
+                    selector=shot_selector,
+                    api_duration=api_duration,
+                )
+                result_selector = f"{shot_selector}_result_frame"
+                still_assets = _coerce_still_assets(result_frame)
+                stage_meta = _extract_asset_stage_image_metadata(
+                    raw_node=result_frame,
+                    still_assets=still_assets,
+                    image_output=output,
+                )
+                projected.append(
+                    replace(
+                        source,
+                        scene_id=result_selector,
+                        selector=result_selector,
+                        kind="reusable_still",
+                        reference_id=None,
+                        still_image_plan_mode="generate_still",
+                        image_tool=_as_opt_str(image.get("tool")) or CODEX_BUILTIN_IMAGE_TOOL,
+                        image_prompt=_as_opt_str(image.get("prompt")),
+                        image_output=output,
+                        image_references=_ensure_str_list(image.get("references")),
+                        image_character_ids=_ensure_str_list(image.get("character_ids")),
+                        image_character_ids_present="character_ids" in image,
+                        image_character_variant_ids=_ensure_str_list(image.get("character_variant_ids")),
+                        image_character_variant_ids_present="character_variant_ids" in image,
+                        image_object_ids=_ensure_str_list(image.get("object_ids")),
+                        image_object_ids_present="object_ids" in image,
+                        image_object_variant_ids=_ensure_str_list(image.get("object_variant_ids")),
+                        image_object_variant_ids_present="object_variant_ids" in image,
+                        image_location_ids=_ensure_str_list(image.get("location_ids")),
+                        image_location_ids_present="location_ids" in image,
+                        image_location_variant_ids=_ensure_str_list(image.get("location_variant_ids")),
+                        image_location_variant_ids_present="location_variant_ids" in image,
+                        image_aspect_ratio=_as_opt_str(image.get("aspect_ratio")) or source.image_aspect_ratio,
+                        image_size=_as_opt_str(image.get("image_size")) or source.image_size,
+                        image_api_prompt_payload=deepcopy(_dict_value(image.get("api_prompt_payload"))),
+                        image_first_frame_visual_plan=deepcopy(_dict_value(image.get("first_frame_visual_plan"))),
+                        image_execution_lane=_as_opt_str(image.get("execution_lane")) or stage_meta["execution_lane"],
+                        image_applied_request_ids=_ensure_str_list(image.get("applied_request_ids")),
+                        video_tool=None,
+                        video_input_image=None,
+                        video_first_frame=None,
+                        video_last_frame=None,
+                        video_motion_prompt=None,
+                        video_output=None,
+                        video_prompt_authoring_source=None,
+                        video_api_prompt_payload={},
+                        video_references=[],
+                        video_generation_contract={},
+                        video_quality=None,
+                        video_aspect_ratio=None,
+                        video_applied_request_ids=[],
+                        narration_tool=None,
+                        narration_text=None,
+                        narration_tts_text=None,
+                        narration_output=None,
+                        narration_normalize_to_scene_duration=False,
+                        narration_silence_intentional=False,
+                        narration_silence_confirmed_by_human=False,
+                        narration_silence_kind=None,
+                        narration_silence_reason=None,
+                        still_assets=still_assets,
+                        is_b_roll=False,
+                        image_asset_id=stage_meta["asset_id"] or result_selector,
+                        image_asset_type="result_frame",
+                        image_bootstrap_allowed=stage_meta["bootstrap_allowed"],
+                        image_bootstrap_reason=stage_meta["bootstrap_reason"],
+                        image_review_status=stage_meta["review_status"],
+                        still_image_generation_status=_normalize_generation_status(
+                            image.get("generation_status")
+                        ),
+                        still_image_plan_source="video_generation.result_frame",
+                    )
+                )
+    return projected
+
+
 def _build_video_render_targets(*, manifest: dict[str, Any], scenes: list[SceneSpec]) -> list[VideoRenderTargetSpec]:
     raw_scenes = manifest.get("scenes")
     if not isinstance(raw_scenes, list):
         return []
 
     scenes_by_manifest_scene_id: dict[str, list[SceneSpec]] = {}
+    scenes_by_selector = {scene.selector: scene for scene in scenes if scene.selector}
     for scene in scenes:
         scenes_by_manifest_scene_id.setdefault(str(scene.manifest_scene_id), []).append(scene)
 
@@ -2212,7 +2640,18 @@ def _build_video_render_targets(*, manifest: dict[str, Any], scenes: list[SceneS
             continue
 
         scene_nodes = scenes_by_manifest_scene_id.get(scene_id, [])
+        raw_cuts_by_selector: dict[str, dict[str, Any]] = {}
+        for cut_index, raw_cut in enumerate(_list_value(raw_scene.get("cuts")), start=1):
+            if not isinstance(raw_cut, dict):
+                continue
+            cut_id = normalize_dotted_id(raw_cut.get("cut_id")) or str(cut_index)
+            raw_cuts_by_selector[make_scene_cut_selector(scene_id, cut_id)] = raw_cut
         if _scene_has_explicit_render_units(raw_scene):
+            if any(cut.get("shot_plan") is not None for cut in raw_cuts_by_selector.values()):
+                issues.append(
+                    f"scene{scene_id}: shot plans cannot be combined with scene render_units"
+                )
+                continue
             cut_nodes = [node for node in scene_nodes if node.manifest_cut_id is not None]
             if not cut_nodes:
                 issues.append(f"scene{scene_id}: render_units requires cuts[].")
@@ -2435,6 +2874,91 @@ def _build_video_render_targets(*, manifest: dict[str, Any], scenes: list[SceneS
         for scene in scene_nodes:
             if _scene_is_deleted(scene):
                 continue
+            parent_selector = scene.selector or make_scene_cut_selector(
+                scene.manifest_scene_id, scene.manifest_cut_id
+            )
+            raw_cut = raw_cuts_by_selector.get(parent_selector)
+            if raw_cut is not None and (
+                raw_cut.get("shot_plan") is not None
+                or (isinstance(raw_cut.get("shots"), list) and raw_cut.get("shots"))
+            ):
+                shot_entries = _validated_shot_entries(
+                    raw_cut,
+                    parent_selector=str(raw_cut.get("selector") or parent_selector),
+                )
+                parent_scene = scenes_by_selector.get(parent_selector, scene)
+                for shot, selector, timeline_start, timeline_duration, api_duration in shot_entries:
+                    shot_scene = _shot_scene_spec(
+                        parent_scene,
+                        shot,
+                        selector=selector,
+                        api_duration=api_duration,
+                    )
+                    capability_tool, capability_model, capability_mode = (
+                        _video_generation_provider_context(
+                            shot_scene.video_generation_contract,
+                            input_mode=(
+                                str(shot_scene.video_generation_contract.get("input_mode") or "").strip()
+                            ),
+                        )
+                    )
+                    issues.extend(
+                        _video_provider_capability_issues(
+                            label=selector,
+                            tool=capability_tool or shot_scene.video_tool or "",
+                            model=capability_model,
+                            input_mode=capability_mode,
+                            duration_seconds=api_duration,
+                            reference_count=len(shot_scene.video_references or []),
+                        )
+                    )
+                    targets.append(
+                        VideoRenderTargetSpec(
+                            selector=selector,
+                            manifest_scene_id=scene_id,
+                            unit_id=None,
+                            source_cut_ids=[scene.manifest_cut_id]
+                            if scene.manifest_cut_id is not None
+                            else [],
+                            source_selectors=list(
+                                dict.fromkeys(
+                                    [parent_selector, str(raw_cut.get("selector") or parent_selector)]
+                                )
+                            ),
+                            source_scenes=[shot_scene],
+                            video_tool=shot_scene.video_tool,
+                            video_input_image=shot_scene.video_input_image,
+                            video_first_frame=shot_scene.video_first_frame,
+                            video_last_frame=shot_scene.video_last_frame,
+                            video_motion_prompt=shot_scene.video_motion_prompt,
+                            video_output=shot_scene.video_output,
+                            video_applied_request_ids=list(
+                                shot_scene.video_applied_request_ids or []
+                            ),
+                            duration_seconds=api_duration,
+                            timestamp=shot_scene.timestamp,
+                            reference_id=shot_scene.reference_id,
+                            video_cut_contract=deepcopy(shot_scene.cut_contract),
+                            video_prompt_authoring_source=shot_scene.video_prompt_authoring_source,
+                            video_api_prompt_payload=deepcopy(
+                                shot_scene.video_api_prompt_payload
+                            ),
+                            video_references=list(shot_scene.video_references or []),
+                            video_generation_contract=deepcopy(
+                                shot_scene.video_generation_contract
+                            ),
+                            video_quality=shot_scene.video_quality,
+                            video_aspect_ratio=shot_scene.video_aspect_ratio,
+                            video_input_mode=_as_opt_str(
+                                shot_scene.video_generation_contract.get("input_mode")
+                            ),
+                            timeline_start_seconds=float(timeline_start),
+                            timeline_duration_seconds=float(timeline_duration),
+                            parent_selector=parent_selector,
+                            shot_id=str(shot.get("shot_id") or ""),
+                        )
+                    )
+                continue
             capability_tool, capability_model, capability_mode = (
                 _video_generation_provider_context(
                     scene.video_generation_contract,
@@ -2499,6 +3023,8 @@ def _video_target_matches_filter(target: VideoRenderTargetSpec, scene_filter: se
         )
     )
     tokens.add(target.selector)
+    if target.parent_selector:
+        tokens.add(target.parent_selector)
     tokens.update(target.source_selectors)
     for cut_id in target.source_cut_ids:
         if str(cut_id).strip():
@@ -5130,11 +5656,21 @@ def _video_provider_request_values(
         raise SystemExit(
             f"{selector}: materialized video duration_seconds must be positive"
         )
-    quality = str(binding.get("quality") or "").strip()
     aspect_ratio = str(binding.get("aspect_ratio") or "").strip()
     backend = str(execution_options.get("backend") or "").strip()
     model = str(execution_options.get("model") or "").strip()
-    if not quality or not aspect_ratio or not backend or not model:
+    is_higgsfield_kling = (
+        backend == "higgsfield" and model == HIGGSFIELD_KLING_IMAGE_MODEL
+    )
+    if is_higgsfield_kling:
+        if binding.get("quality") not in (None, ""):
+            raise SystemExit(
+                f"{selector}: Higgsfield Kling 3.0 Standard does not support a resolution override; use the model default"
+            )
+        quality: str | None = None
+    else:
+        quality = str(binding.get("quality") or "").strip()
+    if (not quality and not is_higgsfield_kling) or not aspect_ratio or not backend or not model:
         raise SystemExit(
             f"{selector}: materialized provider settings are incomplete"
         )
@@ -5152,6 +5688,8 @@ def _video_provider_request_values(
         "extra_payload": dict(extra_payload),
         "generate_audio": bool(execution_options.get("generate_audio", False)),
         "watermark": bool(execution_options.get("watermark", False)),
+        "multi_shots": execution_options.get("multi_shots", False),
+        "elements": execution_options.get("elements"),
     }
 
 
@@ -5349,6 +5887,7 @@ def _dispatch_video_provider_call(
     kling_client: KlingClient | None,
     evolink_client: EvoLinkClient | None,
     seedance_client: SeedanceClient | None,
+    higgsfield_client: HiggsfieldClient | None = None,
 ) -> None:
     materialized = _video_provider_request_values(
         selector=selector,
@@ -5356,7 +5895,7 @@ def _dispatch_video_provider_call(
     )
     duration_seconds = int(materialized["duration_seconds"])
     aspect_ratio = str(materialized["aspect_ratio"])
-    resolution = str(materialized["quality"])
+    resolution = materialized["quality"]
     backend = str(materialized["backend"])
     model = str(materialized["model"])
     extra_payload = dict(materialized["extra_payload"])
@@ -5397,6 +5936,74 @@ def _dispatch_video_provider_call(
             out_path=out_path,
             log_path=provider_log_path,
         )
+
+    if tool == "higgsfield":
+        if backend != "higgsfield":
+            raise SystemExit(
+                f"{selector}: reviewed backend {backend!r} does not match Higgsfield"
+            )
+        if model not in HIGGSFIELD_SUPPORTED_MODELS:
+            raise SystemExit(f"{selector}: unsupported Higgsfield model {model!r}")
+        if dry_run:
+            quality_label = "model default" if resolution is None else str(resolution)
+            print(
+                f"[dry-run] VIDEO(Higgsfield) {out_path} <- {model} "
+                f"({duration_seconds}s, {aspect_ratio}, {quality_label})"
+            )
+            return
+        if higgsfield_client is None:
+            raise SystemExit("Higgsfield client not configured (missing HF_API_KEY).")
+        try:
+            result = higgsfield_client.generate_video(
+                model=model,
+                prompt=prompt,
+                duration_seconds=duration_seconds,
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+                input_image=input_image,
+                last_frame_image=last_frame_image,
+                reference_images=reference_images,
+                generate_audio=bool(materialized["generate_audio"]),
+                multi_shots=materialized["multi_shots"],
+                elements=materialized["elements"],
+                out_path=out_path,
+                journal_path=(
+                    log_dir
+                    / f"{log_slug[:80]}_{provider_request_sha256}_higgsfield_journal.json"
+                ),
+                request_digest=provider_request_sha256,
+                poll_every_seconds=float(poll_every),
+                timeout_seconds=float(timeout_seconds),
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise SystemExit(f"{selector}: Higgsfield generation failed: {exc}") from exc
+        if result.get("status") != "completed":
+            raise SystemExit(
+                f"{selector}: Higgsfield generation status {result.get('status')!r}"
+            )
+        if not out_path.is_file():
+            raise SystemExit(f"{selector}: Higgsfield completed without writing a video")
+        if provider_log_path:
+            provider_log_path.parent.mkdir(parents=True, exist_ok=True)
+            provider_log_path.write_text(
+                json.dumps(
+                    {
+                        "provider": "higgsfield",
+                        "model": model,
+                        "status": result.get("status"),
+                        "request_id": result.get("request_id"),
+                        "duration_seconds": duration_seconds,
+                        "aspect_ratio": aspect_ratio,
+                        "resolution": resolution,
+                        "generate_audio": bool(materialized["generate_audio"]),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        finalize_output()
+        return
 
     if tool == "google_veo_3_1":
         if backend != "gemini":
@@ -7243,7 +7850,7 @@ def _video_api_prompt_payload_for_scene(
     prefix: str,
     suffix: str,
 ) -> dict[str, Any]:
-    return compile_video_api_prompt_v1(
+    payload = compile_video_api_prompt_v1(
         cut_contract=scene.cut_contract,
         video_generation=scene.video_generation_contract,
         source_prompt=(
@@ -7270,9 +7877,20 @@ def _video_api_prompt_payload_for_scene(
         prefix=prefix,
         suffix=suffix,
     )
+    video_generation = _dict_value(scene.video_generation_contract)
+    selected_model = _materialized_video_model(video_generation) or str(
+        video_generation.get("model") or ""
+    ).strip()
+    if selected_model == HIGGSFIELD_KLING_IMAGE_MODEL:
+        binding = _dict_value(payload.get("provider_request_binding"))
+        binding["quality"] = None
+        payload["provider_request_binding"] = binding
+    return payload
 
 
 def _video_contract_for_target(target: VideoRenderTargetSpec) -> dict[str, Any]:
+    if target.parent_selector:
+        return dict(target.video_cut_contract or {})
     return compose_video_render_unit_contract(
         [
             source.cut_contract
@@ -7341,7 +7959,7 @@ def _video_api_prompt_payload_for_target(
             f"{target.selector}: Kling video requests do not support auxiliary references; "
             "use first_frame/last_frame only, or select a provider with typed reference support"
         )
-    return compile_video_api_prompt_v1(
+    payload = compile_video_api_prompt_v1(
         cut_contract=_video_contract_for_target(target),
         video_generation=target.video_generation_contract,
         source_prompt=(
@@ -7396,6 +8014,12 @@ def _video_api_prompt_payload_for_target(
         prefix=prefix,
         suffix=suffix,
     )
+    selected_model = str(_dict_value(execution_options).get("model") or "").strip()
+    if selected_model == HIGGSFIELD_KLING_IMAGE_MODEL:
+        binding = _dict_value(payload.get("provider_request_binding"))
+        binding["quality"] = None
+        payload["provider_request_binding"] = binding
+    return payload
 
 
 def _video_execution_options(
@@ -7438,6 +8062,61 @@ def _video_execution_options(
         else:
             options["model"] = args.kling_video_model
             options["extra_payload"] = kling_extra_payload or {}
+    elif tool == "higgsfield":
+        generation = _dict_value(target.video_generation_contract)
+        stored_payload = _dict_value(generation.get("api_prompt_payload"))
+        stored_binding = _dict_value(stored_payload.get("provider_request_binding"))
+        stored_options = _dict_value(stored_binding.get("execution_options"))
+        requested_model = str(
+            generation.get("model") or stored_options.get("model") or ""
+        ).strip()
+        if requested_model and requested_model not in HIGGSFIELD_SUPPORTED_MODELS:
+            raise SystemExit(
+                f"{target.selector}: unsupported Higgsfield model {requested_model!r}"
+            )
+        model = requested_model or (
+            HIGGSFIELD_SEEDANCE_IMAGE_MODEL
+            if has_first_frame
+            else HIGGSFIELD_SEEDANCE_REFERENCE_MODEL
+        )
+        if has_first_frame and has_reference_images:
+            raise SystemExit(
+                f"{target.selector}: Higgsfield frame/reference inputs cannot be combined"
+            )
+        multi_shots = generation.get(
+            "multi_shots", stored_options.get("multi_shots", False)
+        )
+        if not isinstance(multi_shots, bool):
+            raise SystemExit(f"{target.selector}: Higgsfield multi_shots must be a boolean")
+        if multi_shots:
+            raise SystemExit(
+                f"{target.selector}: Higgsfield native multi_shots is not implemented"
+            )
+        elements = generation.get("elements", stored_options.get("elements"))
+        if elements is not None and not isinstance(elements, list):
+            raise SystemExit(f"{target.selector}: Higgsfield elements must be a list")
+        if elements:
+            raise SystemExit(
+                f"{target.selector}: Higgsfield elements are not implemented"
+            )
+        native_audio = _dict_value(generation.get("native_audio"))
+        native_audio_mode = str(native_audio.get("mode") or "off").strip().lower()
+        generate_audio = (
+            native_audio_mode != "off"
+            if native_audio_mode
+            else bool(stored_options.get("generate_audio", False))
+        )
+        options.update(
+            {
+                "backend": "higgsfield",
+                "model": model,
+                "generate_audio": generate_audio,
+            }
+        )
+        if model == HIGGSFIELD_KLING_IMAGE_MODEL:
+            options["multi_shots"] = False
+            if elements is not None:
+                options["elements"] = elements
     elif tool in {
         "seedance",
         "byteplus_seedance",
@@ -7447,10 +8126,17 @@ def _video_execution_options(
         "seedream_video",
         "see_dream",
     }:
+        generation = _dict_value(target.video_generation_contract)
+        stored_payload = _dict_value(generation.get("api_prompt_payload"))
+        stored_binding = _dict_value(stored_payload.get("provider_request_binding"))
+        stored_options = _dict_value(stored_binding.get("execution_options"))
+        requested_model = str(
+            generation.get("model") or stored_options.get("model") or ""
+        ).strip()
         options.update(
             {
                 "backend": "ark",
-                "model": (
+                "model": requested_model or (
                     args.ark_seedance_i2v_model
                     if has_first_frame or has_reference_images
                     else args.ark_seedance_t2v_model
@@ -7463,6 +8149,29 @@ def _video_execution_options(
     elif tool == "google_veo_3_1":
         options.update({"backend": "gemini", "model": args.gemini_video_model})
     return options
+
+
+def _video_quality_for_target(
+    *,
+    target: VideoRenderTargetSpec,
+    args: argparse.Namespace,
+    execution_options: dict[str, Any],
+) -> str | None:
+    model = str(execution_options.get("model") or "").strip()
+    if model == HIGGSFIELD_KLING_IMAGE_MODEL:
+        if args.video_resolution not in (None, ""):
+            raise SystemExit(
+                f"{target.selector}: Higgsfield Kling 3.0 Standard does not accept --video-resolution; use the model default"
+            )
+        requested_quality = _dict_value(target.video_generation_contract).get(
+            "quality"
+        )
+        if requested_quality not in (None, ""):
+            raise SystemExit(
+                f"{target.selector}: Higgsfield Kling 3.0 Standard does not support a resolution override; use the model default"
+            )
+        return None
+    return target.video_quality or str(args.video_resolution or "1080p")
 
 
 def _video_reference_content_sha256s(
@@ -8593,7 +9302,7 @@ def main() -> None:
 
     # Veo
     parser.add_argument("--gemini-video-model", default=_env("GEMINI_VIDEO_MODEL", "veo-3.1-fast-generate-preview"))
-    parser.add_argument("--video-resolution", default="1080p")
+    parser.add_argument("--video-resolution", default=None)
     parser.add_argument("--video-aspect-ratio", default=None)
     parser.add_argument("--default-scene-seconds", type=int, default=6)
     parser.add_argument("--video-prompt-prefix", default="", help="Optional text prepended to every video prompt.")
@@ -8821,9 +9530,44 @@ def main() -> None:
         }
         if structural_updates:
             append_state_snapshot(state_path, structural_updates)
+    try:
+        result_frame_specs = validate_result_state_references(manifest_data)
+    except AssetStateVariantError as exc:
+        raise SystemExit(str(exc)) from exc
+    if result_frame_specs:
+        yaml_text = yaml.safe_dump(manifest_data, allow_unicode=True, sort_keys=False)
     allowed_image_plan_modes = _parse_csv_set(args.image_plan_modes)
 
     metadata, guides, scenes = parse_manifest_yaml_full(yaml_text)
+    result_frame_scenes = _result_frame_scene_specs(scenes, result_frame_specs)
+    shot_image_scenes = _project_shot_image_scenes(
+        manifest=manifest_data,
+        scenes=scenes,
+    )
+    validated_result_frame_selectors = {
+        f"{str(spec.get('selector') or '').strip()}_result_frame"
+        for spec in result_frame_specs
+        if str(spec.get("selector") or "").strip()
+    }
+    shot_result_frame_scenes = [
+        scene
+        for scene in _project_shot_result_frame_scenes(
+            manifest=manifest_data,
+            scenes=scenes,
+        )
+        if scene.selector not in validated_result_frame_selectors
+    ]
+    shot_parent_selectors = {
+        scene.parent_cut_selector
+        for scene in shot_image_scenes
+        if scene.parent_cut_selector
+    }
+    image_execution_scenes = [
+        *[scene for scene in scenes if scene.selector not in shot_parent_selectors],
+        *shot_image_scenes,
+        *result_frame_scenes,
+        *shot_result_frame_scenes,
+    ]
     if not args.skip_audio and _manifest_has_revision_aware_narration(yaml_text):
         raise SystemExit(
             "Revision-aware narration audio cannot be generated directly from the manifest.\n"
@@ -8953,9 +9697,19 @@ def main() -> None:
             )
         for scene in scenes:
             apply_asset_guides_to_scene(scene=scene, guides=guides, character_refs_mode=args.asset_guides_character_refs)
+        for scene in shot_image_scenes:
+            apply_asset_guides_to_scene(scene=scene, guides=guides, character_refs_mode=args.asset_guides_character_refs)
+        for scene in shot_result_frame_scenes:
+            merge_asset_references_into_scene(scene=scene, guides=guides, character_refs_mode="scene")
     else:
         for scene in scenes:
             merge_asset_references_into_scene(scene=scene, guides=guides, character_refs_mode="scene")
+        for scene in shot_image_scenes:
+            merge_asset_references_into_scene(scene=scene, guides=guides, character_refs_mode="scene")
+        for scene in shot_result_frame_scenes:
+            merge_asset_references_into_scene(scene=scene, guides=guides, character_refs_mode="scene")
+    for scene in result_frame_scenes:
+        merge_asset_references_into_scene(scene=scene, guides=guides, character_refs_mode="scene")
 
     if not scenes:
         raise SystemExit("No scenes found in manifest YAML.")
@@ -9016,7 +9770,7 @@ def main() -> None:
             and scene.image_output
             and scene.image_prompt
             and _scene_matches_filter(scene, scene_filter)
-            for scene in scenes
+            for scene in image_execution_scenes
         )
     )
     # External image providers are disabled; legacy tool aliases normalize to codex_builtin_image.
@@ -9053,6 +9807,15 @@ def main() -> None:
                 "seedream_video",
                 "see_dream",
             }
+            and target.video_output
+            and _video_target_matches_filter(target, scene_filter)
+            for target in video_render_targets
+        )
+    )
+    needs_higgsfield_video = (
+        not args.skip_videos
+        and any(
+            normalize_tool_name(target.video_tool) == "higgsfield"
             and target.video_output
             and _video_target_matches_filter(target, scene_filter)
             for target in video_render_targets
@@ -9113,6 +9876,17 @@ def main() -> None:
             )
         )
 
+    higgsfield_client: HiggsfieldClient | None = None
+    if (
+        not args.dry_run
+        and not args.materialize_request_files_only
+        and needs_higgsfield_video
+    ):
+        try:
+            higgsfield_client = HiggsfieldClient.from_env()
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+
     seadream_client: SeaDreamClient | None = None
     if not args.dry_run and needs_seadream_image:
         if not args.seadream_api_key:
@@ -9160,7 +9934,7 @@ def main() -> None:
 
     # Pass 1: images (allows later videos to reference other scene images, e.g. first/last frame conditioning).
     image_scenes: list[SceneSpec] = []
-    for scene in scenes:
+    for scene in image_execution_scenes:
         if not _scene_matches_filter(scene, scene_filter):
             continue
         if args.skip_images:
@@ -9231,7 +10005,7 @@ def main() -> None:
     if manifest_phase == "production" or is_asset_stage_request:
         include_image_source_requests = image_request_filename == "image_generation_requests.md"
         image_request_scenes: list[SceneSpec] = []
-        for scene in scenes:
+        for scene in image_execution_scenes:
             if not _scene_matches_filter(scene, scene_filter):
                 continue
             if _scene_is_deleted(scene):
@@ -9406,7 +10180,6 @@ def main() -> None:
                 )
             first_frame_binding = _video_binding_path(base_dir, first_frame)
             last_frame_binding = _video_binding_path(base_dir, last_frame)
-            effective_quality = target.video_quality or args.video_resolution
             effective_aspect_ratio = target.video_aspect_ratio or aspect_ratio
             execution_options = _video_execution_options(
                 target=target,
@@ -9417,6 +10190,11 @@ def main() -> None:
                 kling_extra_payload=kling_extra_payload,
                 kling_omni_extra_payload=kling_omni_extra_payload,
                 ark_extra_payload=ark_extra_payload,
+            )
+            effective_quality = _video_quality_for_target(
+                target=target,
+                args=args,
+                execution_options=execution_options,
             )
             _validate_effective_video_provider_capabilities(
                 target=target,
@@ -9632,7 +10410,6 @@ def main() -> None:
                 )
             first_frame_binding = _video_binding_path(base_dir, first_frame)
             last_frame_binding = _video_binding_path(base_dir, last_frame)
-            effective_quality = target.video_quality or args.video_resolution
             effective_aspect_ratio = target.video_aspect_ratio or aspect_ratio
             execution_options = _video_execution_options(
                 target=target,
@@ -9643,6 +10420,11 @@ def main() -> None:
                 kling_extra_payload=kling_extra_payload,
                 kling_omni_extra_payload=kling_omni_extra_payload,
                 ark_extra_payload=ark_extra_payload,
+            )
+            effective_quality = _video_quality_for_target(
+                target=target,
+                args=args,
+                execution_options=execution_options,
             )
             _validate_effective_video_provider_capabilities(
                 target=target,
@@ -9747,6 +10529,15 @@ def main() -> None:
         )
         if input_image and not args.dry_run and not input_image.exists():
             raise SystemExit(f"{target.selector}: first frame image not found: {input_image}")
+        if (
+            _dict_value(target.video_generation_contract.get("result_state_reference")).get("required") is True
+            and last_image is not None
+            and not args.dry_run
+            and not last_image.is_file()
+        ):
+            raise SystemExit(
+                f"{target.selector}: required scene-specific result frame file not found: {last_image}"
+            )
         if last_image and not args.dry_run and not last_image.exists():
             raise SystemExit(f"{target.selector}: last frame image not found: {last_image}")
 
@@ -9824,6 +10615,7 @@ def main() -> None:
                 kling_client=kling_client,
                 evolink_client=evolink_client,
                 seedance_client=seedance_client,
+                higgsfield_client=higgsfield_client,
             )
         finally:
             if snapshot_dir is not None:

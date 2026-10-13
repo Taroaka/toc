@@ -14,10 +14,19 @@ p410/p420はLLMが映画として判断する工程であり、上流の機械�
 使用可能なasset registry、対象scene、直前sceneの完成したcut列を毎回渡す。
 次sceneもstory全文に含める。個別cutを孤立して執筆させない。
 
+初回と修復の執筆では、[何を届けたいかからシーンを考える](../story-creation.md#何を届けたいかからシーンを考える)
+を文章上の思考の手がかりにする。作者が何をしたいか、観客へ何を届けたいかを先に考え、
+それに役立つ場合に導入や起承転結、反応や余韻を選ぶ。全sceneに四機能を求めるものではない。
+不足する説明が意図を妨げるなら入口を補い、沈黙・省略・唐突さが意図に合うなら保つ。
+既存のdirection/purpose等へ必要な判断を記すだけで、各sceneへの回答票や新しい評価gateは作らない。
+authorへ渡す文章は `toc/scene_entry_guidance.py`。構成を満たすかの自動判定ではない。
+
 - p410の判断: scene全体の見せ方、観客の理解、p300の意図をどう具体化するか、前後sceneへの接続。
 - p420の判断: cut数、beatの分割/統合、静止画の開始状態、動作と終了状態、構図・撮影距離・焦点・光、音と語り、切る理由、秒数。
 - 全sceneが圧力・反転・解放を持つ必要はない。未解決、沈黙、状態維持も選べる。
 - 原作の出来事と開示順を守り、演出判断を原作の新事実にしない。
+- `story.md` / `script.md` のevent sequenceを読み、登場人物・動物・物・乗り物・衣装の外見、衣装、物のcondition/material/structureがsource上で変わるか毎scene確認する。後続画像で同一性を保つための再利用anchorが必要な可視差分だけを `state_variants[]` として作る。variantごとにparent `asset_id`、stable `variant_id`、source beat ID、変化前後の状態、drawable `generation_prompt` を執筆する。瞬間的なpose/action、時間帯や感情だけの差、再利用anchorが不要な一時的変化はasset variantにしない。
+- 変化を見せる動画cutの終端を別画像で固定する必要がある場合は、同じcutの `result_frame` に状態variantと場面specificな終了画briefを結ぶ。この画像requestはp600の追加stillで、story cut、尺、語り、音を増やさない。単体のasset reference sheetを動画のlast frameに使わない。
 - 連続した複数beatを一つの長回しで見せても、一beatを複数cutに分けてもよい。根拠のある視覚的役割で決める。
 - 尺はsceneの目標秒数内で不均等に配分できる。1cutは現行実行範囲の1〜60秒。
 - 人物なしBロールは同じcut列内のsubとして設計する。p300の案を採用/調整した理由を記録し、mainだけで必須beatを成立させる。
@@ -58,6 +67,14 @@ frontendが実際に使うasset registryを `logs/authoring/p400/resources.json`
 開示許可は当該/既出beatからのみ取得し、後続beatの許可を前借りしない。
 後続beatの禁止境界とsourceの保持条件は、内部IDに加えて可読文でも生成側へ渡す。
 既存衣装のappearance bindingもasset registryから名前付きで引き継ぐ。
+
+衣装変更後の状態は、その後のcut/sceneでも持続する。全登場人物について人物/memberと
+現在の衣装状態の対応を確認し、場所や画面上の左右が変わったことを衣装のリセットや交換の
+理由にしない。色・形・袖・靴など識別に必要な特徴と、状態が変わる区間/根拠を既存の
+appearance/state bindingへ記録する。主人公の服装だけを確認して脇役を省かない。
+採用済み映像と古いasset/scene画像が食い違う場合は、ユーザーの現在の指定と採用状態を
+解決してから参照を選ぶ。集合名の一人分の素材を複数人へ同じ衣装として複製しない。
+詳細は[衣装の引き継ぎ手順](conversation-media-generation.md#衣装は人物ごとに引き継ぐ状態)を参照する。
 これらは文章とIDの整合検査であり、作者の文そのものの意味や実際の映像に矛盾がないことを一般に証明するものではない。
 
 p440/p700での語り修正・実音声の尺は既存同期を使う。authorの計画尺は `target_duration_seconds` に保持する。
@@ -117,7 +134,27 @@ p500は実際の使用cutからinventory/planを作り、source identity・引�
 コードが検証するのは引用・参照・使用関係の構造的一致である。原文が物理的な対象を述べているか、
 同じ対象かという意味の判断は、この既存のLLM authorが担う。列挙漏れが絶対にないという保証ではない。
 
+## Source-grounded visual state variants
+
+`state_variants[]` はsourceで起きる再利用価値のある視覚状態変化をasset bibleへ渡す。
+作者は外見変化の有無を出来事の因果から判断し、キーワード検出へ委ねない。通常の物体の摩耗・破損・材質変化、人物の衣装/外見変化、source上の変身などが対象になり得る。variantは状態の違いだけを持つ再利用anchorで、特定sceneのcamera、背景、blockingを持ち込まない。
+
+各variantの `generation_prompt` は変化後に見える形・素材・状態を具体化し、parent assetの同一性を保つ。`source_event_beat_ids` は現在sceneのsource event IDsでなければならない。変化後状態を通常scene/cut画像に見せるときは、そのcutの `state_variant_refs[]` でparentとvariantを選び、variant状態を使うconsumer beat IDsを同じbindingへ記録する。後続cut/sceneでは、状態作成beatより前の画像からvariantを使わない。p500はvariantをparent asset referenceから派生する通常のasset requestとして生成し、p600は選択されたactual reference pathをimage requestへ束縛する。
+
+動画の連続動作を結果状態で終える場合、p400の`result_frame.state_variant_refs[]`は必要なcharacter/object/location variantsをまとめて選ぶ。p600は同じcutのprimary scene imageを場所・camera・relative layout anchorにし、after-state variantsと場面specificなend-state briefで別のscene stillを作る。asset sheetをlast frameに流用しない。p800はこのscene stillを `last_frame` へpathとbytes hashで束縛する。結果画は同じcutの画像であり、新しいstory cutではない。構造・描画の妥当性を別の品質採点gateへ委ねない。
+
+既存manifest cutの画面設計を後段で任意に複数shotへ分ける契約は、[Cut内ショット設計](shot-direction.md)を参照する。shot列は親cutの視覚timelineを分割するもので、story/script、source event、親cutの尺・音声・cut contractを書き換えない。人物の目的・感情、見える身体部分、動きの時間、カメラを意図に応じて選び、各shotの画像・動画requestへ投影する。
+
 終幕を執筆するときは `docs/script-creation.md` の「終幕の焦点と観客の余韻」を確認する。最後の主要cutで中心人物・中心関係を見届けられるようにし、脇役の後始末や人物なしBロールを機械的な最終画にしない。
+
+## 行為・反応とフレーム間の整合
+
+人物間の行為を設計するときは、相手がどう受け止め、どの表情・視線・応答でそれが分かるかを
+既存のperformance/end-state欄へ具体化する。反応が目的の場面はその時間を確保し、
+物理的な移動完了だけで終わらせない。喜び・謝意等を全場面の定型にせず、sourceの関係と
+開示順を守る。開始/終了画像の組にはその意図した差だけを持たせ、衣装の細部や道具の数など
+意図しない差を動画の補間へ委ねない。実行時は
+[共通確認](conversation-media-generation.md#開始画像と終了画像の差を実画像で照合する)を使う。
 
 ## 音の役割をp860へ渡す
 

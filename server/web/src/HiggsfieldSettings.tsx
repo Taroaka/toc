@@ -1,11 +1,45 @@
 export type VideoInputMode = 'image_to_video' | 'reference_images';
 export type VideoNativeAudioMode = 'off' | 'natural_sound' | 'dialogue_and_sound';
 
-export function higgsfieldDurationError(durationSeconds: number): string | null {
-  if (!Number.isFinite(durationSeconds) || durationSeconds < 4 || durationSeconds > 30) {
-    return 'Higgsfield / Seedance 2.5 の動画は4〜30秒で指定してください。';
+export const KLING_V3_STANDARD_IMAGE_TO_VIDEO_MODEL = 'kling-video/v3.0/std/image-to-video';
+
+const SEEDANCE_25_MODELS = new Set([
+  'bytedance/seedance-2.5/image-to-video',
+  'bytedance/seedance-2.5/reference-to-video',
+]);
+
+export type VideoDurationBounds = {
+  min: number;
+  max: number;
+  label: string;
+};
+
+export function usesModelDefaultVideoQuality(model?: string | null): boolean {
+  return (model || '').trim() === KLING_V3_STANDARD_IMAGE_TO_VIDEO_MODEL;
+}
+
+export function videoDurationBounds(tool: string, model?: string | null): VideoDurationBounds | null {
+  const selectedModel = (model || '').trim();
+  if (selectedModel === KLING_V3_STANDARD_IMAGE_TO_VIDEO_MODEL) {
+    return { min: 3, max: 15, label: 'Kling v3 standard · 3〜15秒' };
+  }
+  if (SEEDANCE_25_MODELS.has(selectedModel) || (tool === 'higgsfield' && !selectedModel)) {
+    return { min: 4, max: 30, label: 'Seedance 2.5 · 4〜30秒' };
   }
   return null;
+}
+
+export function videoDurationError(durationSeconds: number, tool: string, model?: string | null): string | null {
+  const bounds = videoDurationBounds(tool, model);
+  if (!bounds) return null;
+  if (!Number.isFinite(durationSeconds) || durationSeconds < bounds.min || durationSeconds > bounds.max) {
+    return `${bounds.label}で指定してください。`;
+  }
+  return null;
+}
+
+export function higgsfieldDurationError(durationSeconds: number): string | null {
+  return videoDurationError(durationSeconds, 'higgsfield');
 }
 
 export function nativeAudioModeAfterProviderSwitch(

@@ -4,7 +4,7 @@ from copy import deepcopy
 import pytest
 
 from test_p400_cinematic_author import sample
-from toc.p420_assets import resolve_asset_requests, ASSET_RESOLUTION_CONTRACT
+from toc.p420_assets import resolve_asset_requests, extend_asset_bibles, ASSET_RESOLUTION_CONTRACT
 
 
 def fixture(tmp_path):
@@ -91,6 +91,166 @@ def test_author_resolves_request_in_existing_scene_turn_and_saves_replayable_reg
     (tmp_path / 'cinematic_direction.json').write_text(json.dumps(doc))
     with pytest.raises(RuntimeError, match='asset_resolution_changed'):
         load_direction(tmp_path, base)
+
+
+def test_final_cast_includes_p420_character_and_reaches_both_asset_request_paths(tmp_path):
+    import asyncio
+    import hashlib
+    import yaml
+    from types import SimpleNamespace
+    from test_toc_immersive_frontend_run import load_frontend_run_module
+    from toc.cast_design import CAST_APPEARANCE_FIELDS, character_subject_contract
+    from toc.p400_authoring import author_cinematic_direction
+    from toc.visual_planning_contract import source_binding
+
+    story, sources, base, rows = fixture(tmp_path)
+    quote = '修理工が店主と話す。'
+    story['script']['scenes'][0]['event_sequence'][0]['what_happens'] = quote
+    sources['story'] = json.dumps(story, ensure_ascii=False).encode()
+    sources['research'] = json.dumps({'source_passages': [{'text': quote}]}, ensure_ascii=False).encode()
+    request = {
+        'request_id': 'shopkeeper', 'kind': 'character', 'name': '店主',
+        'source_entity': {'source': 'story', 'pointer': '/script/scenes/0/event_sequence/0/what_happens'},
+        'source_evidence': [{'source': 'story', 'pointer': '/script/scenes/0/event_sequence/0/what_happens', 'quote': quote}],
+        'used_in_cuts': ['a'], 'existing_asset_id': '',
+    }
+    rows[0]['asset_requests'] = [request]
+    rows[0]['cuts'][0]['character_ids'] = ['keeper', 'request:shopkeeper']
+    rows[0]['cuts'][0]['object_ids'] = []
+    accepted_reference = tmp_path / base['characters']['keeper']['references'][0]
+    accepted_reference.parent.mkdir(parents=True, exist_ok=True)
+    accepted_reference.write_bytes(b'accepted character reference image bytes')
+    for name, raw in sources.items():
+        (tmp_path / f'{name}.md').write_bytes(raw)
+
+    _resolved_rows, final_resources, _records = resolve_asset_requests(
+        rows, story, json.loads(sources['research']), base)
+    source_bindings = {name: source_binding(f'{name}.md', raw) for name, raw in sources.items()}
+
+    def provenance(fact):
+        return {'source_facts': [fact], 'interpretation': [], 'creative_choices': []}
+
+    design_rows = {}
+    for character_id, resource in final_resources['characters'].items():
+        design_rows[character_id] = {
+            'character_id': character_id,
+            'name': resource['name'],
+            'subject_contract': character_subject_contract(resource),
+            'role': 'source-described story participant',
+            'role_basis': f"the source identifies {resource['name']} as participating",
+            'relationships': [],
+            'personality_provenance': provenance(f"{resource['name']} participates in a source event"),
+            'behavior_baseline': ["pauses before responding"],
+            'contract_reconciliation': {
+                'status': 'consistent',
+                'source_basis': f"the source names {resource['name']}",
+                'explanation': 'the individual contract agrees with the source',
+            },
+            'appearance': {field: f"distinctive {field} for {resource['name']}" for field in CAST_APPEARANCE_FIELDS},
+            'appearance_provenance': provenance(f"the source names {resource['name']}"),
+            'intentional_similarities': [],
+            'distinguish_from': [],
+            'members': [],
+        }
+    cast_design = {
+        'schema_version': 'cast_design_v1',
+        'source_bindings': source_bindings,
+        'characters': design_rows,
+    }
+    calls = []
+
+    async def turn(**kwargs):
+        calls.append(kwargs['prompt'])
+        if len(calls) <= len(rows):
+            payload = rows[len(calls) - 1]
+        else:
+            payload = cast_design
+        return SimpleNamespace(
+            payload={'result_json': json.dumps(payload, ensure_ascii=False)},
+            transcript=(), provenance=SimpleNamespace(as_dict=lambda: {'model': 'stub'}),
+        )
+
+    direction = asyncio.run(author_cinematic_direction(
+        run_dir=tmp_path, resources=base, grounding='maintained cast design guidance',
+        client_factory=lambda: None, turn_runner=turn, enable_cast_design=True,
+    ))
+    added_id = direction['asset_resolutions'][0]['asset_id']
+    assert added_id in direction['cast_design']['characters']
+    assert added_id in direction['resources']['characters']
+    assert added_id in calls[-1]
+    assert 'maintained cast design guidance' in calls[-1]
+    prior_reference_sha = hashlib.sha256(accepted_reference.read_bytes()).hexdigest()
+    assert direction['cast_design']['reference_identity_bindings']['keeper'][0]['sha256'] == prior_reference_sha
+
+    accepted_reference.write_bytes(b'replaced bytes at the same accepted reference path')
+    from toc.p400_authoring import load_direction
+    import pytest
+    with pytest.raises(RuntimeError, match='source_stale'):
+        load_direction(tmp_path, base)
+
+    reauthor_calls = []
+
+    async def cast_only_turn(**kwargs):
+        reauthor_calls.append(kwargs['prompt'])
+        return SimpleNamespace(
+            payload={'result_json': json.dumps(cast_design, ensure_ascii=False)},
+            transcript=(), provenance=SimpleNamespace(as_dict=lambda: {'model': 'stub'}),
+        )
+
+    direction = asyncio.run(author_cinematic_direction(
+        run_dir=tmp_path, resources=base, grounding='maintained cast design guidance',
+        client_factory=lambda: None, turn_runner=cast_only_turn, enable_cast_design=True,
+    ))
+    new_reference_sha = hashlib.sha256(accepted_reference.read_bytes()).hexdigest()
+    assert new_reference_sha != prior_reference_sha
+    assert direction['cast_design']['reference_identity_bindings']['keeper'][0]['sha256'] == new_reference_sha
+    assert len(reauthor_calls) == 1
+
+    manifest = {
+        'video_metadata': {'topic': 'fixture topic', 'time': ''},
+        'assets': {
+            'character_bible': [{
+                'character_id': 'keeper',
+                'reference_images': ['assets/characters/keeper.png'],
+                'fixed_prompts': ['修理工'],
+                'cinematic': {'role': '修理工の一貫性', 'visual_subject': '修理工の参照画像'},
+            }],
+            'object_bible': [],
+            'location_bible': [{
+                'location_id': 'shop', 'reference_images': ['assets/locations/shop.png'],
+                'fixed_prompts': ['工房'], 'cinematic': {'role': '工房', 'visual_subject': '工房'},
+            }],
+            'style_guide': {'visual_style': '実写映画', 'forbidden': [], 'reference_images': []},
+        },
+        'scenes': [{
+            'scene_id': 10,
+            'cuts': [{
+                'selector': 'scene10_cut01',
+                'image_generation': {'character_ids': [added_id], 'object_ids': [], 'location_ids': ['shop']},
+            }],
+        }],
+    }
+    extend_asset_bibles(manifest, direction)
+    added_bible = next(item for item in manifest['assets']['character_bible'] if item['character_id'] == added_id)
+    assert added_bible['appearance_contract']['identifying_features'] == f'distinctive identifying_features for 店主'
+
+    frontend = load_frontend_run_module()
+    profile = {'topic_label': 'fixture topic', 'protagonist_name': '修理工', 'places': ['工房']}
+    _inventory, frontend_plan = frontend._build_asset_artifacts_from_manifest(profile=profile, manifest=manifest)
+    frontend_entry = next(item for item in frontend_plan['assets'] if item['asset_id'] == added_id)
+    frontend_prompt = frontend._prompt_for_asset(frontend_entry, profile)
+    assert 'distinctive face_shape for 店主' in frontend_prompt
+    assert 'distinctive identifying_features for 店主' in frontend_prompt
+
+    (tmp_path / 'video_manifest.md').write_text(
+        '# Video Manifest\n\n```yaml\n' + yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False) + '```\n',
+        encoding='utf-8',
+    )
+    from server import image_gen_app
+    codex_entries = image_gen_app._asset_entries_from_manifest(tmp_path)
+    codex_entry = next(item for item in codex_entries if item['asset_id'] == added_id)
+    assert 'distinctive face_shape for 店主' in codex_entry['prompt']
+    assert 'distinctive identifying_features for 店主' in codex_entry['prompt']
 
 
 def test_same_name_with_distinct_source_identity_is_not_merged(tmp_path):

@@ -4,6 +4,8 @@
 p400 scene/cut contract → p600 image request → p700 narration → p800 motion → render の順を守る。
 共通 shape は `workflow/video-manifest-template.md` を参照する。
 
+同じ親cut内で任意に複数shotを使う場合の `shot_plan` / child `shots[]` contract は[Cut内ショット設計](../docs/implementation/shot-direction.md)を参照してください。親cutのtimelineと音声を保つ設計です。このテンプレートのcut例にはactiveなshot dataを置きません。
+
 ```yaml
 manifest_phase: skeleton|production
 video_metadata:
@@ -171,8 +173,8 @@ scenes:
           duration_seconds: 8
           api_prompt_payload:
             policy_version: video_api_prompt_v1
-            compiler_version: conditional_video_prompt_compiler_v5
-            projection_registry_version: video_prompt_projection_registry_v5
+            compiler_version: conditional_video_prompt_compiler_v6
+            projection_registry_version: video_prompt_projection_registry_v7
             provider: kling_3_0
             prompt: ""
             negative_prompt: ""
@@ -209,4 +211,3 @@ Rules:
 - p400 authoring does not call image/video/TTS providers.
 - candidate listening/selection/editing is optional and is saved in human_choices.
 - request payload and provider output must pass ordinary hash, file, decode, duration, and provenance checks.
-

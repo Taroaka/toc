@@ -61,8 +61,8 @@ def test_projection_preserves_motion_light_focus_physics_and_native_audio(tmp_pa
                      '息を止めて遅く一度瞬く', '木が抵抗してから動く', '木が動く瞬間の軋み']:
         assert expected in prompt
     assert 'keeper' not in prompt
-    assert payload['execution_compiler_version'] == 'cinematic_execution_compiler_v1'
-    assert payload['projection_contract']['execution_projection_version'] == 'cinematic_execution_projection_v1'
+    assert payload['execution_compiler_version'] == 'cinematic_execution_compiler_v2'
+    assert payload['projection_contract']['execution_projection_version'] == 'cinematic_execution_projection_v2'
     from toc.video_prompt_projection_registry import rule_for_source_key
     assert rule_for_source_key('cut.cut_contract.cinematic_contract.execution.physics').target_group == 'primary_motion'
     changed = deepcopy(projected['cut_contract'])
@@ -70,6 +70,63 @@ def test_projection_preserves_motion_light_focus_physics_and_native_audio(tmp_pa
     other = compile_video_api_prompt_v1(cut_contract=changed, tool='higgsfield', duration_seconds=5,
         first_frame='assets/scenes/start.png', execution_options={'generate_audio': True})
     assert payload['source_digest'] != other['source_digest']
+
+
+def test_cast_relationship_and_behavior_context_reaches_video_but_not_still(tmp_path):
+    story, _, resources, scenes = sample(tmp_path)
+    resources['characters']['messenger'] = {
+        'name': '使者', 'references': ['assets/characters/messenger.png'],
+    }
+    cut = scenes[0]['cuts'][0]
+    cut['character_ids'] = ['keeper', 'messenger']
+    cut['execution'] = {
+        'performance': {
+            'action': '返事を待つ',
+            'observable_reaction': '修理工は視線を一度だけ使者へ向ける',
+            'timing': '使者が話し終えてから一拍待つ',
+        }
+    }
+    cast_design = {'characters': {
+        'keeper': {
+            'name': '修理工', 'role': '工房の修理工',
+            'relationships': [{'character_id': 'messenger', 'relation': '手紙を受け取る', 'source_basis': 'story event: handoff'}],
+            'personality_provenance': {
+                'source_facts': ['返事を待つ'],
+                'interpretation': ['慎重に相手の話を聞く'],
+                'creative_choices': [],
+            },
+            'behavior_baseline': ['話し手が終わるまで手を止める'],
+        },
+        'messenger': {
+            'name': '使者', 'role': '手紙を届ける使者',
+            'relationships': [{'character_id': 'keeper', 'relation': '手紙を渡す', 'source_basis': 'story event: handoff'}],
+            'personality_provenance': {
+                'source_facts': ['手紙を届ける'],
+                'interpretation': ['急ぎながらも礼を守る'],
+                'creative_choices': [],
+            },
+            'behavior_baseline': ['手渡しの前に姿勢を整える'],
+        },
+    }}
+    source = story['script']['scenes'][0]
+    _, manifest = project_scene(
+        scenes[0], source_scene=source, scene_id=10, resources=resources,
+        scene_intent={}, scene_event=source, scene_generation={}, acceptance_draft={},
+        acceptance_binding={}, film_language=film(), cast_design=cast_design,
+    )
+    projected_cut = manifest['cuts'][0]
+    still_prompt = projected_cut['image_generation']['api_prompt_payload']['prompt']
+    video = compile_video_api_prompt_v1(
+        cut_contract=projected_cut['cut_contract'], tool='higgsfield', duration_seconds=5,
+        first_frame='assets/scenes/start.png',
+    )
+
+    assert '手紙を受け取る' not in still_prompt
+    assert '話し手が終わるまで手を止める' not in still_prompt
+    assert '話し手が終わるまで手を止める' in video['prompt']
+    assert '同じcutにいる人物との関係' in video['prompt']
+    assert 'story event: handoff' in video['prompt']
+    assert cut['motion_brief'] in video['prompt']
 
 
 def test_dialogue_requires_bound_speaker_and_beat(tmp_path):

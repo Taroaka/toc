@@ -1,0 +1,102 @@
+[
+  {
+    "id": "video",
+    "skill": "toc-video-gen",
+    "status": "blocked_before_submission",
+    "decision": "scene2 が対象だが、提示 excerpt から確認できるのは cut01 だけ。cut01 は required な終了画像 end.png が欠落し、journal は submitting/request_id=null なので、新規POSTせず送信状態を解決する。採用音声をそのまま使い、声や速度を変えない。",
+    "next_actions": [
+      "実runの p000_index/state/run_status と manifest で scene2 の全cutを特定し、他のcutを個別に分類する。",
+      "cut01 の journal/provider 履歴を照会し、既存jobなら再開、送信済みと確認できないままなら重複送信しない。",
+      "end.png が欠けている理由と既存の画像job/素材を確認し、required result_frame を解決する。",
+      "採用ナレーションの実ファイル・hash・voice設定・ffprobe尺とoffsetを確認し、動画requestの秒数および送信参照を再構築してから対象cutのみ生成する。"
+    ],
+    "missing_information": [
+      "scene2 の完全なcut一覧と各cutの現在状態。",
+      "cut01 の送信結果照会に使えるrequest IDまたはprovider履歴。",
+      "end-state画像の生成/採用素材と参照実体。",
+      "採用ナレーションの実体・hash・voice ID、および他cutの尺/offset。",
+      "動画requestの現在のmodel/mode/尺対応と、native audio設定の承認済み方針。"
+    ],
+    "new_paid_generation_justified": true,
+    "paid_generation_rationale": "ユーザーは動画生成を明示しているため、必要な新規cut生成は依頼上正当化される。ただしcut01のin-flight状態と必須参照を解決するまでは送信しない。",
+    "safe_to_submit_paid_generation_now": false
+  },
+  {
+    "id": "image",
+    "skill": "toc-image-gen",
+    "status": "blocked_on_dependency",
+    "decision": "終了画像は、開始画像が generating 中で参照実体 planned_first.png も未確認のため、今は送信しない。open_box_variant.png はファイル存在の記載だけで、画像内容/decode/hashが検証済みとは扱わない。",
+    "next_actions": [
+      "開始画像の既存jobを照会または再開し、完了後にplanned_first.pngの保存先・decode・hashを確認する。",
+      "open_box_variant.pngを開いて箱の変化後状態を確認する。",
+      "両参照の役割と順序を固定し、同じcutの補助終了画像としてresult.pngを生成・保存・検証する。"
+    ],
+    "missing_information": [
+      "開始画像jobのrequest ID/状態と、生成後の実ファイル。",
+      "変化後variantの画像内容・decode/hash確認。",
+      "終了画像の現在request/journalと正式保存先。"
+    ],
+    "new_paid_generation_justified": true,
+    "paid_generation_rationale": "ユーザーは終了画像の新規作成を明示している。依存画像の完了と参照検証後に終了画像1点の生成は妥当だが、今は前提が揃っていない。",
+    "safe_to_submit_paid_generation_now": false
+  },
+  {
+    "id": "narration",
+    "skill": "toc-narration-gen",
+    "status": "import_requested_but_current_binding_conflicts",
+    "decision": "voice_take.mp3を保持してrunへ正式取り込み・候補記録する。再TTSはしない。提示情報だけでは現行rev5の原稿に対応する選択音声として確定できない。candidateはscript_revision 4で、現manifestはrev5かつ本文変更あり、音声8.2秒はvideo_duration 7秒を超えるため、rev5の正本参照や確定尺を黙って上書きしない。",
+    "next_actions": [
+      "tmp音源を実体/hash/decodeで確認し、voice-02・script revision 4・実測8.2秒の来歴を保ってrun内に取り込み、採用指示をstateへ記録する。",
+      "candidateをrev5音声として誤表示せず、旧revision由来の正式候補/採用素材として記録する。",
+      "rev4とrev5の語りの差、および7秒動画との配置差を示し、原稿同期・配置または対象動画尺のどれを更新するか解消してから現行selected narration bindingを確定する。"
+    ],
+    "missing_information": [
+      "voice_take.mp3の実ファイル・hash・decode・音声内容/試聴確認。",
+      "rev4とrev5の実際の本文差と候補が現在も意図した語りか。",
+      "8.2秒音声を7秒動画へどう配置するかの承認済み設計。",
+      "既存採用音声がある場合のcandidate/selection契約と採用イベント記録先。"
+    ],
+    "new_paid_generation_justified": false,
+    "paid_generation_rationale": "ユーザーが既存素材を指定して再生成を明確に禁じている。revision/尺の不一致はTTS再生成の理由にせず、候補を保持して参照・時間配置を解決する。",
+    "skill_finding": "スキルは『この音声を使う』場合は取り込み、作り直さないとする一方、旧script revisionの音声を現行manifestへ採用する具体的なcandidate/selectionの扱いを定義していない。共通の正式採用手順との接続も不明瞭で、正式記録と現行正本へのbindingを分ける判断が必要。",
+    "safe_to_submit_paid_generation_now": false
+  },
+  {
+    "id": "bgm",
+    "skill": "toc-bgm-gen",
+    "status": "design_required_before_generation",
+    "decision": "新規BGM生成の依頼は明示されており、既存生成音源もないので生成は目的に合う。ユーザー指定に従い60秒から最後の警告が終わるまで音楽を入れない配置を設計し、p860 cue planへ反映してから生成する。video approval=currentだけでは実際のvideo-set hash/revision一致を証明しない。",
+    "next_actions": [
+      "run全体か特定sceneかを実runと会話対象で確定し、80秒の実映像順序、実尺、ナレーション/台詞、環境音、既存cueとhashを読む。",
+      "0–60秒の物語進行に基づいて音楽の目的・変化・終了/fadeを設計し、60秒以降の警告を無音楽区間としてp860計画に記録する。",
+      "映像revision/hashとp860承認条件を再照合し、provider/model/payloadを確認した上で新しい候補を生成する。"
+    ],
+    "missing_information": [
+      "対象がrun全体かsceneか、実cut順序と映像素材。",
+      "video approvalとsound_planのvideo_set_hash v1が現行実体と一致する証拠。",
+      "実タイムライン上のナレーション/台詞/環境音と60秒付近のfade可否。",
+      "p860のcue/request schema、音楽operation、model/尺の対応."
+    ],
+    "new_paid_generation_justified": true,
+    "paid_generation_rationale": "既存music generationがなく、ユーザーが全体用BGMの生成を明示している。60秒以降の無音楽指定をcue設計に落とし込み、承認revisionと実timelineを照合した後に行う。",
+    "safe_to_submit_paid_generation_now": false
+  },
+  {
+    "id": "se",
+    "skill": "toc-se-gen",
+    "status": "mix_only",
+    "decision": "提示payloadに音量パラメータはなく、prompt_influence=0.3は生成音量ではない。示されたmix gainはcue -18 dBとSE bus -6 dBなので、通常の直列gain適用なら合計で約-24 dB相当。選択済み音源を保ち、mixを上げた試聴用previewを作る。",
+    "next_actions": [
+      "実adapter schemaと保存済みpayloadを確認し、prompt_influenceが音量扱いされていないことを照合する。",
+      "selected_effect.mp3のdecodeと実ピーク/RMS等を確認して、生成音源自体のlevelとmix attenuationを分ける。",
+      "cue gainまたはSE bus gainだけをpreview用に上げ、元音源と現行mixを保持して再生する。"
+    ],
+    "missing_information": [
+      "実音源の測定値と試聴結果。",
+      "実mixerでcue gainとbus gainがどう適用されるか、追加のnormalize/limiterがあるか。"
+    ],
+    "new_paid_generation_justified": false,
+    "paid_generation_rationale": "ユーザーは明確に再生成を避け、試聴音量の調整を求めている。設定の説明とmix-only previewで目的を満たせる。",
+    "safe_to_submit_paid_generation_now": false
+  }
+]

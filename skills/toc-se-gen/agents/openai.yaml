@@ -1,0 +1,4 @@
+interface:
+  display_name: "ToC SE生成"
+  short_description: "スレッドからのSE生成依頼で、実映像の動作・音の位置・生成設定を確認して実行する"
+  default_prompt: "$toc-se-gen を使い、この物語の最新の進行状況と採用素材を確認して、指定範囲を生成してください。"

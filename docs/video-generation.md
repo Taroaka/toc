@@ -76,9 +76,9 @@ alternative は materialization 前に停止する。
 ```text
 scene_event + cut_contract + first-frame image
   → motion contract
-  → video_prompt_projection_registry_v5
+  → video_prompt_projection_registry_v7
   → video_prompt_ir_v2
-  → conditional_video_prompt_compiler_v5
+  → conditional_video_prompt_compiler_v6
   → video_api_prompt_v1
 ```
 
@@ -87,14 +87,22 @@ references、provider settings、duration、source digest を payload に保存�
 call 前に immutable request snapshot へ保存し、current canonical design の再 compile 結果と
 照合する。
 
+Source-grounded state transitionで動画終端の可視状態を固定する場合、`result_state_reference`
+は親assetとstate variantを選び、`result_frame.image_generation` はp600が生成する場面specificな
+終了画像を指す。last frameにはこの結果画像を使い、asset reference sheetは使わない。終端画像は
+同じcut内のimage-only requestなのでtimelineとnarrationには追加されない。materializationはvariant
+ID、transition ID、結果画像のpath、provider first/last capabilityを照合し、last-frame bytes hashを
+request snapshotへ保存する。variant・結果画像・first frame・対応modeのどれかが欠ければ、該当cutを
+特定した構造エラーで止める。
+
 ## 3. Provider prompt contract
 
 ```yaml
 video_generation:
   api_prompt_payload:
     policy_version: video_api_prompt_v1
-    compiler_version: conditional_video_prompt_compiler_v5
-    projection_registry_version: video_prompt_projection_registry_v5
+    compiler_version: conditional_video_prompt_compiler_v6
+    projection_registry_version: video_prompt_projection_registry_v7
     provider: kling_3_0
     mode: image_to_video
     provider_policy:

@@ -11,7 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from toc import sound_design as sound
 from toc.run_root_binding import read_run_file_bytes
 
-DOCS = ('docs/research/film-sound-emotion.md', 'docs/implementation/sound-design.md',
+DOCS = ('docs/system-architecture.md', 'docs/implementation/video-integration.md',
+        'workflow/stage-grounding.yaml', 'docs/research/film-sound-emotion.md', 'docs/implementation/sound-design.md',
         'workflow/playbooks/sound-design/affect-and-spotting.md', 'workflow/sound-spotting-template.md')
 SOURCES = ('story.md', 'script.md', 'video_manifest.md', 'cinematic_direction.json')
 POLICY = 'sound_authoring_v1'

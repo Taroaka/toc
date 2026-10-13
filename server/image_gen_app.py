@@ -25,6 +25,7 @@ import tempfile
 import unicodedata
 import uuid
 import warnings
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -94,6 +95,11 @@ from toc.asset_prompt_compiler import (
     asset_prompt_source_digest,
     compile_asset_prompt,
 )
+from toc.asset_state_variants import (
+    AssetStateVariantError,
+    required_state_variant_plan_entries,
+    validate_result_state_references,
+)
 from toc.production_repair import RepairSession
 from toc.production_diagnostics import MediaOutputError
 from toc.image_prompt_compiler import compile_image_api_prompt_v2
@@ -143,6 +149,11 @@ from toc.run_root_binding import (
 from toc import process_store
 from toc.providers.kling import KlingClient, KlingConfig
 from toc.providers.seedance import SeedanceClient, SeedanceConfig
+from toc.provider_submission_journal import (
+    current_provider_submission_scope,
+    provider_submission_scope,
+    submit_provider_request,
+)
 from toc.script_narration import materialize_elevenlabs_tts_text, resolve_manifest_narration, resolve_script_cut_tts_text
 from toc.narration_revision import (
     REVISION_SCHEMA_VERSION,
@@ -178,6 +189,7 @@ from toc.runtime_locks import (
     release_file_lock,
 )
 from toc.manifest_source import manifest_source_sha256
+from toc.shot_timeline import ShotTimelineError, validate_projected_shot_schedule
 from toc.scene_acceptance_contract import criterion_registry_payload, resolve_criterion
 from toc.tts_text import load_pronunciation_aliases, prepare_elevenlabs_tts_text
 from .image_gen import (
@@ -751,7 +763,7 @@ class VideoGenerateItem(BaseModel):
     last_reference: str | None = Field(default=None, max_length=500)
     references: list[str] = Field(default_factory=list, max_length=32)
     negative_prompt: str | None = Field(default=None, max_length=40000)
-    quality: str = Field(default="1080p", pattern="^(480p|720p|1080p|4K)$")
+    quality: str | None = Field(default="1080p", pattern="^(480p|720p|1080p|4K)$")
     aspect_ratio: str = Field(default="16:9", pattern="^(16:9|9:16|1:1|4:3|3:4|21:9)$")
     duration_seconds: int = Field(default=8, ge=1, le=VIDEO_GENERATION_DURATION_MAX_SECONDS)
     tool: str = Field(default="kling_3_0", pattern="^(kling_3_0|kling_3_0_omni|seedance|higgsfield)$")
@@ -1294,6 +1306,11 @@ def _asset_prompt(
 
 
 def _asset_usage_by_id(manifest: dict[str, Any], id_key: str) -> dict[str, list[str]]:
+    result_state_entity = {
+        "character_ids": "character",
+        "object_ids": "object",
+        "location_ids": "location",
+    }.get(id_key, "")
     usage: dict[str, list[str]] = {}
     scenes = manifest.get("scenes") if isinstance(manifest.get("scenes"), list) else []
     for scene in scenes:
@@ -1313,6 +1330,18 @@ def _asset_usage_by_id(manifest: dict[str, Any], id_key: str) -> dict[str, list[
             image_generation = cut.get("image_generation") if isinstance(cut.get("image_generation"), dict) else {}
             for asset_id in image_generation.get(id_key) or []:
                 normalized_id = str(asset_id or "").strip()
+                if normalized_id:
+                    usage.setdefault(normalized_id, []).append(selector)
+            video_generation = cut.get("video_generation") if isinstance(cut.get("video_generation"), dict) else {}
+            result_frame = video_generation.get("result_frame") if isinstance(video_generation.get("result_frame"), dict) else {}
+            result_image = result_frame.get("image_generation") if isinstance(result_frame.get("image_generation"), dict) else {}
+            for asset_id in result_image.get(id_key) or []:
+                normalized_id = str(asset_id or "").strip()
+                if normalized_id:
+                    usage.setdefault(normalized_id, []).append(selector)
+            result_binding = video_generation.get("result_state_reference") if isinstance(video_generation.get("result_state_reference"), dict) else {}
+            if result_state_entity and str(result_binding.get("entity_type") or "").strip() == result_state_entity:
+                normalized_id = str(result_binding.get("asset_id") or "").strip()
                 if normalized_id:
                     usage.setdefault(normalized_id, []).append(selector)
     return {key: list(dict.fromkeys(value)) for key, value in usage.items()}
@@ -1466,6 +1495,8 @@ def _project_asset_plan_from_manifest(
         default_forbidden=["文字", "ロゴ", "人物主役", "アニメ"],
         default_views=["wide"],
     )
+
+    projected.extend(required_state_variant_plan_entries(manifest))
 
     style_guide = assets.get("style_guide") if isinstance(assets.get("style_guide"), dict) else {}
     style_refs = [str(value).strip() for value in style_guide.get("reference_images") or [] if str(value).strip()]
@@ -3026,6 +3057,44 @@ def _manifest_cut_contract(data: dict[str, Any], *, min_cuts_per_scene: int = 1)
                 issues.append(f"scene {scene_id} cut {cut.get('cut_id') or cut_index}: missing image_generation.output")
                 continue
             required_outputs.add(output)
+            video_generation = cut.get("video_generation")
+            video_generation = (
+                video_generation if isinstance(video_generation, dict) else {}
+            )
+            result_frame = video_generation.get("result_frame")
+            result_binding = video_generation.get("result_state_reference")
+            result_binding = (
+                result_binding if isinstance(result_binding, dict) else {}
+            )
+            if result_binding.get("required") is True and not isinstance(result_frame, dict):
+                issues.append(
+                    f"scene {scene_id} cut {cut.get('cut_id') or cut_index}: "
+                    "required result_frame is missing"
+                )
+            if isinstance(result_frame, dict):
+                result_image_generation = result_frame.get("image_generation")
+                result_image_generation = (
+                    result_image_generation
+                    if isinstance(result_image_generation, dict)
+                    else {}
+                )
+                result_output = str(
+                    result_frame.get("output")
+                    or result_image_generation.get("output")
+                    or ""
+                ).strip()
+                if result_binding.get("required") is True and not result_output:
+                    issues.append(
+                        f"scene {scene_id} cut {cut.get('cut_id') or cut_index}: "
+                        "required result_frame.output is missing"
+                    )
+                if result_output:
+                    if result_image_generation.get("output") != result_output:
+                        issues.append(
+                            f"scene {scene_id} cut {cut.get('cut_id') or cut_index}: "
+                            "result_frame output must match image_generation.output"
+                        )
+                    required_outputs.add(result_output)
     return issues, required_outputs
 
 
@@ -3069,19 +3138,35 @@ def _validate_image_prompt_request_revision(
         )
     if require_resolved_references:
         try:
+            producer_by_destination = {
+                item.destination: item.item_id for item in snapshot.items
+            }
             for item in snapshot.items:
-                deferred = [reference.path for reference in item.references if reference.deferred]
-                if deferred:
-                    raise ImageRequestSnapshotError(
-                        f"snapshot still defers references for {item.item_id}: {', '.join(deferred)}"
+                invalid_deferred = [
+                    reference.path
+                    for reference in item.references
+                    if reference.deferred
+                    and (
+                        producer_by_destination.get(reference.path) != reference.producer_item_id
+                        or reference.producer_item_id == item.item_id
                     )
-                current_reference_sha256s(run_dir, item, allow_deferred=False)
+                ]
+                if invalid_deferred:
+                    raise ImageRequestSnapshotError(
+                        f"snapshot has unresolved external references for {item.item_id}: {', '.join(invalid_deferred)}"
+                    )
+                current_reference_sha256s(run_dir, item, allow_deferred=True)
         except ImageRequestSnapshotError as exc:
             raise RuntimeError(
                 f"ToC run did not reach p650: unresolved image request reference: {exc}"
             ) from exc
 
-    targets = _manifest_scene_targets(manifest_data)
+    # Parent cut images stay a first-shot alias. The canonical image request
+    # set contains each child shot image once, plus any result-frame images.
+    targets = _manifest_image_targets(
+        manifest_data,
+        include_auxiliary_image_targets=True,
+    )
     frontend_v2_contract = str(manifest_data.get("schema_version") or "") == "scene_event_v1"
     matched_selectors: set[str] = set()
     for item in snapshot.items:
@@ -3096,11 +3181,7 @@ def _validate_image_prompt_request_revision(
         selector = str(target["selector"])
         matched_selectors.add(selector)
         node = target["cut"] if isinstance(target.get("cut"), dict) else {}
-        image_generation = (
-            node.get("image_generation")
-            if isinstance(node.get("image_generation"), dict)
-            else {}
-        )
+        image_generation = _target_image_generation(target)
         output = str(image_generation.get("output") or "").strip()
         if item.destination != output:
             raise RuntimeError(
@@ -3159,12 +3240,7 @@ def _validate_image_prompt_request_revision(
         for target in targets
         if str(
             (
-                (
-                    target["cut"].get("image_generation")
-                    if isinstance(target.get("cut"), dict)
-                    and isinstance(target["cut"].get("image_generation"), dict)
-                    else {}
-                ).get("api_prompt_payload")
+                _target_image_generation(target).get("api_prompt_payload")
                 or {}
             ).get("policy_version")
             or ""
@@ -3210,6 +3286,7 @@ def _prepare_image_prompt_request_revision(
             draft_snapshot,
             run_dir=run_dir,
             allow_existing_hash_changes=not is_frozen,
+            preserve_generated_dependencies=True,
         )
         if provider_snapshot.request_revision != draft_snapshot.request_revision:
             if is_frozen:
@@ -4653,15 +4730,97 @@ async def _run_toc_skill_helper_until_stop_target(
         raise
 
 
+async def _signal_helper_process_tree(proc: asyncio.subprocess.Process, sig: int) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(proc.pid, sig)
+            return
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+    if proc.returncode is None:
+        with suppress(ProcessLookupError):
+            proc.send_signal(sig)
+
+
+async def _reap_helper_process(
+    proc: asyncio.subprocess.Process,
+    communication: asyncio.Task[tuple[bytes, bytes]],
+) -> None:
+    """Stop the helper group, drain its pipes, and reap it before rollback."""
+
+    await _signal_helper_process_tree(proc, signal.SIGTERM)
+    try:
+        await asyncio.wait_for(asyncio.shield(communication), timeout=1.0)
+    except asyncio.TimeoutError:
+        await _signal_helper_process_tree(proc, signal.SIGKILL)
+        if proc.returncode is None:
+            with suppress(ProcessLookupError):
+                proc.kill()
+        try:
+            await asyncio.wait_for(asyncio.shield(communication), timeout=3.0)
+        except asyncio.TimeoutError:
+            # A detached descendant can keep inherited pipes open after the
+            # process group is gone. The leader is still killed/reaped below;
+            # cancel the pipe drain only after that bounded escalation.
+            communication.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await communication
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=2.0)
+    except asyncio.TimeoutError:
+        if proc.returncode is None:
+            with suppress(ProcessLookupError):
+                proc.kill()
+        await proc.wait()
+
+
+async def _finish_helper_cleanup_shielded(
+    cleanup: asyncio.Task[None],
+) -> None:
+    """Do not let caller cancellation interrupt process cleanup."""
+
+    cancelled = False
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            cancelled = True
+    with suppress(Exception):
+        await cleanup
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 async def _run_helper_command(*args: str, timeout: int = 1800) -> str:
+    launch_options: dict[str, Any] = {}
+    if os.name == "posix":
+        # Keep ordinary subprocess descendants in a group the API can terminate
+        # if the caller times out or cancels the transaction.
+        launch_options["start_new_session"] = True
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         *args,
         cwd=str(ROOT),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        **launch_options,
     )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    communication = asyncio.create_task(proc.communicate())
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.shield(communication), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        cleanup = asyncio.create_task(_reap_helper_process(proc, communication))
+        await _finish_helper_cleanup_shielded(cleanup)
+        raise
+    except asyncio.CancelledError:
+        cleanup = asyncio.create_task(_reap_helper_process(proc, communication))
+        with suppress(asyncio.CancelledError):
+            await _finish_helper_cleanup_shielded(cleanup)
+        raise
     if proc.returncode != 0:
         detail = stderr.decode("utf-8", errors="replace").strip() or stdout.decode("utf-8", errors="replace").strip()
         raise RuntimeError(detail or f"{Path(args[0]).name} exited with status {proc.returncode}")
@@ -5128,16 +5287,46 @@ def _server_video_execution_options(
     has_first_frame: bool,
     has_reference_images: bool = False,
     native_audio_mode: str = 'off',
+    model: str | None = None,
+    multi_shots: bool | None = None,
+    elements: list[str] | None = None,
 ) -> dict[str, Any]:
     load_env_files(repo_root=ROOT)
     if native_audio_mode != 'off' and tool != 'higgsfield':
         raise ValueError('同期音声を使うには対応するHiggsfieldモデルを選んでください')
     if tool == 'higgsfield':
-        from toc.providers.higgsfield import IMAGE_MODEL, REFERENCE_MODEL
+        from toc.providers.higgsfield import (
+            IMAGE_MODEL,
+            KLING_IMAGE_MODEL,
+            REFERENCE_MODEL,
+            SUPPORTED_MODELS,
+        )
         if has_first_frame and has_reference_images:
             raise ValueError('Higgsfield frame/reference inputs cannot be combined')
-        return {'backend': 'higgsfield', 'model': IMAGE_MODEL if has_first_frame else REFERENCE_MODEL,
-                'generate_audio': native_audio_mode != 'off'}
+        if model is not None and not isinstance(model, str):
+            raise ValueError('Higgsfield model must be a string')
+        requested_model = str(model or '').strip()
+        if requested_model and requested_model not in SUPPORTED_MODELS:
+            raise ValueError(f'Unsupported Higgsfield model: {requested_model}')
+        selected_model = requested_model or (IMAGE_MODEL if has_first_frame else REFERENCE_MODEL)
+        if multi_shots is not None and not isinstance(multi_shots, bool):
+            raise ValueError('Higgsfield multi_shots must be a boolean')
+        if multi_shots:
+            raise ValueError('Higgsfield native multi_shots is not implemented')
+        if elements is not None and not isinstance(elements, list):
+            raise ValueError('Higgsfield elements must be a list')
+        if elements:
+            raise ValueError('Higgsfield elements are not implemented')
+        options = {
+            'backend': 'higgsfield',
+            'model': selected_model,
+            'generate_audio': native_audio_mode != 'off',
+        }
+        if selected_model == KLING_IMAGE_MODEL:
+            options['multi_shots'] = False
+            if elements is not None:
+                options['elements'] = elements
+        return options
     if tool in {"kling_3_0", "kling_3_0_omni"}:
         is_omni = tool == "kling_3_0_omni"
         model = (
@@ -5156,26 +5345,49 @@ def _server_video_execution_options(
             "extra_payload": extra_payload or {},
         }
     if tool == "seedance":
-        if has_first_frame or has_reference_images:
-            model = (
+        if model is not None and not isinstance(model, str):
+            raise ValueError('Seedance model must be a string')
+        requested_model = str(model or '').strip()
+        if requested_model:
+            selected_model = requested_model
+        elif has_first_frame or has_reference_images:
+            selected_model = (
                 os.environ.get("ARK_SEEDANCE_I2V_MODEL")
                 or os.environ.get("SEEDANCE_I2V_MODEL")
                 or "seedance-1-0-lite-i2v-250428"
             )
         else:
-            model = (
+            selected_model = (
                 os.environ.get("ARK_SEEDANCE_T2V_MODEL")
                 or os.environ.get("SEEDANCE_T2V_MODEL")
                 or "seedance-1-0-pro-250528"
             )
         return {
             "backend": "ark",
-            "model": str(model),
+            "model": str(selected_model),
             "generate_audio": False,
             "watermark": False,
             "extra_payload": _parse_optional_json_env("ARK_EXTRA_JSON") or {},
         }
     return {"backend": tool}
+
+
+def _is_higgsfield_kling_model(model: Any) -> bool:
+    from toc.providers.higgsfield import KLING_IMAGE_MODEL
+
+    return str(model or "").strip() == KLING_IMAGE_MODEL
+
+
+def _higgsfield_quality_for_model(
+    *, model: Any, requested_quality: Any,
+) -> str | None:
+    if _is_higgsfield_kling_model(model):
+        if requested_quality not in (None, ""):
+            raise ValueError(
+                "Higgsfield Kling 3.0 Standard does not support a resolution override; use the model default"
+            )
+        return None
+    return str(requested_quality or "1080p").strip()
 
 
 def _video_generation_provider_context(
@@ -5187,8 +5399,15 @@ def _video_generation_provider_context(
     payload = _dict_value(video_generation.get("api_prompt_payload"))
     binding = _dict_value(payload.get("provider_request_binding"))
     execution_options = _dict_value(binding.get("execution_options"))
-    model = str(execution_options.get("model") or "").strip()
-    mode = str(input_mode or payload.get("mode") or "").strip()
+    model = str(
+        execution_options.get("model") or video_generation.get("model") or ""
+    ).strip()
+    mode = str(
+        input_mode
+        or payload.get("mode")
+        or video_generation.get("input_mode")
+        or ""
+    ).strip()
     if not mode:
         references = _list_value(video_generation.get("references"))
         first_frame = str(
@@ -5196,7 +5415,16 @@ def _video_generation_provider_context(
             or video_generation.get("input_image")
             or ""
         ).strip()
-        mode = "reference_images" if references and not first_frame else ""
+        last_frame = str(video_generation.get("last_frame") or "").strip()
+        mode = (
+            "reference_to_video"
+            if references and not first_frame
+            else "first_last_frame"
+            if first_frame and last_frame
+            else "image_to_video"
+            if first_frame
+            else "text_to_video"
+        )
     return tool, model, mode
 
 
@@ -5272,7 +5500,13 @@ def _assert_video_request_within_provider_capabilities(
     if issues:
         raise ValueError("; ".join(issues))
     if request.tool == 'higgsfield':
-        if request.quality not in {'480p', '720p', '1080p'}:
+        model = str(execution_options.get("model") or "").strip()
+        if _is_higgsfield_kling_model(model):
+            if request.quality not in (None, ""):
+                raise ValueError(
+                    "Higgsfield Kling 3.0 Standard does not support a resolution override; use the model default"
+                )
+        elif request.quality not in {'480p', '720p', '1080p'}:
             raise ValueError('Higgsfield Seedance 2.5 supports 480p, 720p, 1080p')
         if request.references and (request.first_reference or request.last_reference):
             raise ValueError('Higgsfield frame/reference inputs cannot be combined')
@@ -5382,6 +5616,28 @@ def _redact_video_provider_log_payload(value: Any) -> Any:
     return _HTTP_URL_IN_LOG_RE.sub(redact_url, value)
 
 
+def _provider_input_image_hash(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _kling_submit_endpoint(client: Any, *, input_image: Path | None) -> str:
+    config = getattr(client, "config", None)
+    if input_image is None:
+        submit_path = (
+            os.environ.get("KLING_TEXT2VIDEO_SUBMIT_PATH")
+            or "/v1/videos/text2video"
+        )
+    else:
+        submit_path = getattr(config, "submit_path", "/v1/videos/image2video")
+    resolver = getattr(client, "_resolve_url", None)
+    if callable(resolver):
+        return str(resolver(str(submit_path)))
+    base = str(getattr(config, "api_base", "https://api.klingai.com"))
+    return f"{base.rstrip('/')}/{str(submit_path).lstrip('/')}"
+
+
 def _generate_kling_video_file(
     *,
     request: VideoGenerateItem,
@@ -5398,19 +5654,66 @@ def _generate_kling_video_file(
     if extra_payload is not None and not isinstance(extra_payload, dict):
         raise ValueError("materialized Kling extra_payload must be an object")
     client = KlingClient(KlingConfig.from_env(video_model=model))
-    submit = client.start_video_generation(
-        prompt=request.prompt,
-        duration_seconds=int(request.duration_seconds),
-        aspect_ratio=request.aspect_ratio,
-        resolution=request.quality,
-        input_image=input_image,
-        last_frame_image=last_frame_image,
-        negative_prompt=(request.negative_prompt or "").strip() or None,
-        model=model,
-        extra_payload=extra_payload,
-        timeout_seconds=180.0,
+    if hasattr(client, "_last_status_path_template"):
+        if input_image is None:
+            status_template = (
+                os.environ.get("KLING_TEXT2VIDEO_STATUS_PATH_TEMPLATE")
+                or "/v1/videos/text2video/{operation_id}"
+            )
+        else:
+            status_template = (
+                os.environ.get("KLING_IMAGE2VIDEO_STATUS_PATH_TEMPLATE")
+                or getattr(client.config, "status_path_template", "")
+            )
+        client._last_status_path_template = status_template
+    submission_payload: dict[str, Any] | None = None
+    if current_provider_submission_scope() is not None:
+        payload_builder = getattr(client, "build_video_payload", None)
+        if callable(payload_builder):
+            submission_payload = payload_builder(
+                prompt=request.prompt,
+                duration_seconds=int(request.duration_seconds),
+                aspect_ratio=request.aspect_ratio,
+                resolution=request.quality or "1080p",
+                input_image=input_image,
+                last_frame_image=last_frame_image,
+                negative_prompt=(request.negative_prompt or "").strip() or None,
+                model=model,
+                extra_payload=extra_payload,
+            )
+        else:
+            # Lightweight adapter doubles used by callers may omit the
+            # provider's payload builder. Bind their equivalent request inputs
+            # and image bytes without persisting either value.
+            submission_payload = {
+                "model": model,
+                "prompt": request.prompt,
+                "duration_seconds": int(request.duration_seconds),
+                "aspect_ratio": request.aspect_ratio,
+                "resolution": request.quality or "1080p",
+                "negative_prompt": (request.negative_prompt or "").strip() or None,
+                "extra_payload": extra_payload,
+                "input_image_sha256": _provider_input_image_hash(input_image),
+                "last_frame_image_sha256": _provider_input_image_hash(last_frame_image),
+            }
+    submit, operation_id = submit_provider_request(
+        provider="kling",
+        payload=submission_payload,
+        endpoint=_kling_submit_endpoint(client, input_image=input_image),
+        submit=lambda: client.start_video_generation(
+            prompt=request.prompt,
+            duration_seconds=int(request.duration_seconds),
+            aspect_ratio=request.aspect_ratio,
+            resolution=request.quality or "1080p",
+            input_image=input_image,
+            last_frame_image=last_frame_image,
+            negative_prompt=(request.negative_prompt or "").strip() or None,
+            model=model,
+            extra_payload=extra_payload,
+            timeout_seconds=180.0,
+        ),
+        extract_id=client.extract_operation_id,
     )
-    operation_id = client.extract_operation_id(submit)
     operation = client.poll_operation(
         operation_id_or_url=operation_id,
         poll_every_seconds=_video_poll_every_seconds(),
@@ -5445,7 +5748,7 @@ def _generate_seedance_video_file(
         prompt=request.prompt,
         duration_seconds=int(request.duration_seconds),
         ratio=request.aspect_ratio,
-        resolution=request.quality,
+        resolution=request.quality or "1080p",
         input_image=input_image,
         last_frame_image=last_frame_image,
         reference_images=reference_images,
@@ -5453,8 +5756,21 @@ def _generate_seedance_video_file(
         watermark=bool(execution_options.get("watermark", False)),
         extra_payload=extra_payload,
     )
-    submit = client.create_task(payload=payload)
-    task_id = client.extract_task_id(submit)
+    config = getattr(client, "config", None)
+    submit_path = str(getattr(config, "submit_path", "/contents/generations/tasks"))
+    api_base = str(getattr(config, "api_base", "https://ark.ap-southeast.bytepluses.com/api/v3"))
+    submit_endpoint = (
+        f"{api_base.rstrip('/')}/{submit_path.lstrip('/')}"
+        if not submit_path.startswith(("http://", "https://"))
+        else submit_path
+    )
+    submit, task_id = submit_provider_request(
+        provider="seedance",
+        payload=payload,
+        endpoint=submit_endpoint,
+        submit=lambda: client.create_task(payload=payload),
+        extract_id=client.extract_task_id,
+    )
     task = client.poll_task(
         task_id=task_id,
         poll_every_seconds=_video_poll_every_seconds(),
@@ -5498,26 +5814,34 @@ def _generate_video_file_blocking(
             reference_images=reference_images,
         )
         if request.tool in {"kling_3_0", "kling_3_0_omni"}:
-            provider_result = _generate_kling_video_file(
-                request=request,
-                input_image=provider_input_image,
-                last_frame_image=provider_last_frame_image,
-                out_path=destination,
-            )
+            with provider_submission_scope(
+                run_dir,
+                provider="kling",
+                scope=destination.relative_to(run_dir).as_posix(),
+            ):
+                provider_result = _generate_kling_video_file(
+                    request=request,
+                    input_image=provider_input_image,
+                    last_frame_image=provider_last_frame_image,
+                    out_path=destination,
+                )
         elif request.tool == 'higgsfield':
-            from toc.providers.higgsfield import HiggsfieldClient
+            from toc.providers.higgsfield import HiggsfieldClient, KLING_IMAGE_MODEL
             from toc.providers.video_validation import verify_generated_video
             load_env_files(repo_root=ROOT)
             options = request.provider_execution_options
+            selected_model = str(options.get('model') or '')
+            resolution = None if selected_model == KLING_IMAGE_MODEL else request.quality
             identity = hashlib.sha256((destination.relative_to(run_dir).as_posix() + ':' +
                 str(request.prompt_source_digest)).encode()).hexdigest()
             pending = destination.with_name('.' + destination.stem + '.unverified.mp4')
             try:
                 provider_result = HiggsfieldClient.from_env().generate_video(
                     model=str(options.get('model') or ''), prompt=request.prompt,
-                    duration_seconds=request.duration_seconds, aspect_ratio=request.aspect_ratio, resolution=request.quality,
+                    duration_seconds=request.duration_seconds, aspect_ratio=request.aspect_ratio, resolution=resolution,
                     input_image=provider_input_image, last_frame_image=provider_last_frame_image,
                     reference_images=provider_reference_images, generate_audio=bool(options.get('generate_audio', False)),
+                    multi_shots=options.get('multi_shots', False), elements=options.get('elements'),
                     out_path=pending, journal_path=run_dir / 'logs/providers/higgsfield' / f'{identity}.json',
                     request_digest=identity, poll_every_seconds=_video_poll_every_seconds(), timeout_seconds=_video_timeout_seconds())
                 if provider_result.get('status') != 'completed':
@@ -5530,13 +5854,18 @@ def _generate_video_file_blocking(
             finally:
                 pending.unlink(missing_ok=True)
         elif request.tool == "seedance":
-            provider_result = _generate_seedance_video_file(
-                request=request,
-                input_image=provider_input_image,
-                last_frame_image=provider_last_frame_image,
-                reference_images=provider_reference_images,
-                out_path=destination,
-            )
+            with provider_submission_scope(
+                run_dir,
+                provider="seedance",
+                scope=destination.relative_to(run_dir).as_posix(),
+            ):
+                provider_result = _generate_seedance_video_file(
+                    request=request,
+                    input_image=provider_input_image,
+                    last_frame_image=provider_last_frame_image,
+                    reference_images=provider_reference_images,
+                    out_path=destination,
+                )
         else:
             raise ValueError(f"unsupported video tool: {request.tool}")
     finally:
@@ -5817,6 +6146,10 @@ def _materialized_video_generate_item(
     """
 
     _manifest_path, _original_text, data = _read_manifest_data(run_dir)
+    try:
+        validate_result_state_references(data)
+    except AssetStateVariantError as exc:
+        raise ValueError(str(exc)) from exc
     target = _video_target_by_item_id(data, request.item_id)
     if target is None:
         raise ValueError(f"materialized video prompt target not found: {request.item_id}")
@@ -5857,12 +6190,34 @@ def _materialized_video_generate_item(
         video_generation.get("first_frame") or video_generation.get("input_image") or ""
     ).strip()
     last_reference = str(video_generation.get("last_frame") or "").strip()
+    if _dict_value(video_generation.get("result_state_reference")).get("required") is True:
+        try:
+            _validate_run_relative_image_path(run_dir, last_reference, must_exist=True)
+        except (FileNotFoundError, ValueError) as exc:
+            raise ValueError(
+                f"{request.item_id}: required scene-specific result frame is missing or invalid: {exc}"
+            ) from exc
     references = [
         str(value).strip()
         for value in _list_value(video_generation.get("references"))
         if str(value).strip()
     ]
-    quality = str(video_generation.get("quality") or "1080p").strip()
+    provider_binding = _dict_value(payload.get("provider_request_binding"))
+    bound_execution_options = _dict_value(provider_binding.get("execution_options"))
+    bound_model = str(bound_execution_options.get("model") or "").strip()
+    is_model_default_quality = _is_higgsfield_kling_model(bound_model)
+    if (
+        is_model_default_quality
+        and "quality" in getattr(request, "model_fields_set", set())
+        and request.quality not in (None, "")
+    ):
+        raise ValueError(
+            "Higgsfield Kling 3.0 Standard does not support a resolution override; use the model default"
+        )
+    quality = _higgsfield_quality_for_model(
+        model=bound_model,
+        requested_quality=video_generation.get("quality"),
+    )
     aspect_ratio = str(video_generation.get("aspect_ratio") or "16:9").strip()
     duration_seconds = int(video_generation.get("duration_seconds") or 8)
     tool = str(video_generation.get("tool") or "kling_3_0").strip()
@@ -5875,7 +6230,11 @@ def _materialized_video_generate_item(
     for field, submitted, materialized in (
         ("first_reference", (request.first_reference or "").strip(), first_reference),
         ("last_reference", (request.last_reference or "").strip(), last_reference),
-        ("quality", request.quality, quality),
+        (
+            "quality",
+            None if is_model_default_quality else request.quality,
+            quality,
+        ),
         ("aspect_ratio", request.aspect_ratio, aspect_ratio),
         ("duration_seconds", request.duration_seconds, duration_seconds),
         ("tool", request.tool, tool),
@@ -5949,7 +6308,7 @@ def _materialized_video_generate_item(
         "tool": tool,
         "output": str(video_generation.get("output") or "").strip(),
         "duration_seconds": str(duration_seconds),
-        "quality": quality,
+        "quality": quality or "",
         "aspect_ratio": aspect_ratio,
         "first_frame": first_reference,
         "last_frame": last_reference,
@@ -6602,7 +6961,10 @@ def _is_non_renderable_manifest_node(node: dict[str, Any]) -> bool:
 
 
 def _manifest_scene_targets(
-    data: dict[str, Any], *, include_non_renderable: bool = False
+    data: dict[str, Any],
+    *,
+    include_non_renderable: bool = False,
+    include_auxiliary_image_targets: bool = False,
 ) -> list[dict[str, Any]]:
     scenes = data.get("scenes")
     if not isinstance(scenes, list):
@@ -6626,9 +6988,10 @@ def _manifest_scene_targets(
                 cut_id = normalize_dotted_id(cut.get("cut_id")) or str(cut_index + 1)
                 aliases = selector_aliases(scene_id, cut_id)
                 aliases.add(make_scene_cut_selector(scene_id, cut_id))
+                selector = make_scene_cut_selector(scene_id, cut_id)
                 targets.append(
                     {
-                        "selector": make_scene_cut_selector(scene_id, cut_id),
+                        "selector": selector,
                         "aliases": aliases,
                         "scene": scene,
                         "scene_id": scene_id,
@@ -6638,6 +7001,38 @@ def _manifest_scene_targets(
                         "scene_index": scene_index,
                     }
                 )
+                if include_auxiliary_image_targets:
+                    video_generation = cut.get("video_generation")
+                    video_generation = (
+                        video_generation
+                        if isinstance(video_generation, dict)
+                        else {}
+                    )
+                    result_frame = video_generation.get("result_frame")
+                    result_frame = (
+                        result_frame if isinstance(result_frame, dict) else {}
+                    )
+                    result_image_generation = result_frame.get("image_generation")
+                    if isinstance(result_image_generation, dict):
+                        result_aliases = {
+                            f"{alias}_result_frame" for alias in aliases
+                        }
+                        result_selector = f"{selector}_result_frame"
+                        result_aliases.add(result_selector)
+                        targets.append(
+                            {
+                                "selector": result_selector,
+                                "aliases": result_aliases,
+                                "scene": scene,
+                                "scene_id": scene_id,
+                                "cuts": cuts,
+                                "cut": cut,
+                                "cut_index": cut_index,
+                                "scene_index": scene_index,
+                                "image_generation": result_image_generation,
+                                "auxiliary_image_target": True,
+                            }
+                        )
             continue
         aliases = selector_aliases(scene_id)
         aliases.add(make_scene_cut_selector(scene_id))
@@ -6656,7 +7051,161 @@ def _manifest_scene_targets(
     return targets
 
 
-def _target_by_item_id(data: dict[str, Any], item_id: str) -> dict[str, Any] | None:
+def _validated_shot_schedule(
+    parent_cut: dict[str, Any],
+    *,
+    parent_selector: str,
+    parent_aliases: set[str] | None = None,
+) -> list[tuple[dict[str, Any], str, Decimal, Decimal, int]]:
+    try:
+        entries = validate_projected_shot_schedule(
+            parent_cut,
+            parent_selector=parent_selector,
+            parent_aliases=parent_aliases,
+        )
+    except ShotTimelineError:
+        raise
+    return [
+        (
+            entry["shot"],
+            str(entry["selector"]),
+            entry["start_seconds"],
+            entry["duration_seconds"],
+            int(entry["provider_duration_seconds"]),
+        )
+        for entry in entries
+    ]
+
+
+def _manifest_shot_targets(
+    data: dict[str, Any],
+    *,
+    parent_selector: str | None = None,
+    include_auxiliary_image_targets: bool = False,
+) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    parent_targets = _manifest_scene_targets(data)
+    for parent in parent_targets:
+        selector = str(parent.get("selector") or "")
+        parent_aliases = set(parent.get("aliases") or {selector})
+        if parent_selector and parent_selector != selector and parent_selector not in parent_aliases:
+            continue
+        cut = parent.get("cut") if isinstance(parent.get("cut"), dict) else {}
+        if cut.get("shot_plan") is None:
+            continue
+        for shot, shot_selector, start, duration, api_duration in _validated_shot_schedule(
+            cut,
+            parent_selector=selector,
+            parent_aliases=parent_aliases,
+        ):
+            generation = _dict_value(shot.get("video_generation"))
+            target = {
+                "selector": shot_selector,
+                "aliases": {shot_selector},
+                "scene": parent["scene"],
+                "scene_id": parent["scene_id"],
+                "cuts": parent.get("cuts"),
+                "cut": shot,
+                "cut_index": parent.get("cut_index"),
+                "scene_index": parent.get("scene_index"),
+                "image_generation": _dict_value(shot.get("image_generation")),
+                "video_generation": generation,
+                "cut_contract": _dict_value(shot.get("cut_contract")),
+                "parent_cut": cut,
+                "parent_selector": selector,
+                "authored_parent_selector": str(
+                    shot.get("parent_selector")
+                    or cut.get("selector")
+                    or selector
+                ).strip(),
+                "parent_cut_selector": selector,
+                "shot_id": str(shot.get("shot_id") or ""),
+                "start_seconds": float(start),
+                "timeline_duration_seconds": float(duration),
+                "provider_duration_seconds": api_duration,
+                "is_shot": True,
+            }
+            targets.append(target)
+            if include_auxiliary_image_targets:
+                result_frame = generation.get("result_frame")
+                if not isinstance(result_frame, dict):
+                    continue
+                result_image_generation = result_frame.get("image_generation")
+                result_image_generation = (
+                    result_image_generation if isinstance(result_image_generation, dict) else {}
+                )
+                result_output = str(
+                    result_frame.get("output") or result_image_generation.get("output") or ""
+                ).strip()
+                if not result_output:
+                    if _dict_value(generation.get("result_state_reference")).get("required") is True:
+                        raise ValueError(f"{shot_selector}: required result_frame.output is missing")
+                    continue
+                if result_image_generation.get("output") != result_output:
+                    raise ValueError(f"{shot_selector}: result_frame output must match image_generation.output")
+                result_selector = f"{shot_selector}_result_frame"
+                result_target = dict(target)
+                result_target.update(
+                    selector=result_selector,
+                    aliases={result_selector},
+                    image_generation=result_image_generation,
+                    auxiliary_image_target=True,
+                )
+                targets.append(result_target)
+    return targets
+
+
+def _manifest_image_targets(
+    data: dict[str, Any], *, include_auxiliary_image_targets: bool = True
+) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    for target in _manifest_scene_targets(
+        data,
+        include_auxiliary_image_targets=include_auxiliary_image_targets,
+    ):
+        cut = target.get("cut") if isinstance(target.get("cut"), dict) else {}
+        if target.get("auxiliary_image_target"):
+            targets.append(target)
+            continue
+        if cut.get("shot_plan") is not None:
+            targets.extend(
+                _manifest_shot_targets(
+                    data,
+                    parent_selector=str(target.get("selector") or ""),
+                    include_auxiliary_image_targets=include_auxiliary_image_targets,
+                )
+            )
+            continue
+        targets.append(target)
+    return targets
+
+
+def _target_image_generation(target: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a primary or same-cut auxiliary image request for a target."""
+
+    image_generation = target.get("image_generation")
+    if isinstance(image_generation, dict):
+        return image_generation
+    cut = target.get("cut")
+    if isinstance(cut, dict) and isinstance(cut.get("image_generation"), dict):
+        return cut["image_generation"]
+    return {}
+
+
+def _target_by_item_id(
+    data: dict[str, Any], item_id: str, *, include_shots: bool = False
+) -> dict[str, Any] | None:
+    if include_shots:
+        shot_target = next(
+            (
+                target
+                for target in _manifest_image_targets(data)
+                if item_id in target["aliases"]
+            ),
+            None,
+        )
+        if shot_target is not None:
+            return shot_target
     return next((target for target in _manifest_scene_targets(data) if item_id in target["aliases"]), None)
 
 
@@ -6807,6 +7356,24 @@ def _manifest_video_targets(data: dict[str, Any]) -> list[dict[str, Any]]:
             "invalid render-unit timeline: " + "; ".join(render_unit_issues[:20])
         )
     cut_targets = _manifest_scene_targets(data)
+    shot_targets = _manifest_shot_targets(data)
+    shots_by_parent: dict[str, list[dict[str, Any]]] = {}
+    for target in shot_targets:
+        generation = _dict_value(target.get("video_generation"))
+        tool, model, input_mode = _video_generation_provider_context(generation)
+        provider_issues = _video_provider_capability_issues(
+            label=str(target.get("selector") or "shot"),
+            tool=tool,
+            model=model,
+            input_mode=input_mode,
+            duration_seconds=int(target.get("provider_duration_seconds") or 0),
+            reference_count=len(_list_value(generation.get("references"))),
+        )
+        if provider_issues:
+            raise ValueError("invalid shot provider contract: " + "; ".join(provider_issues[:20]))
+        shots_by_parent.setdefault(
+            str(target["parent_cut_selector"]), []
+        ).append(target)
     targets: list[dict[str, Any]] = []
     for scene_index, scene in enumerate(scenes):
         if not isinstance(scene, dict) or _is_non_renderable_manifest_node(scene):
@@ -6819,11 +7386,26 @@ def _manifest_video_targets(data: dict[str, Any]) -> list[dict[str, Any]]:
             for unit in _list_value(scene.get("render_units"))
             if isinstance(unit, dict) and not _is_non_renderable_manifest_node(unit)
         ]
+        scene_shot_targets = [
+            target for target in shot_targets if target.get("scene") is scene
+        ]
         if not render_units:
+            targets.extend(scene_shot_targets)
+            shot_parent_selectors = {
+                str(target.get("parent_cut_selector") or "")
+                for target in scene_shot_targets
+            }
             targets.extend(
-                target for target in cut_targets if target.get("scene") is scene
+                target
+                for target in cut_targets
+                if target.get("scene") is scene
+                and str(target.get("selector") or "") not in shot_parent_selectors
             )
             continue
+        if scene_shot_targets:
+            raise ValueError(
+                f"scene{scene_id}: shot plans cannot be combined with scene render_units"
+            )
         for unit_index, unit in enumerate(render_units):
             unit_id = normalize_dotted_id(unit.get("unit_id")) or str(
                 unit_index + 1
@@ -7247,7 +7829,18 @@ def _has_existing_narration_content(narration: dict[str, Any]) -> bool:
 
 def _validate_scene_image_outputs_ready(run_dir: Path, data: dict[str, Any]) -> None:
     missing: list[str] = []
-    for target in _manifest_scene_targets(data):
+    image_targets: list[dict[str, Any]] = []
+    for parent in _manifest_scene_targets(data):
+        if _dict_value(parent.get("cut")).get("shot_plan") is not None:
+            image_targets.extend(
+                _manifest_shot_targets(
+                    data,
+                    parent_selector=str(parent.get("selector") or ""),
+                )
+            )
+        else:
+            image_targets.append(parent)
+    for target in image_targets:
         node = target["cut"]
         image_generation = _dict_value(node.get("image_generation"))
         output = str(image_generation.get("output") or "").strip()
@@ -7772,6 +8365,16 @@ def _assert_current_video_candidate_path(
         raise ValueError(f"stale video candidate revision: {item_id}")
 
 
+def _video_ui_quality(video_generation: dict[str, Any], model: str) -> str | None:
+    tool = str(video_generation.get("tool") or "kling_3_0").strip().lower()
+    if tool == "higgsfield":
+        from toc.providers.higgsfield import KLING_IMAGE_MODEL
+
+        if str(model or "").strip() == KLING_IMAGE_MODEL:
+            return None
+    return str(video_generation.get("quality") or "1080p")
+
+
 def _manifest_narration_items(run_dir: Path, data: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     if data is None:
         _manifest_path, _original_text, data = _read_manifest_data(run_dir)
@@ -7816,12 +8419,66 @@ def _manifest_narration_items(run_dir: Path, data: dict[str, Any] | None = None)
             if revision_aware
             else ("" if narration_silent_ok else _default_narration_output_for_target(target))
         )
+        shot_targets = (
+            _manifest_shot_targets(data, parent_selector=selector)
+            if node.get("shot_plan") is not None
+            else []
+        )
+        shot_target_rows: list[dict[str, Any]] = []
+        if shot_targets:
+            for shot_target in shot_targets:
+                shot_node = _dict_value(shot_target.get("cut"))
+                shot_video = _dict_value(shot_node.get("video_generation"))
+                shot_output = str(
+                    shot_video.get("output")
+                    or _default_video_output_for_target(shot_target)
+                ).strip()
+                shot_candidate = _display_candidate_video_output_for_item(
+                    run_dir,
+                    str(shot_target["selector"]),
+                    manifest_data=data,
+                )
+                shot_resolved = resolve_run_relative(
+                    run_dir,
+                    shot_candidate or shot_output,
+                )
+                _shot_tool, shot_model, _shot_mode = _video_generation_provider_context(
+                    shot_video
+                )
+                shot_target_rows.append(
+                    {
+                        "itemId": shot_target["selector"],
+                        "shotId": shot_target["shot_id"],
+                        "parentSelector": shot_target["parent_selector"],
+                        "videoTool": str(shot_video.get("tool") or "kling_3_0"),
+                        "videoModel": shot_model or None,
+                        "videoQuality": _video_ui_quality(shot_video, shot_model),
+                        "videoOutput": shot_output,
+                        "selectedVideoPath": shot_candidate or shot_output,
+                        "videoExists": shot_resolved.is_file(),
+                        "providerDurationSeconds": shot_target["provider_duration_seconds"],
+                        "timelineStartSeconds": shot_target["start_seconds"],
+                        "timelineDurationSeconds": shot_target[
+                            "timeline_duration_seconds"
+                        ],
+                    }
+                )
         video_output = str(video_generation.get("output") or _default_video_output_for_target(target)).strip()
         candidate_output = _display_candidate_video_output_for_item(run_dir, selector, manifest_data=data)
+        if shot_target_rows:
+            video_output = str(shot_target_rows[0]["videoOutput"])
+            candidate_output = str(shot_target_rows[0]["selectedVideoPath"])
         resolved_audio = resolve_run_relative(run_dir, narration_output) if narration_output else run_dir / "__missing_narration__"
         resolved_video = resolve_run_relative(run_dir, candidate_output or video_output)
         audio_duration = _probe_media_duration_seconds(resolved_audio)
-        video_duration = _probe_media_duration_seconds(resolved_video)
+        video_duration = (
+            sum(
+                float(row["timelineDurationSeconds"])
+                for row in shot_target_rows
+            )
+            if shot_target_rows
+            else _probe_media_duration_seconds(resolved_video)
+        )
         narration_audio_ready = bool(
             revision_aware
             and _narration_grounding_is_current(target, narration)
@@ -7852,10 +8509,20 @@ def _manifest_narration_items(run_dir: Path, data: dict[str, Any] | None = None)
         legacy_prompt = str(image_generation.get("prompt") or "")
         prompt = api_prompt if api_prompt_policy.startswith(IMAGE_API_PROMPT_POLICY_PREFIX) else api_prompt or legacy_prompt
         configured_duration = int(
-            render.get("video_duration_seconds")
+            sum(float(row["timelineDurationSeconds"]) for row in shot_target_rows)
+            if shot_target_rows
+            else render.get("video_duration_seconds")
             or video_generation.get("duration_seconds")
             or math.ceil(audio_duration or 8)
         )
+        parent_video_model = _video_generation_provider_context(video_generation)[1]
+        if shot_target_rows:
+            first_shot_node = _dict_value(shot_targets[0].get("cut"))
+            first_shot_video = _dict_value(first_shot_node.get("video_generation"))
+            first_shot_model = _video_generation_provider_context(first_shot_video)[1]
+        else:
+            first_shot_video = {}
+            first_shot_model = ""
         items.append(
             {
                 "itemId": selector,
@@ -7864,9 +8531,16 @@ def _manifest_narration_items(run_dir: Path, data: dict[str, Any] | None = None)
                 "imageOutput": image_generation.get("output"),
                 "videoOutput": video_output,
                 "selectedVideoPath": candidate_output or video_output,
-                "videoExists": resolved_video.is_file(),
+                "videoExists": (
+                    all(bool(row["videoExists"]) for row in shot_target_rows)
+                    if shot_target_rows
+                    else resolved_video.is_file()
+                ),
                 "videoDurationSeconds": video_duration,
                 "configuredVideoDurationSeconds": max(1, configured_duration),
+                "hasShots": bool(shot_target_rows),
+                "shotIds": [str(row["shotId"]) for row in shot_target_rows],
+                "shotTargets": shot_target_rows,
                 "videoPrompt": str(
                     video_generation.get("prompt_authoring_source")
                     or video_generation.get("source_motion_prompt")
@@ -7874,14 +8548,26 @@ def _manifest_narration_items(run_dir: Path, data: dict[str, Any] | None = None)
                     or ""
                 ),
                 "videoTool": str(video_generation.get("tool") or "kling_3_0"),
-                "videoNativeAudioMode": _dict_value(video_generation.get("native_audio")).get("mode", "off"),
-                "videoHasDialogue": bool(_dict_value(video_generation.get("native_audio")).get("dialogue")),
+                "videoModel": parent_video_model or None,
+                "videoNativeAudioMode": (
+                    "off"
+                    if shot_target_rows
+                    else _dict_value(video_generation.get("native_audio")).get("mode", "off")
+                ),
+                "videoHasDialogue": (
+                    False
+                    if shot_target_rows
+                    else bool(_dict_value(video_generation.get("native_audio")).get("dialogue"))
+                ),
                 "cinematicDirection": _dict_value(_dict_value(node.get("cut_contract")).get("cinematic_contract")).get("execution"),
-                "videoQuality": str(video_generation.get("quality") or "1080p"),
-                "videoAspectRatio": str(video_generation.get("aspect_ratio") or "16:9"),
-                "videoFirstReference": str(video_generation.get("first_frame") or video_generation.get("input_image") or ""),
-                "videoLastReference": str(video_generation.get("last_frame") or ""),
-                "videoReferences": list(video_generation.get("references") or []) if isinstance(video_generation.get("references"), list) else [],
+                "videoQuality": _video_ui_quality(
+                    first_shot_video if shot_target_rows else video_generation,
+                    first_shot_model if shot_target_rows else parent_video_model,
+                ),
+                "videoAspectRatio": str((first_shot_video if shot_target_rows else video_generation).get("aspect_ratio") or "16:9"),
+                "videoFirstReference": str((first_shot_video if shot_target_rows else video_generation).get("first_frame") or (first_shot_video if shot_target_rows else video_generation).get("input_image") or ""),
+                "videoLastReference": str((first_shot_video if shot_target_rows else video_generation).get("last_frame") or ""),
+                "videoReferences": list((first_shot_video if shot_target_rows else video_generation).get("references") or []) if isinstance((first_shot_video if shot_target_rows else video_generation).get("references"), list) else [],
                 "narrationText": str(narration.get("text") or ""),
                 "narrationTtsText": str(narration.get("tts_text") or ""),
                 "narrationOutput": narration_output or None,
@@ -7979,6 +8665,10 @@ def _manifest_video_items(
             or ""
         ).strip()
         configured_duration = int(video_generation.get("duration_seconds") or 8)
+        video_tool, video_model, _video_mode = _video_generation_provider_context(
+            video_generation,
+            input_mode=video_input_mode,
+        )
         items.append(
             {
                 "id": selector,
@@ -7991,6 +8681,8 @@ def _manifest_video_items(
                 "debugPromptSource": {
                     "videoTarget": "render_unit"
                     if target.get("is_render_unit")
+                    else "shot"
+                    if target.get("is_shot")
                     else "cut",
                     "sourceCutIds": _list_value(node.get("source_cut_ids")),
                 },
@@ -8004,6 +8696,12 @@ def _manifest_video_items(
                 "candidates": [],
                 "sceneId": target.get("scene_id"),
                 "isRenderUnit": bool(target.get("is_render_unit")),
+                "hasShots": bool(target.get("is_shot")),
+                "parentSelector": target.get("parent_selector"),
+                "shotId": target.get("shot_id"),
+                "timelineStartSeconds": target.get("start_seconds"),
+                "timelineDurationSeconds": target.get("timeline_duration_seconds"),
+                "providerDurationSeconds": target.get("provider_duration_seconds", configured_duration),
                 "sourceCutIds": _list_value(node.get("source_cut_ids")),
                 "videoPrompt": prompt_authoring_source,
                 "videoOutput": video_output,
@@ -8011,11 +8709,12 @@ def _manifest_video_items(
                 "videoExists": resolved_video.is_file(),
                 "videoDurationSeconds": _probe_media_duration_seconds(resolved_video),
                 "configuredVideoDurationSeconds": max(1, configured_duration),
-                "videoTool": str(video_generation.get("tool") or "kling_3_0"),
+                "videoTool": str(video_generation.get("tool") or video_tool or "kling_3_0"),
+                "videoModel": video_model or None,
                 "videoNativeAudioMode": _dict_value(video_generation.get("native_audio")).get("mode", "off"),
                 "videoHasDialogue": bool(_dict_value(video_generation.get("native_audio")).get("dialogue")),
                 "cinematicDirection": _dict_value(_dict_value(node.get("cut_contract")).get("cinematic_contract")).get("execution"),
-                "videoQuality": str(video_generation.get("quality") or "1080p"),
+                "videoQuality": _video_ui_quality(video_generation, video_model),
                 "videoAspectRatio": str(
                     video_generation.get("aspect_ratio") or "16:9"
                 ),
@@ -8479,6 +9178,10 @@ def _render_unit_timeline_issues(
         if _list_value(scene.get("render_units")):
             continue
         node = _dict_value(target.get("cut"))
+        if node.get("shot_plan") is not None:
+            # Shot clips are validated independently from their parent-cut
+            # narration/render timeline and have their own provider durations.
+            continue
         render = _dict_value(node.get("render"))
         generation = _dict_value(node.get("video_generation"))
         duration = _int_value(
@@ -8712,9 +9415,11 @@ def _apply_narration_timeline(
                 f"narration timeline would truncate audio for {item.item_id}: "
                 f"required={required_duration}s requested={item.video_duration_seconds}s"
             )
-        if item.item_id not in preserve_generation_items:
+        shot_plan_parent = node.get("shot_plan") is not None
+        if not shot_plan_parent and item.item_id not in preserve_generation_items:
             video_generation["duration_seconds"] = item.video_duration_seconds
-        node["video_generation"] = video_generation
+        if not shot_plan_parent:
+            node["video_generation"] = video_generation
         render["video_duration_seconds"] = item.video_duration_seconds
         render["narration_offset_seconds"] = float(item.narration_offset_seconds)
         node["render"] = render
@@ -8899,6 +9604,76 @@ def _prepare_render_video_clip(
     return prepared
 
 
+def _prepare_render_shot_clip(
+    run_dir: Path,
+    source: Path,
+    *,
+    item_id: str,
+    duration_seconds: float,
+) -> Path:
+    """Trim a provider-length shot clip to its exact parent-cut timeline span."""
+
+    duration = float(duration_seconds)
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError(f"{item_id}: shot timeline duration must be finite and positive")
+    from toc.media_resume import ACTIVE_MEDIA_JOURNAL
+
+    journal = ACTIVE_MEDIA_JOURNAL.get()
+    if journal is not None:
+        journal.bind_file(source.relative_to(run_dir).as_posix())
+    output = _render_asset_dir(run_dir, "video") / (
+        f"{_safe_artifact_id(item_id)}_{round(duration * 1000):08d}ms.mp4"
+    )
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        _require_shot_render_duration(source, expected_seconds=duration, label=item_id)
+        return source
+    try:
+        subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-y",
+                "-i",
+                str(source),
+                "-t",
+                f"{duration:.6f}",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+                str(output),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise ValueError(f"failed to prepare p910 shot clip: {item_id}: {exc}") from exc
+    if not output.is_file():
+        raise ValueError(f"p910 shot preparation produced no output: {item_id}")
+    _require_shot_render_duration(output, expected_seconds=duration, label=item_id)
+    return output
+
+
+def _require_shot_render_duration(
+    path: Path, *, expected_seconds: float, label: str
+) -> None:
+    actual = _probe_media_duration_seconds(path)
+    tolerance = max(0.06, float(expected_seconds) * 0.01)
+    if actual is None or abs(float(actual) - float(expected_seconds)) > tolerance:
+        raise ValueError(
+            f"{label} shot duration does not match the render timeline: "
+            f"actual={actual} expected={expected_seconds:.3f}s"
+        )
+
+
 def _prepare_render_narration(
     run_dir: Path,
     source: Path,
@@ -9015,8 +9790,12 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
             if selected_video_path(run_dir, str(target['selector']), data):
                 selected_ids.add(str(target['selector']))
     timeline_hash = _apply_narration_timeline(data, req.items, preserve_generation_items=selected_ids)
+    shot_parent_selectors = {
+        str(target.get("parent_cut_selector") or "")
+        for target in _manifest_shot_targets(data)
+    }
     for item in req.items:
-        if item.video_path:
+        if item.video_path and item.item_id not in shot_parent_selectors:
             _assert_current_video_candidate_path(run_dir, item.item_id, item.video_path)
     from server.sound_design_api import freeze as freeze_sound
     from toc import sound_design
@@ -9085,6 +9864,95 @@ def _freeze_render_inputs(run_dir: Path, req: RenderFreezeRequest, *, snapshot_i
             if item is None:
                 raise NarrationRevisionConflict(f"render request is missing canonical item: {selector}")
             node = _dict_value(target["cut"])
+            if node.get("shot_plan") is not None:
+                shot_targets = _manifest_shot_targets(
+                    data,
+                    parent_selector=selector,
+                )
+                if not shot_targets:
+                    raise NarrationRevisionConflict(
+                        f"shot plan has no renderable clips: {selector}"
+                    )
+                expected_parent_duration = sum(
+                    Decimal(str(shot["timeline_duration_seconds"]))
+                    for shot in shot_targets
+                )
+                from toc.shot_direction import parent_duration_seconds
+
+                current_parent_duration = Decimal(
+                    str(parent_duration_seconds(node))
+                )
+                if (
+                    expected_parent_duration != current_parent_duration
+                    or Decimal(item.video_duration_seconds) != current_parent_duration
+                ):
+                    raise NarrationRevisionConflict(
+                        f"shot timeline duration does not match its parent cut: {selector}"
+                    )
+                first_selected_path = ""
+                for shot_target in shot_targets:
+                    shot_selector = str(shot_target["selector"])
+                    shot_node = _dict_value(shot_target.get("cut"))
+                    shot_generation = _dict_value(shot_node.get("video_generation"))
+                    video_path = (
+                        _candidate_video_output_for_item(
+                            run_dir,
+                            shot_selector,
+                            manifest_data=data,
+                        )
+                        or str(shot_generation.get("output") or "").strip()
+                    )
+                    if not video_path:
+                        raise NarrationRevisionConflict(
+                            f"shot video output is missing: {shot_selector}"
+                        )
+                    _assert_current_video_candidate_path(
+                        run_dir,
+                        shot_selector,
+                        video_path,
+                    )
+                    approved_video = approved_videos.get(shot_selector)
+                    if approved_video is None:
+                        raise ValueError(
+                            f"shot clip has no current p860 video approval: {shot_selector}"
+                        )
+                    shot_duration = float(
+                        shot_target["timeline_duration_seconds"]
+                    )
+                    if (
+                        video_path != approved_video["path"]
+                        or abs(
+                            float(approved_video["duration_seconds"])
+                            - shot_duration
+                        )
+                        > 1e-6
+                    ):
+                        raise ValueError(
+                            f"shot clip or duration differs from p860 approval: {shot_selector}"
+                        )
+                    if not first_selected_path:
+                        first_selected_path = video_path
+                    _validate_run_relative_video_path(
+                        run_dir,
+                        video_path,
+                        must_exist=True,
+                    )
+                    video_source = resolve_run_relative(run_dir, video_path)
+                    clips.append(
+                        _prepare_render_shot_clip(
+                            run_dir,
+                            video_source,
+                            item_id=shot_selector,
+                            duration_seconds=shot_duration,
+                        )
+                    )
+                    shot_generation["output"] = video_path
+                    shot_node["video_generation"] = shot_generation
+                if item.video_path and item.video_path != first_selected_path:
+                    raise ValueError(
+                        f"parent cut video path does not match its first approved shot: {selector}"
+                    )
+                continue
             video_generation = _dict_value(node.get("video_generation"))
             video_path = (
                 item.video_path
@@ -9447,6 +10315,10 @@ def _compile_frontend_video_prompt_payload(
     item: FrontendReviewItem,
     run_dir: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        validate_result_state_references(data)
+    except AssetStateVariantError as exc:
+        raise ValueError(str(exc)) from exc
     target = _video_target_by_item_id(data, item.item_id)
     if target is None:
         raise ValueError(f"video manifest target not found: {item.item_id}")
@@ -9489,6 +10361,18 @@ def _compile_frontend_video_prompt_payload(
         if (item.video_first_reference or '').strip() or (item.video_last_reference or '').strip():
             raise ValueError('reference-image mode cannot include frame boundaries')
         last_frame = ''
+    result_binding = _dict_value(video_generation.get("result_state_reference"))
+    if result_binding.get("required") is True:
+        result_frame = _dict_value(video_generation.get("result_frame"))
+        expected_result_frame = str(result_frame.get("output") or "").strip()
+        if reference_image_mode:
+            raise ValueError(
+                f"{item.item_id}: required result-frame conditioning is unsupported in reference-image mode"
+            )
+        if not expected_result_frame or last_frame != expected_result_frame:
+            raise ValueError(
+                f"{item.item_id}: required scene-specific result frame cannot be cleared or replaced"
+            )
     native_audio = _review_native_audio(video_generation, item)
     if 'native_audio' in video_generation or item.video_native_audio_mode is not None:
         video_generation['native_audio'] = native_audio
@@ -9497,6 +10381,21 @@ def _compile_frontend_video_prompt_payload(
         has_first_frame=bool(first_frame),
         has_reference_images=bool(item.video_references),
         native_audio_mode=native_audio['mode'],
+        model=(
+            video_generation.get('model')
+            if tool in {'higgsfield', 'seedance'}
+            else None
+        ),
+        multi_shots=(
+            video_generation.get('multi_shots')
+            if tool == 'higgsfield'
+            else None
+        ),
+        elements=(
+            video_generation.get('elements')
+            if tool == 'higgsfield'
+            else None
+        ),
     )
     reference_content_sha256 = _video_reference_content_sha256(
         run_dir,
@@ -9504,6 +10403,18 @@ def _compile_frontend_video_prompt_payload(
     )
     if reference_content_sha256:
         execution_options["reference_content_sha256"] = reference_content_sha256
+    selected_model = str(execution_options.get("model") or "").strip()
+    quality_source = (
+        item.video_quality
+        if item.video_quality is not None
+        else video_generation.get("quality")
+    )
+    quality = _higgsfield_quality_for_model(
+        model=selected_model,
+        requested_quality=quality_source,
+    )
+    if _is_higgsfield_kling_model(selected_model):
+        video_generation["quality"] = None
     payload = compile_video_api_prompt_v1(
         cut_contract=_video_contract_for_server_target(target),
         scene_contract=node.get("scene_contract") if isinstance(node.get("scene_contract"), dict) else {},
@@ -9521,7 +10432,7 @@ def _compile_frontend_video_prompt_payload(
             if input_contract
             else None
         ),
-        quality=item.video_quality or str(video_generation.get("quality") or "1080p"),
+        quality=quality,
         aspect_ratio=item.video_aspect_ratio
         or str(video_generation.get("aspect_ratio") or "16:9"),
         execution_options=execution_options,
@@ -9547,6 +10458,10 @@ def _compile_frontend_video_prompt_payload(
             _scene_visualizable_action(scene)
         ),
     )
+    if _is_higgsfield_kling_model(selected_model):
+        provider_binding = _dict_value(payload.get("provider_request_binding"))
+        provider_binding["quality"] = None
+        payload["provider_request_binding"] = provider_binding
     return target, payload
 
 
@@ -9759,7 +10674,31 @@ def _effective_video_materialization_items(
             has_first_frame=bool(first_reference),
             has_reference_images=bool(references),
             native_audio_mode=_review_native_audio(generation, effective_item)['mode'],
+            model=(
+                generation.get('model')
+                if selected_tool in {'higgsfield', 'seedance'}
+                else None
+            ),
+            multi_shots=(
+                generation.get('multi_shots')
+                if selected_tool == 'higgsfield'
+                else None
+            ),
+            elements=(
+                generation.get('elements')
+                if selected_tool == 'higgsfield'
+                else None
+            ),
         )
+        if _is_higgsfield_kling_model(provider_options.get("model")):
+            _higgsfield_quality_for_model(
+                model=provider_options.get("model"),
+                requested_quality=(
+                    effective_item.video_quality
+                    if effective_item.video_quality is not None
+                    else generation.get("quality")
+                ),
+            )
         input_mode = (
             "first_last_frame"
             if first_reference and last_reference
@@ -9828,6 +10767,10 @@ def _write_video_prompt_design(
         source_prompt = _video_prompt_for_request(item)
         payload = payloads[item.item_id]
         prompt = str(payload.get("prompt") or "")
+        video_quality_binding = _dict_value(
+            payload.get("provider_request_binding")
+        ).get("quality")
+        video_quality = str(video_quality_binding or "")
         original = existing_items.get(item.item_id)
         prompt_changed = bool(original and item.prompt.strip() and item.prompt.strip() != original.prompt.strip())
         references_changed = bool(original and sorted(item.references) != sorted(original.references))
@@ -9841,7 +10784,7 @@ def _write_video_prompt_design(
                 f"- existing_image: `{item.existing_image or ''}`",
                 f"- prompt_changed: `{str(prompt_changed).lower()}`",
                 f"- references_changed: `{str(references_changed).lower()}`",
-                f"- video_quality: `{item.video_quality or '1080p'}`",
+                f"- video_quality: `{video_quality}`",
                 f"- video_aspect_ratio: `{item.video_aspect_ratio or '16:9'}`",
                 f"- video_duration_seconds: `{item.video_duration_seconds or 8}`",
                 f"- first_frame: `{_default_first_frame(item)}`",
@@ -9882,9 +10825,16 @@ def _write_video_prompt_design(
 def _video_generation_request_section(run_dir: Path, item: FrontendReviewItem) -> tuple[str, str]:
     item_id = _require_markdown_scalar(item.item_id, field="item_id")
     video_tool = _require_markdown_scalar(item.video_tool or "kling_3_0", field="video_tool")
-    video_quality = _require_markdown_scalar(item.video_quality or "1080p", field="video_quality")
-    video_aspect_ratio = _require_markdown_scalar(item.video_aspect_ratio or "16:9", field="video_aspect_ratio")
     payload = _frontend_video_payloads(run_dir, [item])[item.item_id]
+    provider_options = _dict_value(
+        _dict_value(payload.get("provider_request_binding")).get("execution_options")
+    )
+    video_quality = (
+        ""
+        if _is_higgsfield_kling_model(provider_options.get("model"))
+        else _require_markdown_scalar(item.video_quality or "1080p", field="video_quality")
+    )
+    video_aspect_ratio = _require_markdown_scalar(item.video_aspect_ratio or "16:9", field="video_aspect_ratio")
     prompt = str(payload.get("prompt") or "")
     _manifest_path, _original_text, data = _read_manifest_data(run_dir)
     target = _video_target_by_item_id(data, item.item_id)
@@ -11668,6 +12618,19 @@ def _update_manifest_video_generation(run_dir: Path, items: list[FrontendReviewI
             video_generation['input_mode'] = item.video_input_mode
         if item.video_native_audio_mode is not None:
             video_generation['native_audio'] = _review_native_audio(video_generation, item)
+        compiled_options = _dict_value(
+            _dict_value(api_prompt_payload.get("provider_request_binding")).get(
+                "execution_options"
+            )
+        )
+        quality = _higgsfield_quality_for_model(
+            model=compiled_options.get("model"),
+            requested_quality=(
+                item.video_quality
+                if item.video_quality is not None
+                else video_generation.get("quality")
+            ),
+        )
         video_generation.update(
             {
                 "tool": item.video_tool or video_generation.get("tool") or "kling_3_0",
@@ -11676,7 +12639,7 @@ def _update_manifest_video_generation(run_dir: Path, items: list[FrontendReviewI
                 "motion_prompt": api_prompt_payload["prompt"],
                 "api_prompt_payload": api_prompt_payload,
                 "output": output,
-                "quality": item.video_quality or video_generation.get("quality") or "1080p",
+                "quality": quality,
                 "aspect_ratio": item.video_aspect_ratio or video_generation.get("aspect_ratio") or "16:9",
             }
         )
@@ -11986,11 +12949,10 @@ def _recompile_v2_scene_manifest(
     story_time = str(_dict_value(data.get("video_metadata")).get("time") or "").strip()
     compiled: dict[str, dict[str, Any]] = {}
     for item_id, revision in revisions.items():
-        target = _target_by_item_id(data, item_id)
+        target = _target_by_item_id(data, item_id, include_shots=True)
         if target is None:
             raise ValueError(f"video manifest target not found: {item_id}")
-        node = _dict_value(target.get("cut"))
-        image_generation = _dict_value(node.get("image_generation"))
+        image_generation = _target_image_generation(target)
         current_plan = _dict_value(image_generation.get("first_frame_visual_plan"))
         if _json_hash(current_plan) != str(revision.get("expected_plan_hash") or ""):
             raise ValueError(f"compiled_v2_plan_revision_conflict: {item_id}")
@@ -12034,7 +12996,6 @@ def _recompile_v2_scene_manifest(
             "sha256": payload["sha256"],
         }
         image_generation["debug_prompt_source"] = debug_prompt_source
-        node["image_generation"] = image_generation
         compiled[item_id] = payload
     _write_manifest_data(manifest_path, original_text, data)
     return compiled
@@ -12066,9 +13027,8 @@ def _recompile_image_prompt_payloads_from_plans(run_dir: Path) -> list[str]:
         raise ValueError("video_manifest.md YAML root must be a mapping")
     story_time = str(_dict_value(data.get("video_metadata")).get("time") or "").strip()
     changed_selectors: list[str] = []
-    for target in _manifest_scene_targets(data):
-        node = _dict_value(target.get("cut"))
-        image_generation = _dict_value(node.get("image_generation"))
+    for target in _manifest_image_targets(data, include_auxiliary_image_targets=True):
+        image_generation = _target_image_generation(target)
         existing_payload = _dict_value(image_generation.get("api_prompt_payload"))
         plan = _dict_value(image_generation.get("first_frame_visual_plan"))
         if str(plan.get("schema_version") or "") != "first_frame_visual_plan_v1":
@@ -12106,7 +13066,6 @@ def _recompile_image_prompt_payloads_from_plans(run_dir: Path) -> list[str]:
             continue
         image_generation["api_prompt_payload"] = payload
         image_generation["debug_prompt_source"] = debug_prompt_source
-        node["image_generation"] = image_generation
         changed_selectors.append(str(target["selector"]))
     if changed_selectors:
         write_run_file_text(
@@ -16346,7 +17305,9 @@ async def _create_video_prompts_locked(
     try:
         async with _serialized_run_write(run_dir, "run_artifacts"):
             _manifest_path, _original_text, manifest_data = _read_manifest_data(run_dir)
+            from toc.scene_direction_service import require_ready_for_items
             effective_items = _effective_video_materialization_items(run_dir, req.items)
+            require_ready_for_items(run_dir, manifest_data, [item.item_id for item in effective_items])
             missing_targets = [
                 item.item_id
                 for item in effective_items
@@ -16929,10 +17890,18 @@ async def api_video_generate(req: VideoGenerateRequest) -> dict[str, Any]:
     try:
         async with _serialized_run_write(run_dir, "run_artifacts"):
             _require_narration_ready_for_video(run_dir)
+            from toc.scene_direction_service import require_ready_for_items
+            preparation_data = _read_manifest_data(run_dir)[2]
+            require_ready_for_items(run_dir, preparation_data, [item.item_id])
             item = _materialized_video_generate_item(run_dir=run_dir, request=item)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     _validate_video_request_reference_paths(run_dir, item)
+    from server.video_preparation_api import reserve_video_execution
+    try:
+        reserve_video_execution(run_dir, _read_manifest_data(run_dir)[2], [item])
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return await _generate_video_candidates(run_dir, item)
 
 
@@ -16945,6 +17914,9 @@ async def api_video_generate_bulk(req: BulkVideoGenerateRequest) -> dict[str, An
     try:
         async with _serialized_run_write(run_dir, "run_artifacts"):
             _require_narration_ready_for_video(run_dir)
+            from toc.scene_direction_service import require_ready_for_items
+            preparation_data = _read_manifest_data(run_dir)[2]
+            require_ready_for_items(run_dir, preparation_data, [item.item_id for item in req.items])
             items = [
                 _materialized_video_generate_item(run_dir=run_dir, request=item)
                 for item in req.items
@@ -16956,6 +17928,11 @@ async def api_video_generate_bulk(req: BulkVideoGenerateRequest) -> dict[str, An
     total_candidates = sum(item.candidate_count for item in items)
     if total_candidates > 96:
         raise HTTPException(status_code=400, detail="bulk video generation is limited to 96 total candidates")
+    from server.video_preparation_api import reserve_video_execution
+    try:
+        reserve_video_execution(run_dir, _read_manifest_data(run_dir)[2], items)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     semaphore = asyncio.Semaphore(req.concurrency)
 
     async def guarded(item: VideoGenerateItem) -> dict[str, Any]:
@@ -18182,10 +19159,14 @@ async def api_regenerate_prompts(req: RegeneratePromptsRequest) -> dict[str, Any
         try:
             _manifest_path, _manifest_original, manifest_data = _read_manifest_data(run_dir)
             for item in v2_items:
-                target = _target_by_item_id(manifest_data, item.id)
+                target = _target_by_item_id(
+                    manifest_data,
+                    item.id,
+                    include_shots=True,
+                )
                 if target is None:
                     raise ValueError(f'video manifest target not found: {item.id}')
-                image_generation = _dict_value(_dict_value(target.get('cut')).get('image_generation'))
+                image_generation = _target_image_generation(target)
                 plan = _dict_value(image_generation.get('first_frame_visual_plan'))
                 if not plan:
                     raise ValueError(f'compiled_v2_first_frame_visual_plan_missing: {item.id}')
@@ -18411,3 +19392,7 @@ from server import sound_design_api as _sound_design_api
 _sound_design_api.install(sys.modules[__name__])
 from server import production_tools_api as _production_tools_api
 _production_tools_api.install(sys.modules[__name__])
+from server import cut_direction_api as _cut_direction_api
+_cut_direction_api.install(sys.modules[__name__])
+from server import video_preparation_api as _video_preparation_api
+_video_preparation_api.install(sys.modules[__name__])

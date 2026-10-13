@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { higgsfieldDurationError, nativeAudioModeAfterProviderSwitch, shouldSendNativeAudioMode, videoInputModeError, videoInputReferences } from './HiggsfieldSettings';
+import { higgsfieldDurationError, KLING_V3_STANDARD_IMAGE_TO_VIDEO_MODEL, nativeAudioModeAfterProviderSwitch, shouldSendNativeAudioMode, videoDurationBounds, videoDurationError, videoInputModeError, videoInputReferences, usesModelDefaultVideoQuality } from './HiggsfieldSettings';
 
 describe('Higgsfield request settings', () => {
   it('uses ordered reference images without frame boundaries in reference mode', () => {
@@ -22,6 +22,37 @@ describe('Higgsfield request settings', () => {
     expect(higgsfieldDurationError(30)).toBeNull();
     expect(higgsfieldDurationError(3)).toContain('4〜30');
     expect(higgsfieldDurationError(31)).toContain('4〜30');
+  });
+
+  it('uses Kling v3 standard duration and quality behavior from the selected model ID', () => {
+    expect(videoDurationBounds('higgsfield', KLING_V3_STANDARD_IMAGE_TO_VIDEO_MODEL)).toEqual({
+      min: 3,
+      max: 15,
+      label: 'Kling v3 standard · 3〜15秒',
+    });
+    expect(videoDurationError(3, 'higgsfield', KLING_V3_STANDARD_IMAGE_TO_VIDEO_MODEL)).toBeNull();
+    expect(videoDurationError(15, 'higgsfield', KLING_V3_STANDARD_IMAGE_TO_VIDEO_MODEL)).toBeNull();
+    expect(videoDurationError(2, 'higgsfield', KLING_V3_STANDARD_IMAGE_TO_VIDEO_MODEL)).toContain('3〜15');
+    expect(videoDurationError(16, 'higgsfield', KLING_V3_STANDARD_IMAGE_TO_VIDEO_MODEL)).toContain('3〜15');
+    expect(usesModelDefaultVideoQuality(KLING_V3_STANDARD_IMAGE_TO_VIDEO_MODEL)).toBe(true);
+  });
+
+  it('keeps Seedance 2.5 image and reference models at 4 through 30 seconds', () => {
+    for (const model of [
+      'bytedance/seedance-2.5/image-to-video',
+      'bytedance/seedance-2.5/reference-to-video',
+    ]) {
+      expect(videoDurationBounds('higgsfield', model)).toEqual({
+        min: 4,
+        max: 30,
+        label: 'Seedance 2.5 · 4〜30秒',
+      });
+      expect(videoDurationError(4, 'higgsfield', model)).toBeNull();
+      expect(videoDurationError(30, 'higgsfield', model)).toBeNull();
+      expect(videoDurationError(3, 'higgsfield', model)).toContain('4〜30');
+      expect(videoDurationError(31, 'higgsfield', model)).toContain('4〜30');
+      expect(usesModelDefaultVideoQuality(model)).toBe(false);
+    }
   });
 
   it('turns generated audio off on a provider switch and transmits off only when the audio setting changed', () => {

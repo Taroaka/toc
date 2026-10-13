@@ -153,6 +153,50 @@ class ImageRequestSnapshotTests(unittest.TestCase):
         self.assertEqual(len(snapshot.request_revision), 64)
         self.assertEqual(len(consumer.request_digest), 64)
 
+    def test_provider_ready_binding_preserves_intra_snapshot_image_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            asset_reference = run_dir / "assets" / "objects" / "state.png"
+            asset_reference.parent.mkdir(parents=True)
+            asset_reference.write_bytes(b"state-asset")
+            snapshot = materialize_request_snapshot(
+                run_dir,
+                kind="scene",
+                items=[
+                    _item("primary", "assets/scenes/primary.png"),
+                    _item(
+                        "result",
+                        "assets/scenes/result.png",
+                        references=["assets/scenes/primary.png", "assets/objects/state.png"],
+                    ),
+                ],
+            )
+
+            bound = bind_request_snapshot_references(
+                snapshot,
+                run_dir=run_dir,
+                preserve_generated_dependencies=True,
+            )
+            result_references = bound.items[1].references
+            self.assertTrue(result_references[0].deferred)
+            self.assertEqual(result_references[0].producer_item_id, "primary")
+            self.assertFalse(result_references[1].deferred)
+            self.assertEqual(result_references[1].sha256, sha256_text("state-asset"))
+
+            primary_output = run_dir / "assets" / "scenes" / "primary.png"
+            primary_output.parent.mkdir(parents=True, exist_ok=True)
+            primary_output.write_bytes(b"generated-primary-frame")
+            rebound = bind_request_snapshot_references(
+                bound,
+                run_dir=run_dir,
+                preserve_generated_dependencies=True,
+            )
+            self.assertTrue(rebound.items[1].references[0].deferred)
+            self.assertEqual(
+                current_reference_sha256s(run_dir, rebound.items[1], allow_deferred=True),
+                (sha256_text("generated-primary-frame"), sha256_text("state-asset")),
+            )
+
     def test_materialize_rejects_missing_reference_without_snapshot_producer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)

@@ -83,7 +83,7 @@ execution:
 画像には解決済みの静的な画づくりと初期焦点を渡す。焦点移動・動作・反応の時間変化は動画へ渡す。
 動画では光の維持条件、物理、演技、焦点、同期音を既存のfragment groupへ追記し、明示された新欄を
 固定件数で切り捨てない。由来やhashはdiagnosticsに残し、provider proseに出さない。
-`cinematic_execution_v1` / `cinematic_execution_projection_v1` / `cinematic_execution_compiler_v1`
+`cinematic_execution_v1` / `cinematic_execution_projection_v2` / `cinematic_execution_compiler_v2`
 を拡張契約として記録する。旧契約の出力形式は保持する。
 
 ## 台詞と音声

@@ -80,11 +80,11 @@ worker であっても、この境界内で authoring を行う。
 | p100 | `research.md` | source reading、passage/fact/uncertainty registry |
 | p200 | `story.md` | Story Architect、Scene Author、causal scene sequence |
 | p300 | `visual_value.md` | visual identity、anchors、asset candidates、handoff |
-| p400 | `script.md`、skeleton manifest | p410 scene intent/event、p420 cut blueprint、narration draft、user changes |
-| p500 | asset inventory/plan/requests | reusable character/object/location assets、reference bindings |
-| p600 | production manifest/image requests | first-frame design、drawable prompt compiler、image generation |
+| p400 | `script.md`、skeleton manifest | p410 scene intent/event、p420 cut blueprint、source-grounded reusable state variants/result-frame plans |
+| p500 | asset inventory/plan/requests | reusable character/object/location assets、state variant generation、reference bindings |
+| p600 | production manifest/image requests | first-frame design、drawable prompt compiler、cut images and image-only result frames |
 | p700 | narration/TTS outputs | full-run text projection、TTS、measured audio timeline |
-| p800 | video requests/clips | motion compiler、provider execution、frame/reference continuity |
+| p800 | video requests/clips | motion compiler、provider execution、first/last frame continuity bound to current bytes |
 | p900 | final render/QA data | stream normalization、ffprobe/decode/duration checks |
 
 ## Author roles
@@ -155,7 +155,7 @@ worker であっても、この境界内で authoring を行う。
 
 - 入力: cut contract、first/last frames、ordered references、provider settings
 - 出力: compiled video payload、request snapshot、video clip、provenance record
-- `video_prompt_projection_registry_v5` と `conditional_video_prompt_compiler_v5` を使う。
+- `video_prompt_projection_registry_v7` と `conditional_video_prompt_compiler_v6` を使う。
 - provider capability、motion boundary、frame/reference hashes、prompt/source digest を検証する。
 
 ### Render / QA Operator

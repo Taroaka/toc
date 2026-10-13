@@ -138,9 +138,9 @@ def execution_from_cut(cut, *, film=None, scene_overrides=None, resources=None, 
     performance = _mapping(raw.get('performance', {}), 'performance')
     if set(focus) - {'initial', 'change'} or set(performance) - {'action', 'observable_reaction', 'timing'}:
         raise ValueError('cinematic:execution:unknown_field')
-    if cut.get('cut_role') == 'sub' and performance:
+    if cut.get('cut_role') == 'sub' and performance and 'shot_plan' not in cut:
         raise ValueError('cinematic:unpeopled_performance')
-    if cut.get('cut_role') == 'sub' and 'staging' in raw:
+    if cut.get('cut_role') == 'sub' and 'staging' in raw and 'shot_plan' not in cut:
         raise ValueError('cinematic:unpeopled_staging')
     result = {'schema_version': EXECUTION_SCHEMA,
         'light_continuity': _text(raw.get('light_continuity', camera.get('light', '')), 'light_continuity'),
@@ -210,10 +210,77 @@ def video_execution_fragments(execution):
     if execution.get('geometry'):
         from toc.spatial_previs import geometry_prompt
         geometry = geometry_prompt(execution['geometry'])
+    cast_context = []
+    for record in execution.get('cast_context', []) if isinstance(execution.get('cast_context'), list) else []:
+        if not isinstance(record, dict):
+            continue
+        name = str(record.get('name') or '').strip()
+        if not name:
+            continue
+        role = str(record.get('role') or '').strip()
+        provenance = record.get('personality_provenance') if isinstance(record.get('personality_provenance'), dict) else {}
+        facts = provenance.get('source_facts') if isinstance(provenance.get('source_facts'), list) else []
+        interpretation = provenance.get('interpretation') if isinstance(provenance.get('interpretation'), list) else []
+        choices = provenance.get('creative_choices') if isinstance(provenance.get('creative_choices'), list) else []
+        behavior = record.get('behavior_baseline') if isinstance(record.get('behavior_baseline'), list) else []
+        relations = record.get('relationships') if isinstance(record.get('relationships'), list) else []
+        lines = [f'人物一貫性コンテキスト: {name}' + (f'（役割: {role}）' if role else '')]
+        if facts:
+            lines.append('source fact: ' + '、'.join(str(value) for value in facts))
+        if interpretation:
+            lines.append('行動からの解釈: ' + '、'.join(str(value) for value in interpretation))
+        if choices:
+            lines.append('演技上の補完: ' + '、'.join(str(value) for value in choices))
+        if behavior:
+            lines.append('平常時の観察可能な振る舞い: ' + '、'.join(str(value) for value in behavior))
+        if relations:
+            lines.append('同じcutにいる人物との関係: ' + '、'.join(
+                f"{row.get('relation', '')}（{row.get('source_basis', '')}）"
+                for row in relations if isinstance(row, dict)))
+        distinctions = record.get('distinguish_from') if isinstance(record.get('distinguish_from'), list) else []
+        behavior_differences = [str(row.get('behavior_differences') or '').strip()
+                                for row in distinctions if isinstance(row, dict)
+                                and str(row.get('behavior_differences') or '').strip()]
+        if behavior_differences:
+            lines.append('他の同場人物との振る舞いの区別（観察可能な傾向）: ' + '、'.join(behavior_differences))
+        cast_context.append('\n'.join(value for value in lines if value))
+        for member in record.get('members', []) if isinstance(record.get('members'), list) else []:
+            if not isinstance(member, dict):
+                continue
+            member_name = str(member.get('name') or '').strip()
+            member_behavior = member.get('behavior_baseline') if isinstance(member.get('behavior_baseline'), list) else []
+            member_provenance = member.get('personality_provenance') if isinstance(member.get('personality_provenance'), dict) else {}
+            member_facts = member_provenance.get('source_facts') if isinstance(member_provenance.get('source_facts'), list) else []
+            member_interpretation = member_provenance.get('interpretation') if isinstance(member_provenance.get('interpretation'), list) else []
+            member_choices = member_provenance.get('creative_choices') if isinstance(member_provenance.get('creative_choices'), list) else []
+            member_role = str(member.get('role') or '').strip()
+            member_lines = [f'同一ensemble内の個別member: {member_name}' + (f'（役割: {member_role}）' if member_role else '')]
+            if member_facts:
+                member_lines.append('source fact: ' + '、'.join(str(value) for value in member_facts))
+            if member_interpretation:
+                member_lines.append('行動からの解釈: ' + '、'.join(str(value) for value in member_interpretation))
+            if member_choices:
+                member_lines.append('演技上の補完: ' + '、'.join(str(value) for value in member_choices))
+            if member_behavior:
+                member_lines.append('平常時の観察可能な振る舞い: ' + '、'.join(str(value) for value in member_behavior))
+            member_relations = member.get('relationships') if isinstance(member.get('relationships'), list) else []
+            if member_relations:
+                member_lines.append('同じcutにいる人物との関係: ' + '、'.join(
+                    f"{row.get('relation', '')}（{row.get('source_basis', '')}）"
+                    for row in member_relations if isinstance(row, dict)))
+            member_distinctions = member.get('distinguish_from') if isinstance(member.get('distinguish_from'), list) else []
+            behavior_differences = [str(row.get('behavior_differences') or '').strip()
+                                    for row in member_distinctions if isinstance(row, dict)
+                                    and str(row.get('behavior_differences') or '').strip()]
+            if behavior_differences:
+                member_lines.append('他memberとの振る舞いの区別（観察可能な傾向）: ' + '、'.join(behavior_differences))
+            cast_context.append('\n'.join(member_lines))
+    if cast_context:
+        cast_context.insert(0, '以下は演技の一貫性資料です。現在cutのsource actionと台詞だけが実際の行為を決めます。新しい行動や動機を追加しません。')
     fragments = {'start_state': geometry,
         'continuity': '\n'.join(v for v in [language_text(execution.get('film_language', {})), execution.get('light_continuity', '')] if v),
         'camera_motion': '\n'.join(v for v in [focus.get('initial', ''), focus.get('change', '')] if v),
-        'emotional_change': '\n'.join(execution.get('performance', {}).values()),
+        'emotional_change': '\n'.join([*execution.get('performance', {}).values(), *cast_context]),
         'primary_motion': '\n'.join(execution.get('physics', [])),
         'environment_motion': '\n'.join(sound)}
     if 'staging' in execution:

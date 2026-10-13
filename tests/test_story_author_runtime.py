@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from pathlib import Path
 
 import pytest
@@ -156,6 +157,17 @@ class FakeClient:
         ]
 
 
+def _write_valid_png(path: Path) -> Path:
+    """Write a small valid PNG without requiring Pillow in the test setup."""
+
+    path.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+        )
+    )
+    return path
+
+
 def test_structured_story_turn_uses_astra_default_read_only_and_output_schema() -> None:
     client = FakeClient(['{"scene_plan": []}'])
     schema = {
@@ -183,6 +195,64 @@ def test_structured_story_turn_uses_astra_default_read_only_and_output_schema() 
     assert client.turn_kwargs["output_schema"] == schema
     assert client.turn_kwargs["reset_timeout_on_notification"] is False
     assert client.stopped is True
+
+
+def test_structured_story_turn_forwards_valid_local_images(tmp_path: Path) -> None:
+    client = FakeClient(['{"scene_plan": []}'])
+    image = _write_valid_png(tmp_path / "reference.png")
+
+    asyncio.run(
+        run_structured_story_turn(
+            client_factory=lambda: client,
+            cwd=Path("/tmp/story-author"),
+            prompt="author",
+            output_schema={"type": "object"},
+            local_images=[image],
+        )
+    )
+
+    assert client.turn_kwargs["local_images"] == [image]
+    assert client.stopped is True
+
+
+def test_structured_story_turn_omits_local_images_when_unspecified() -> None:
+    client = FakeClient(['{"scene_plan": []}'])
+
+    asyncio.run(
+        run_structured_story_turn(
+            client_factory=lambda: client,
+            cwd=Path("/tmp/story-author"),
+            prompt="author",
+            output_schema={"type": "object"},
+        )
+    )
+
+    assert "local_images" not in client.turn_kwargs
+
+
+@pytest.mark.parametrize("image_kind", ["missing", "directory", "undecodable"])
+def test_structured_story_turn_rejects_invalid_local_images_before_starting_client(
+    tmp_path: Path, image_kind: str
+) -> None:
+    image = tmp_path / "reference.png"
+    if image_kind == "directory":
+        image.mkdir()
+    elif image_kind == "undecodable":
+        image.write_bytes(b"not an image")
+
+    def unexpected_client_factory() -> FakeClient:
+        pytest.fail("invalid local images must be rejected before creating a client")
+
+    with pytest.raises(StoryAuthorRuntimeError, match="local image"):
+        asyncio.run(
+            run_structured_story_turn(
+                client_factory=unexpected_client_factory,
+                cwd=tmp_path,
+                prompt="author",
+                output_schema={"type": "object"},
+                local_images=[image],
+            )
+        )
 
 
 def test_structured_story_turn_ignores_noncompleted_agent_message_repeats() -> None:

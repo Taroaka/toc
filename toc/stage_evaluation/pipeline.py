@@ -454,7 +454,8 @@ def _manifest_checks(
             minimum, maximum = 1, 15
             if as_dict(node.get("cut_contract")).get("cinematic_direction_contract") == "cinematic_direction_v1":
                 from toc.video_provider_capabilities import resolve_video_provider_capabilities
-                capabilities = resolve_video_provider_capabilities(tool=str(video.get("tool") or ""), model=str(video.get("model") or ""))
+                input_mode = str(video.get("input_mode") or ("first_last_frame" if video.get("last_frame") else "image_to_video" if video.get("first_frame") or image.get("output") else ""))
+                capabilities = resolve_video_provider_capabilities(tool=str(video.get("tool") or ""), model=str(video.get("model") or ""), input_mode=input_mode)
                 minimum, maximum = capabilities.duration_min_seconds, capabilities.duration_max_seconds
                 if not capabilities.supported:
                     invalid.append(f"scene{scene_id}:unsupported_video_capabilities")

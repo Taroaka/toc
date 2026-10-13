@@ -616,6 +616,14 @@ def _reference_fragment(
 ) -> str:
     binding = _mapping(_mapping(plan).get("reference_binding"))
     character_names_by_path: dict[str, str] = {}
+    scene_reference_roles: dict[str, str] = {}
+    for item in _list(binding.get("scene_references")):
+        if not isinstance(item, Mapping):
+            continue
+        path = str(item.get("path") or item.get("reference") or "").strip().replace("\\", "/")
+        role = str(item.get("role") or "").strip()
+        if path and role:
+            scene_reference_roles[path] = role
     for item in _list(binding.get("character_references")):
         if not isinstance(item, Mapping):
             continue
@@ -628,6 +636,13 @@ def _reference_fragment(
     counters: dict[str, int] = {"character": 0, "object": 0, "location": 0, "style": 0, "generic": 0}
     lines: list[str] = []
     for reference in references:
+        scene_role = scene_reference_roles.get(reference.replace("\\", "/"), "")
+        if scene_role == "same_scene_layout_anchor":
+            lines.append(
+                "同じcutの開始画は、場所・カメラ位置・画角・背景・人物と物の相対配置を保つ場面構図anchorとして使い、"
+                "変化後状態は別の状態variant参照とこの結果画の記述に従って反映する。"
+            )
+            continue
         normalized = reference.replace("\\", "/").lower()
         if "/characters/" in f"/{normalized}":
             kind, label, preserved = "character", "人物参照画像", "顔、髪、体格、衣装の同一性"

@@ -147,9 +147,9 @@ Provider execution reads the saved payload, never reinterprets free text from a 
 
 ```text
 cut_contract + first/last frames + ordered references
-  → video_prompt_projection_registry_v5
+  → video_prompt_projection_registry_v7
   → video_prompt_ir_v2
-  → conditional_video_prompt_compiler_v5
+  → conditional_video_prompt_compiler_v6
   → video_api_prompt_v1
 ```
 
@@ -236,6 +236,8 @@ providerの上限を超える場合はcutまたはrender unitの分割を行い�
 ## BGM・SE
 
 p860の詳細は [Sound Design](sound-design.md) を参照。BGM・SEは同じ工程内で作成し、p910で確定した音声snapshotをp920が合成する。
+
+動画生成前に全sceneのshot設計・採用音声・画像を照合する共通経路は[動画生成前の全scene準備](video-preparation.md)を参照してください。
 
 
 ## ナレーション音量・試聴・合成の共通処理

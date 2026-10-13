@@ -1,0 +1,108 @@
+.videoPreparationPanel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  margin: 0 0 16px;
+  padding: 14px;
+  border: 1px solid rgba(142, 232, 255, 0.2);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(142, 232, 255, 0.045), transparent 52%),
+    rgba(255, 255, 255, 0.025);
+}
+
+.videoPreparationHeader {
+  margin-bottom: 2px;
+}
+
+.videoPreparationSummary {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.videoPreparationBudget {
+  margin-top: -4px !important;
+}
+
+.videoPreparationSceneList {
+  display: grid;
+  gap: 6px;
+}
+
+.videoPreparationScene {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 8px 0 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.videoPreparationReason {
+  overflow-wrap: anywhere;
+}
+
+.videoPreparationMessage {
+  margin: 0;
+}
+
+.videoPreparationRunning {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 193, 7, 0.22);
+  border-radius: 7px;
+  background: rgba(255, 193, 7, 0.035);
+}
+
+.videoPreparationControls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 10px;
+  align-items: start;
+}
+
+.videoPreparationControls > * {
+  min-width: 0;
+}
+
+.videoPreparationControls > button {
+  min-height: 40px;
+  white-space: nowrap;
+}
+
+@media (max-width: 1050px) {
+  .videoPreparationControls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .videoPreparationFixedPaths {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 620px) {
+  .videoPreparationPanel {
+    padding: 11px;
+  }
+
+  .videoPreparationControls {
+    grid-template-columns: 1fr;
+  }
+
+  .videoPreparationRunning {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .videoPreparationFixedPaths {
+    grid-column: auto;
+  }
+}

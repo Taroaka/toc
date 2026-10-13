@@ -1,0 +1,3 @@
+# 設計
+
+正本はstory-creationのシーン導入節。共有の短いauthor instructionをstoryの既存AUDIENCE_MEANING_INSTRUCTIONとp400 direction promptへ組み込み、両者の初回/修復へ渡す。p400 policyを更新し旧cacheを再利用しない。既存start/end state、audience knowledge、event/handoff、direction/performance欄を使い、追加schemaや品質gateを作らない。シーン設計スキルを登録版にも同期する。

@@ -1,0 +1,4 @@
+interface:
+  display_name: "ToC BGM生成"
+  short_description: "スレッドからのBGM生成依頼で、物語の流れ・音楽の役割・配置を確認して実行する"
+  default_prompt: "$toc-bgm-gen を使い、この物語の最新の進行状況と採用素材を確認して、指定範囲を生成してください。"

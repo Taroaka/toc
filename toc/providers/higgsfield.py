@@ -20,10 +20,12 @@ from toc.providers.media_download import _SafeMediaRedirectHandler, request_publ
 API_BASE = "https://api.higgsfield.ai"
 IMAGE_MODEL = "bytedance/seedance-2.5/image-to-video"
 REFERENCE_MODEL = "bytedance/seedance-2.5/reference-to-video"
-SUPPORTED_MODELS = (IMAGE_MODEL, REFERENCE_MODEL)
+KLING_IMAGE_MODEL = "kling-video/v3.0/std/image-to-video"
+SUPPORTED_MODELS = (IMAGE_MODEL, REFERENCE_MODEL, KLING_IMAGE_MODEL)
 SUPPORTED_OPERATIONS = {
     IMAGE_MODEL: "image_to_video",
     REFERENCE_MODEL: "reference_to_video",
+    KLING_IMAGE_MODEL: "image_to_video",
 }
 _TERMINAL = {"completed", "failed", "nsfw", "canceled"}
 _ASPECT_RATIOS = {"16:9": 16 / 9, "4:3": 4 / 3, "1:1": 1.0, "3:4": 3 / 4, "9:16": 9 / 16, "21:9": 21 / 9}
@@ -77,7 +79,7 @@ class HiggsfieldConfig:
 
 
 class HiggsfieldClient:
-    """Server-side Seedance 2.5 adapter with durable submit/resume journaling."""
+    """Server-side Higgsfield video adapter with durable submit/resume journaling."""
 
     def __init__(self, config: HiggsfieldConfig):
         self.config = config
@@ -99,7 +101,10 @@ class HiggsfieldClient:
             raise ValueError("Higgsfield API URL is invalid") from None
         if parsed.scheme != "https" or parsed.hostname != "api.higgsfield.ai" or parsed.port or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("Higgsfield API URL must use the official HTTPS origin")
-        expected_paths = {f"/{IMAGE_MODEL}", f"/{REFERENCE_MODEL}", "/files/generate-upload-url"}
+        expected_paths = {
+            f"/{IMAGE_MODEL}", f"/{REFERENCE_MODEL}", f"/{KLING_IMAGE_MODEL}",
+            "/files/generate-upload-url",
+        }
         if request_id is not None:
             expected_paths.add(f"/requests/{request_id}/status")
         if parsed.path not in expected_paths:
@@ -142,7 +147,7 @@ class HiggsfieldClient:
     def _file_digest(path: Path | None) -> str | None:
         return hashlib.sha256(path.read_bytes()).hexdigest() if path is not None else None
 
-    def _request_fingerprint(self, *, model: str, prompt: str, duration_seconds: int, aspect_ratio: str, resolution: str, input_image: Path | None, last_frame_image: Path | None, reference_images: list[Path] | None, generate_audio: bool) -> str:
+    def _request_fingerprint(self, *, model: str, prompt: str, duration_seconds: int, aspect_ratio: str, resolution: str | None, input_image: Path | None, last_frame_image: Path | None, reference_images: list[Path] | None, generate_audio: bool) -> str:
         identity = {
             "model": model, "prompt": prompt, "duration_seconds": duration_seconds,
             "aspect_ratio": aspect_ratio, "resolution": resolution, "generate_audio": generate_audio,
@@ -197,11 +202,46 @@ class HiggsfieldClient:
 
     def _build_payload(
         self, *, model: str, prompt: str, duration_seconds: int, aspect_ratio: str,
-        resolution: str, input_image: Path | None, last_frame_image: Path | None,
+        resolution: str | None, input_image: Path | None, last_frame_image: Path | None,
         reference_images: list[Path] | None, generate_audio: bool,
+        multi_shots: bool = False, elements: list[str] | None = None,
     ) -> dict[str, Any]:
         if model not in SUPPORTED_MODELS:
             raise ValueError("Unsupported Higgsfield model/operation")
+        self._validate_unimplemented_kling_options(multi_shots=multi_shots, elements=elements)
+        refs = list(reference_images or [])
+        if model == KLING_IMAGE_MODEL:
+            if isinstance(duration_seconds, bool) or not isinstance(duration_seconds, int) or not 3 <= duration_seconds <= 15:
+                raise ValueError("Kling 3.0 Standard duration_seconds must be an integer from 3 to 15")
+            if resolution not in {None, ""}:
+                raise ValueError(
+                    "Kling 3.0 Standard does not support a resolution override; use the model default"
+                )
+            if aspect_ratio not in _ASPECT_RATIOS:
+                raise ValueError("Unsupported Kling 3.0 Standard aspect ratio")
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ValueError("Higgsfield prompt must be non-empty")
+            if not isinstance(generate_audio, bool):
+                raise ValueError("generate_audio must be a boolean")
+            if input_image is None:
+                raise ValueError("Kling 3.0 Standard image-to-video requires one first image")
+            if refs:
+                raise ValueError("Kling 3.0 Standard image-to-video cannot combine references")
+            if not self._image_ratio_matches(input_image, aspect_ratio):
+                raise ValueError("Kling 3.0 Standard image does not match requested aspect_ratio")
+            if last_frame_image is not None and not self._image_ratio_matches(last_frame_image, aspect_ratio):
+                raise ValueError("Kling 3.0 Standard last image does not match requested aspect_ratio")
+            payload: dict[str, Any] = {
+                "prompt": prompt,
+                "duration": duration_seconds,
+                "sound": "on" if generate_audio else "off",
+                "image_url": self._upload_file(input_image),
+                "multi_shots": False,
+            }
+            if last_frame_image is not None:
+                payload["last_image_url"] = self._upload_file(last_frame_image)
+            return payload
+
         if isinstance(duration_seconds, bool) or not isinstance(duration_seconds, int) or not 4 <= duration_seconds <= 30:
             raise ValueError("Seedance 2.5 duration_seconds must be an integer from 4 to 30")
         if resolution not in {"480p", "720p", "1080p"}:
@@ -212,7 +252,6 @@ class HiggsfieldClient:
             raise ValueError("Higgsfield prompt must be non-empty")
         if not isinstance(generate_audio, bool):
             raise ValueError("generate_audio must be a boolean")
-        refs = list(reference_images or [])
         if model == IMAGE_MODEL:
             if input_image is None or refs:
                 raise ValueError("Seedance image-to-video requires one first frame and cannot combine references")
@@ -238,15 +277,30 @@ class HiggsfieldClient:
             "generate_audio": generate_audio,
         }
 
+    @staticmethod
+    def _validate_unimplemented_kling_options(
+        *, multi_shots: bool, elements: list[str] | None,
+    ) -> None:
+        if not isinstance(multi_shots, bool):
+            raise ValueError("Higgsfield multi_shots must be a boolean")
+        if multi_shots:
+            raise ValueError("Higgsfield native multi_shots is not implemented")
+        if elements is not None and not isinstance(elements, list):
+            raise ValueError("Higgsfield elements must be a list")
+        if elements:
+            raise ValueError("Higgsfield elements are not implemented")
+
     def generate_video(
         self, *, model: str, prompt: str, duration_seconds: int, aspect_ratio: str,
-        resolution: str, input_image: Path | None, last_frame_image: Path | None,
+        resolution: str | None, input_image: Path | None, last_frame_image: Path | None,
         reference_images: list[Path] | None, generate_audio: bool, out_path: Path,
         journal_path: Path, request_digest: str, poll: bool = True,
         poll_every_seconds: float = 2.0, timeout_seconds: float = 900.0,
+        multi_shots: bool = False, elements: list[str] | None = None,
     ) -> dict[str, Any]:
         if not isinstance(request_digest, str) or not request_digest:
             raise ValueError("request_digest is required")
+        self._validate_unimplemented_kling_options(multi_shots=multi_shots, elements=elements)
         fingerprint = self._request_fingerprint(
             model=model, prompt=prompt, duration_seconds=duration_seconds, aspect_ratio=aspect_ratio,
             resolution=resolution, input_image=input_image, last_frame_image=last_frame_image,
@@ -282,6 +336,7 @@ class HiggsfieldClient:
                 model=model, prompt=prompt, duration_seconds=duration_seconds, aspect_ratio=aspect_ratio,
                 resolution=resolution, input_image=input_image, last_frame_image=last_frame_image,
                 reference_images=reference_images, generate_audio=generate_audio,
+                multi_shots=multi_shots, elements=elements,
             )
             payload_digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             journal["payload"] = payload

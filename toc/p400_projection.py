@@ -7,6 +7,8 @@ from toc.p400_authoring import CONTRACT
 from toc.production_diagnostics import AuthoringValidationError
 from toc.cut_context_packet import materialize_cut_context_packet
 from toc.cinematic_language import execution_from_cut
+from toc.cast_design import cast_design_for_prompt
+from toc.asset_state_variants import normalize_state_variant_bindings, state_variant_output_path
 
 NO_PEOPLE = '人物、顔、身体、手足、影、人物の反射を画面に入れない'
 
@@ -22,7 +24,8 @@ def _prose(value):
 
 
 def project_scene(direction, *, source_scene, scene_id, resources, scene_intent, scene_event,
-                  scene_generation, acceptance_draft, acceptance_binding, previous_selector='', next_selector='', story_time='', film_language=None):
+                  scene_generation, acceptance_draft, acceptance_binding, previous_selector='', next_selector='', story_time='', film_language=None,
+                  available_state_variants=None, cast_design=None):
     script_cuts, manifest_cuts = [], []
     beats = {b['beat_id']: b for b in scene_event['event_sequence']}
     all_ids = list(beats)
@@ -37,8 +40,16 @@ def project_scene(direction, *, source_scene, scene_id, resources, scene_intent,
         for bid, b in beats.items()}
     assignments = []
     total = len(direction['cuts'])
+    all_state_variants = [
+        item for item in [*(direction.get('state_variants') or []), *(available_state_variants or [])]
+        if isinstance(item, dict)
+    ]
     for index, authored in enumerate(direction['cuts'], 1):
         cut = deepcopy(authored)
+        if 'shot_plan' in cut:
+            # The legacy temporary projection is a parent contract, not a frame
+            # that forces all participants to appear. Children are compiled below.
+            cut['cut_role'] = 'main'
         selector = f'scene{scene_id}_cut{index:02d}'
         duration, refs, primary = cut['duration_seconds'], cut['source_beat_ids'], cut['primary_beat_id']
         location = resources['locations'][cut['location_id']]
@@ -48,6 +59,17 @@ def project_scene(direction, *, source_scene, scene_id, resources, scene_intent,
         references = list(dict.fromkeys(path for group, ids in (
             ('characters', chars), ('objects', objects), ('locations', [cut['location_id']]))
             for aid in ids for path in resources[group][aid]['references']))
+        selected_variant_ids = {'character': [], 'object': [], 'location': []}
+        selected_variant_records = []
+        for variant_ref in cut.get('state_variant_refs', []) or []:
+            entity_type = str(variant_ref.get('entity_type') or '').strip()
+            asset_id = str(variant_ref.get('asset_id') or '').strip()
+            variant_id = str(variant_ref.get('variant_id') or '').strip()
+            variant_path = state_variant_output_path(entity_type, asset_id, variant_id)
+            selected_variant_ids[entity_type].append(variant_id)
+            selected_variant_records.append((entity_type, asset_id, variant_path))
+            if variant_path not in references:
+                references.append(variant_path)
         rank = max(all_ids.index(bid) for bid in refs)
         future = all_ids[rank + 1:]
         future_facts = [beats[bid]['what_happens'] for bid in future]
@@ -134,11 +156,23 @@ def project_scene(direction, *, source_scene, scene_id, resources, scene_intent,
             'source_preservation_constraints': preserve, 'authored_visible_state_facts': visible_facts,
             'scene_state_progression': {'progression_mode': cut['progression_mode']},
         }
+        for entity_type, asset_id, variant_path in selected_variant_records:
+            group = {'character': 'characters', 'object': 'objects', 'location': 'locations'}[entity_type]
+            binding_key = f'{entity_type}_references'
+            plan['reference_binding'].setdefault(binding_key, []).append({
+                'path': variant_path,
+                f'target_{entity_type}_id': asset_id,
+                f'target_{entity_type}_name': resources[group][asset_id]['name'],
+            })
         execution = None
-        if film_language or 'execution' in cut:
+        if film_language or 'execution' in cut or cast_design:
             execution = execution_from_cut(cut, film=film_language,
                 scene_overrides=direction.get('film_language_overrides'), resources=resources,
                 source_beats=scene_event.get('event_sequence', []))
+            if cast_design:
+                cast_context = cast_design_for_prompt(cast_design, chars)
+                if cast_context:
+                    execution['cast_context'] = cast_context
             contract['cinematic_contract']['execution'] = execution
             plan['film_language'] = deepcopy(execution.get('film_language', {}))
             if execution.get('staging'):
@@ -179,16 +213,158 @@ def project_scene(direction, *, source_scene, scene_id, resources, scene_intent,
         manifest_cut.update(duration_seconds=duration, target_duration_seconds=duration,
             still_image_plan={'mode': 'generate_still', 'generation_status': 'missing', 'prompt_source': 'image_generation.api_prompt_payload.prompt'},
             image_generation={'tool': 'codex_builtin_image', 'character_ids': chars, 'object_ids': objects,
-                'location_ids': [cut['location_id']], 'asset_type': 'scene_still', 'references': references,
+                'character_variant_ids': list(dict.fromkeys(selected_variant_ids['character'])),
+                'object_variant_ids': list(dict.fromkeys(selected_variant_ids['object'])),
+                'location_ids': [cut['location_id']],
+                'location_variant_ids': list(dict.fromkeys(selected_variant_ids['location'])),
+                'asset_type': 'scene_still', 'references': references,
                 'reference_count': len(references), 'first_frame_visual_plan': plan, 'api_prompt_payload': payload,
                 'output': f'assets/scenes/{selector}.png', 'aspect_ratio': '16:9', 'image_size': '1K'},
             video_generation={'tool': 'kling_3_0_omni', 'duration_seconds': duration,
                 'first_frame': f'assets/scenes/{selector}.png', 'motion_prompt': motion, 'output': f'assets/scenes/{selector}.mp4'})
+        result_frame = cut.get('result_frame')
+        if isinstance(result_frame, dict):
+            result_variant_refs = normalize_state_variant_bindings(result_frame)
+            result_variant_specs = []
+            for result_variant in result_variant_refs:
+                entity_type = str(result_variant.get('entity_type') or '').strip()
+                asset_id = str(result_variant.get('asset_id') or '').strip()
+                variant_id = str(result_variant.get('variant_id') or '').strip()
+                transition_id = str(result_variant.get('transition_id') or '').strip()
+                variant_spec = next((
+                    item for item in all_state_variants
+                    if item.get('entity_type') == entity_type
+                    and item.get('asset_id') == asset_id
+                    and item.get('variant_id') == variant_id
+                    and item.get('transition_id') == transition_id
+                ), None)
+                if variant_spec is None:
+                    raise AuthoringValidationError(
+                        f'cinematic_result_frame_variant_unbound:{selector}:{asset_id}/{variant_id}'
+                    )
+                result_variant_specs.append((result_variant, variant_spec))
+            if not result_variant_specs:
+                raise AuthoringValidationError(f'cinematic_result_frame_variant_missing:{selector}')
+            result_references = list(dict.fromkeys([
+                *references,
+                f'assets/scenes/{selector}.png',
+                *(state_variant_output_path(str(ref['entity_type']), str(ref['asset_id']), str(ref['variant_id']))
+                  for ref, _variant_spec in result_variant_specs),
+            ]))
+            result_plan = deepcopy(plan)
+            result_brief = str(result_frame.get('brief') or '').strip()
+            result_plan['temporal_boundary'] = {
+                'event_fact_visible_in_still': result_brief,
+                'not_yet_happened_in_still': [],
+            }
+            result_plan['authored_visible_state_facts'] = [
+                *(f'{key}: {value}' for key, value in cut['end_state_facts'].items()),
+                *(f"{resources.get({'character': 'characters', 'object': 'objects', 'location': 'locations'}[ref['entity_type']], {}).get(ref['asset_id'], {}).get('name', ref['asset_id'])}: {variant_spec.get('to_state', '')}"
+                  for ref, variant_spec in result_variant_specs),
+            ]
+            result_plan['scene_state_progression'] = {'progression_mode': cut['progression_mode']}
+            result_plan['source_grounding'] = {
+                **deepcopy(plan.get('source_grounding', {})),
+                'state_transition_ids': [str(ref.get('transition_id') or '') for ref, _ in result_variant_specs],
+                'source_event_beat_ids': list(dict.fromkeys(
+                    beat_id for _ref, variant_spec in result_variant_specs
+                    for beat_id in variant_spec.get('source_event_beat_ids') or []
+                )),
+            }
+            character_state = deepcopy(result_plan.get('character_state_gate') or {})
+            for stale_key in ('gaze', 'expression', 'hand_position', 'foot_position', 'costume_state', 'physical_state'):
+                character_state.pop(stale_key, None)
+            character_state['pose'] = result_brief
+            changed_character_ids = {
+                ref['asset_id'] for ref, _ in result_variant_specs if ref['entity_type'] == 'character'
+            }
+            character_state['character_states'] = [
+                item for item in character_state.get('character_states', [])
+                if isinstance(item, dict)
+                and str(item.get('character_id') or '') not in changed_character_ids
+            ]
+            result_plan['character_state_gate'] = character_state
+            object_gate = deepcopy(result_plan.get('object_visibility_gate') or {})
+            objects_gate = object_gate.get('objects') if isinstance(object_gate.get('objects'), list) else []
+            for object_record in objects_gate:
+                if isinstance(object_record, dict):
+                    selected_variant = next((variant_spec for ref, variant_spec in result_variant_specs
+                                             if ref['entity_type'] == 'object' and ref['asset_id'] == object_record.get('object_id')), None)
+                    object_record['object_state'] = (
+                        str(selected_variant.get('to_state') or '').strip()
+                        if selected_variant is not None else result_brief
+                    )
+                    object_record['visibility_in_this_cut'] = 'visible'
+            object_gate['objects'] = objects_gate
+            result_plan['object_visibility_gate'] = object_gate
+            composition = deepcopy(result_plan.get('spatial_composition') or {})
+            composition['midground'] = result_brief
+            for result_variant, variant_spec in result_variant_specs:
+                if result_variant['entity_type'] == 'location':
+                    composition['background'] = str(variant_spec.get('to_state') or '').strip()
+            result_plan['spatial_composition'] = composition
+            reference_binding = deepcopy(result_plan.get('reference_binding') or {})
+            reference_binding.setdefault('scene_references', []).append({
+                'path': f'assets/scenes/{selector}.png',
+                'role': 'same_scene_layout_anchor',
+            })
+            for result_variant, _variant_spec in result_variant_specs:
+                entity_type = result_variant['entity_type']
+                asset_id = result_variant['asset_id']
+                variant_reference = state_variant_output_path(entity_type, asset_id, result_variant['variant_id'])
+                binding_key = f'{entity_type}_references'
+                asset_name = resources.get({'character': 'characters', 'object': 'objects', 'location': 'locations'}[entity_type], {}).get(asset_id, {}).get('name', asset_id)
+                reference_binding.setdefault(binding_key, [])
+                reference_binding[binding_key].append({
+                    'path': variant_reference,
+                    f'target_{entity_type}_id': asset_id,
+                    f'target_{entity_type}_name': asset_name,
+                })
+            result_plan['reference_binding'] = reference_binding
+            result_payload = compile_image_api_prompt_v2(
+                first_frame_visual_plan=result_plan,
+                character_ids=chars,
+                object_ids=objects,
+                location_ids=[cut['location_id']],
+                reference_images=result_references,
+                story_time=story_time,
+                scene_time_of_day=source_scene.get('time_of_day', ''),
+            )
+            result_output = f'assets/scenes/{selector}_result.png'
+            result_image_generation = {
+                'tool': 'codex_builtin_image',
+                'character_ids': chars,
+                'character_variant_ids': list(dict.fromkeys([*selected_variant_ids['character'], *(ref['variant_id'] for ref, _ in result_variant_specs if ref['entity_type'] == 'character')])),
+                'object_ids': objects,
+                'object_variant_ids': list(dict.fromkeys([*selected_variant_ids['object'], *(ref['variant_id'] for ref, _ in result_variant_specs if ref['entity_type'] == 'object')])),
+                'location_ids': [cut['location_id']],
+                'location_variant_ids': list(dict.fromkeys([*selected_variant_ids['location'], *(ref['variant_id'] for ref, _ in result_variant_specs if ref['entity_type'] == 'location')])),
+                'references': result_references,
+                'reference_count': len(result_references),
+                'first_frame_visual_plan': result_plan,
+                'api_prompt_payload': result_payload,
+                'output': result_output,
+                'aspect_ratio': '16:9',
+                'image_size': '1K',
+            }
+            manifest_cut['video_generation'].update({
+                'result_state_reference': {
+                    'required': True,
+                    'state_variant_refs': [dict(ref) for ref, _ in result_variant_specs],
+                },
+                'result_frame': {'output': result_output, 'image_generation': result_image_generation},
+                'last_frame': result_output,
+            })
         if execution:
             native = deepcopy(execution['native_audio'])
             manifest_cut['video_generation']['native_audio'] = native
             if native['mode'] != 'off':
                 manifest_cut['video_generation']['tool'] = 'higgsfield'
+        if 'shot_plan' in cut:
+            from toc.shot_projection import project_cut_shots
+            manifest_cut = project_cut_shots(manifest_cut, cut['shot_plan'], resources,
+                                              story_time=story_time, time_of_day=source_scene.get('time_of_day', ''))
+            script_cut['shot_plan'] = deepcopy(manifest_cut['shot_plan'])
         script_cuts.append(script_cut); manifest_cuts.append(manifest_cut)
         for bid in refs:
             inventory[bid]['assigned_cut_ids'].append(selector)

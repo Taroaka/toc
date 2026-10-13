@@ -1,4 +1,4 @@
-contract_version: 11
+contract_version: 12
 
 global_required_docs:
   - docs/system-architecture.md
@@ -51,6 +51,7 @@ stages:
       - visual_value.md
       - cinematic_preferences.md
     required_docs:
+      - docs/implementation/cast-design.md
       - docs/implementation/narration-prompting.md
       - docs/implementation/p400-cinematic-authoring.md
       - workflow/playbooks/sound-design/affect-and-spotting.md
@@ -63,6 +64,7 @@ stages:
       - docs/data-contracts.md
       - docs/adaptation-value-amplification.md
     required_templates:
+      - workflow/cast-design-template.yaml
       - workflow/script-template.yaml
       - workflow/scene-outline-template.yaml
       - workflow/video-manifest-template.md
@@ -98,9 +100,12 @@ stages:
       - cinematic_direction.json
       - visual_value.md
     required_docs:
+      - docs/implementation/cast-design.md
       - docs/implementation/asset-bibles.md
+      - docs/implementation/p400-cinematic-authoring.md
       - docs/data-contracts.md
     required_templates:
+      - workflow/cast-design-template.yaml
       - workflow/asset-inventory-template.yaml
       - workflow/asset-plan-template.yaml
     required_inputs:
@@ -116,6 +121,8 @@ stages:
     # so it only requires the manifest and script inputs.
     required_docs:
       - docs/implementation/b-roll-design.md
+      - docs/implementation/p400-cinematic-authoring.md
+      - docs/implementation/asset-bibles.md
       - docs/script-creation.md
       - docs/implementation/agent-roles-and-prompts.md
       - docs/data-contracts.md

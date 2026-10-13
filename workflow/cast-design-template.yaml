@@ -1,0 +1,128 @@
+# 全体設計の記入例。実際の全キャストIDとsourceに合わせて埋める。
+# source_bindings/reference_identity_bindingsとreconciliationの旧設定・参照はruntimeが設定する。
+# 実行時の型・必須欄はtoc/cast_design.pyが正本。既存素材をこのテンプレートだけで変更しない。
+cast_design:
+  schema_version: cast_design_v1
+  source_bindings: {}
+  reference_identity_bindings: {}
+  characters:
+    character_01:
+      character_id: character_01
+      name: 個人の表示名
+      role: source上の役割
+      role_basis: 役割を裏付けるsourceの箇所
+      relationships: []
+      personality_provenance:
+        source_facts: []
+        interpretation: []
+        creative_choices: []
+      behavior_baseline:
+      - sourceに反しない、観察可能な所作の基調
+      appearance:
+        age_impression: sourceの制約と演出補完を分けた年齢感
+        face_shape: 輪郭と識別できる顔の形
+        hair: 髪または種に対応する部位の形・色
+        build_silhouette: 体格とシルエット、基準姿勢
+        palette_costume: 衣装または体表の色・構造・素材
+        identifying_features: この人物を見分ける具体的な特徴
+      appearance_provenance:
+        source_facts: []
+        interpretation: []
+        creative_choices: []
+      intentional_similarities: []
+      distinguish_from: []
+      subject_contract:
+        identity_scope: individual
+        subject_count: 1
+        member_ids: []
+      contract_reconciliation:
+        status: consistent
+        source_basis: 実際のsourceにある人数・構成の根拠
+        explanation: 旧設定との一致・矛盾・不明点を説明する
+        legacy_subject_contract: {}
+        existing_reference_images: []
+    character_group:
+      character_id: character_group
+      name: 集合名
+      role: 集合としてのsource上の役割
+      role_basis: 根拠となるsourceの箇所
+      subject_contract:
+        identity_scope: ensemble
+        subject_count: 2
+        member_ids:
+        - member_01
+        - member_02
+      contract_reconciliation:
+        status: consistent
+        source_basis: 実際のsourceにある人数・構成の根拠
+        explanation: 旧設定との一致・矛盾・不明点を説明する
+        legacy_subject_contract: {}
+        existing_reference_images: []
+      relationships: []
+      personality_provenance:
+        source_facts: []
+        interpretation: []
+        creative_choices: []
+      behavior_baseline:
+      - 集合に共通する所作。個人差はmember欄へ
+      shared_appearance:
+        palette_costume: 共有する衣装様式。個人差はmember欄へ
+      shared_appearance_provenance:
+        source_facts: []
+        interpretation: []
+        creative_choices: []
+      members:
+      - member_id: member_01
+        name: 一人目
+        role: source上の役割
+        role_basis: 役割を裏付けるsourceの箇所
+        relationships: []
+        personality_provenance:
+          source_facts: []
+          interpretation: []
+          creative_choices: []
+        behavior_baseline:
+        - sourceに反しない、観察可能な所作の基調
+        appearance:
+          age_impression: sourceの制約と演出補完を分けた年齢感
+          face_shape: 輪郭と識別できる顔の形
+          hair: 髪または種に対応する部位の形・色
+          build_silhouette: 体格とシルエット、基準姿勢
+          palette_costume: 衣装または体表の色・構造・素材
+          identifying_features: この人物を見分ける具体的な特徴
+        appearance_provenance:
+          source_facts: []
+          interpretation: []
+          creative_choices: []
+        intentional_similarities:
+        - with_id: member_02
+          shared_cues: source上の関係に基づき共有する外見
+          basis: 共通点を持たせるsourceまたは演出上の理由
+        distinguish_from:
+        - with_id: member_02
+          visual_differences: 二人を見分ける顔・髪・シルエット等の具体的な違い
+          behavior_differences: 同じ性格を複製せず、sourceに反しない所作の違い
+      - member_id: member_02
+        name: 二人目
+        role: source上の役割
+        role_basis: 役割を裏付けるsourceの箇所
+        relationships: []
+        personality_provenance:
+          source_facts: []
+          interpretation: []
+          creative_choices: []
+        behavior_baseline:
+        - sourceに反しない、観察可能な所作の基調
+        appearance:
+          age_impression: sourceの制約と演出補完を分けた年齢感
+          face_shape: 輪郭と識別できる顔の形
+          hair: 髪または種に対応する部位の形・色
+          build_silhouette: 体格とシルエット、基準姿勢
+          palette_costume: 衣装または体表の色・構造・素材
+          identifying_features: この人物を見分ける具体的な特徴
+        appearance_provenance:
+          source_facts: []
+          interpretation: []
+          creative_choices: []
+        intentional_similarities: []
+        distinguish_from: []

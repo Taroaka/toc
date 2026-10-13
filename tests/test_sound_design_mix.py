@@ -206,3 +206,21 @@ def test_dialogue_ducking_splits_tracks_and_keeps_full_timeline(tmp_path, dialog
         assert magnitude(samples, 440, 3.2) < baseline * 0.75
         assert magnitude(samples, 440, 4.5) > baseline * 0.75
     assert abs(sound.probe_audio(output) - 5) < 0.1
+
+
+def test_two_effects_on_one_cut_and_two_music_cues_render_together(tmp_path):
+    from toc.sound_authoring import CueDraft, add_cue
+    narration=tmp_path/'silent.wav';ffmpeg('-f','lavfi','-i','anullsrc=r=48000:cl=stereo','-t',4,narration)
+    listing=tmp_path/'list.txt';listing.write_text(f"file '{narration}'\n")
+    context={'video_set_hash':'video','duration_seconds':4,'videos':[{'item_id':'scene1_cut1','path':'clip.mp4','start_seconds':0,'duration_seconds':4}]}
+    plan=sound.approve(context,actor='test')
+    for index,(kind,hz,start,length) in enumerate([('se',440,0,4),('se',880,0,4),('bgm',220,0,2),('bgm',330,2,2)]):
+        path=tmp_path/f'tone{index}.wav';ffmpeg('-f','lavfi','-i',f'sine=frequency={hz}:duration={length}:sample_rate=48000',path)
+        c=add_cue(plan,context,CueDraft.model_validate({'kind':kind,'label':'test','source_selector':'scene1_cut1','purpose':'test','perspective':'test','timing_reason':'test','prompt':'sound','generation_duration_seconds':max(3,length),'start_seconds':start,'duration_seconds':length,'volume_db':-6}))
+        c.update(enabled=True,selected_candidate_id=str(index),candidates=[{'id':str(index),'status':'completed','path':path.name,'sha256':sound.file_hash(path),'request_hash':sound.request_hash(c),'duration_seconds':length}])
+    plan['status']='completed';snapshot=sound.render_plan(tmp_path,plan,context);assert len(snapshot['tracks'])==4
+    output=tmp_path/'mix.m4a';sound.mix_audio(snapshot,listing,output)
+    samples=array.array('f',subprocess.check_output(['ffmpeg','-v','error','-i',str(output),'-f','f32le','-ac','1','-ar','48000','-']))
+    for hz in (440,880):assert magnitude(samples,hz,.5)>.02 and magnitude(samples,hz,2.5)>.02
+    assert magnitude(samples,220,.5)>.02 and magnitude(samples,220,2.5)<.005
+    assert magnitude(samples,330,.5)<.005 and magnitude(samples,330,2.5)>.02

@@ -4,6 +4,8 @@
 共通 schema は `workflow/video-manifest-template.md`、provider prompt は
 `docs/implementation/video-prompting.md` を参照する。
 
+既存cutを任意に複数shotへ分割する `shot_plan` / child `shots[]` の構造と、親cutのtimeline・音声保持は[Cut内ショット設計](../docs/implementation/shot-direction.md)を参照する。ここではactiveなshot dataを追加しない。
+
 ```yaml
 manifest_phase: skeleton|production
 video_metadata:
@@ -149,8 +151,8 @@ scenes:
           duration_seconds: 8
           api_prompt_payload:
             policy_version: video_api_prompt_v1
-            compiler_version: conditional_video_prompt_compiler_v5
-            projection_registry_version: video_prompt_projection_registry_v5
+            compiler_version: conditional_video_prompt_compiler_v6
+            projection_registry_version: video_prompt_projection_registry_v7
             prompt: ""
             negative_prompt: ""
             sha256: sha256:<hash>
@@ -196,4 +198,3 @@ Rules:
 - p400 creates scene/cut contracts and skeleton shape; p500/p600/p700/p800 materialize provider requests.
 - all prompts, references, outputs, and request revisions are ordinary structural/provenance inputs.
 - candidate selection, listening, and editing are optional user actions under `human_choices[]`.
-

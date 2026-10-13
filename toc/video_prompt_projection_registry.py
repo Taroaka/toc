@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 
-VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION = "video_prompt_projection_registry_v6"
+VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION = "video_prompt_projection_registry_v7"
 VIDEO_PROMPT_GROUP_ORDER = (
     "start_state",
     "primary_motion",
@@ -399,7 +399,9 @@ _EXECUTION_RULES = tuple(
     'conditional', 'must_not_surface', 'use_authored_cut_camera_movement',
     exclusion_reason='film camera informs authoring; actual cut camera_motion owns execution'), VideoPromptProjectionRule(
     ('cut.cut_contract.cinematic_contract.execution.native_audio', 'video_generation.native_audio'),
-    'conditional', 'derive', 'render_synchronized_audio', 'environment_motion'),)
+    'conditional', 'derive', 'render_synchronized_audio', 'environment_motion'), VideoPromptProjectionRule(
+    ('cut.cut_contract.cinematic_contract.execution.cast_context',),
+    'conditional', 'derive', 'render_source_bound_cast_performance_context', 'emotional_change'),)
 
 
 def projection_rules() -> tuple[VideoPromptProjectionRule, ...]:
@@ -646,7 +648,7 @@ def build_video_prompt_projection(
     )
     return {
         "registry_version": VIDEO_PROMPT_PROJECTION_REGISTRY_VERSION,
-        **({'execution_projection_version': 'cinematic_execution_projection_v1'} if execution_rules else {}),
+        **({'execution_projection_version': 'cinematic_execution_projection_v2'} if execution_rules else {}),
         "group_order": list(VIDEO_PROMPT_GROUP_ORDER),
         "groups": groups,
         "active_rules": active_rules,

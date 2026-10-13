@@ -188,9 +188,11 @@ export function SoundDesignPanel({ runId, jsonFetch, audioFileUrl, videoFileUrl,
   const onDirty = useCallback((id: string, value: boolean) => setDirtyCues(current => current[id] === value ? current : { ...current, [id]: value }), []);
   const hasUnsavedChanges = Object.values(dirtyCues).some(Boolean);
   const mounted = useRef(true);
+  const activeRunId = useRef(runId);
+  activeRunId.current = runId;
   const inFlight = useRef(false);
   const apply = useCallback((value: SoundStatus) => {
-    if (mounted.current) { setData(value); onReady(value.ready); }
+    if (mounted.current && value.runId === activeRunId.current) { setData(value); onReady(value.ready); }
   }, [onReady]);
   const refresh = useCallback(async () => {
     if (!runId) return;
@@ -198,6 +200,7 @@ export function SoundDesignPanel({ runId, jsonFetch, audioFileUrl, videoFileUrl,
   }, [apply, jsonFetch, runId]);
   useEffect(() => {
     mounted.current = true;
+    setData(null); setDirtyCues({}); setAdding(false);
     const controller = new AbortController();
     if (runId) {
       setBusy(true);

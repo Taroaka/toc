@@ -349,6 +349,48 @@ def _build_client(factory: ClientFactory, cwd: Path) -> StoryAuthorClient:
     return client
 
 
+def _validate_local_images(local_images: list[Path] | None) -> list[Path] | None:
+    """Check supplied local images before starting the author client."""
+
+    if local_images is None:
+        return None
+    if not isinstance(local_images, list):
+        raise StoryAuthorRuntimeError(
+            "story author local_images must be a list of paths"
+        )
+
+    checked_images = list(local_images)
+    for index, image_path in enumerate(checked_images):
+        if not isinstance(image_path, Path):
+            raise StoryAuthorRuntimeError(
+                f"story author local image {index + 1} must be a Path"
+            )
+        if not image_path.is_file():
+            raise StoryAuthorRuntimeError(
+                f"story author local image {index + 1} must be an existing regular file"
+            )
+
+    if not checked_images:
+        return checked_images
+
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise StoryAuthorRuntimeError(
+            "story author local image validation requires Pillow"
+        ) from exc
+
+    for index, image_path in enumerate(checked_images):
+        try:
+            with Image.open(image_path) as image:
+                image.load()
+        except Exception as exc:
+            raise StoryAuthorRuntimeError(
+                f"story author local image {index + 1} could not be decoded"
+            ) from exc
+    return checked_images
+
+
 async def run_structured_story_turn(
     *,
     client_factory: ClientFactory,
@@ -359,13 +401,15 @@ async def run_structured_story_turn(
     timeout_seconds: int = DEFAULT_STORY_AUTHOR_TIMEOUT_SECONDS,
     allow_multiple_completed_messages: bool = False,
     reset_timeout_on_notification: bool = False,
+    local_images: list[Path] | None = None,
 ) -> StoryAuthorResult:
     """Run one read-only, structured story-author turn.
 
     Client construction is deliberately injected.  The client is started,
     configured with the story-author safety contract, and always stopped in a
     ``finally`` block.  Only one completed ``agentMessage`` is accepted, and
-    that message must decode to a JSON object.
+    that message must decode to a JSON object. Optional local images are
+    validated before the client starts and passed through to the turn.
     """
 
     if not isinstance(prompt, str) or not prompt.strip():
@@ -376,6 +420,7 @@ async def run_structured_story_turn(
         raise StoryAuthorRuntimeError("story author model must not be empty")
     if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or timeout_seconds < 1:
         raise StoryAuthorRuntimeError("story author timeout_seconds must be positive")
+    validated_local_images = _validate_local_images(local_images)
 
     resolved_cwd = Path(cwd)
     client: StoryAuthorClient | None = None
@@ -392,14 +437,17 @@ async def run_structured_story_turn(
             raise StoryAuthorRuntimeError(
                 "story author thread start did not return a thread id"
             )
-        transcript = await client.run_turn(
-            thread_id=thread_id,
-            text=prompt,
-            cwd=resolved_cwd,
-            timeout_seconds=timeout_seconds,
-            reset_timeout_on_notification=reset_timeout_on_notification,
-            output_schema=output_schema,
-        )
+        run_turn_kwargs: dict[str, Any] = {
+            "thread_id": thread_id,
+            "text": prompt,
+            "cwd": resolved_cwd,
+            "timeout_seconds": timeout_seconds,
+            "reset_timeout_on_notification": reset_timeout_on_notification,
+            "output_schema": output_schema,
+        }
+        if validated_local_images is not None:
+            run_turn_kwargs["local_images"] = validated_local_images
+        transcript = await client.run_turn(**run_turn_kwargs)
         if not isinstance(transcript, (list, tuple)):
             raise StoryAuthorRuntimeError("story author turn transcript must be a list")
 

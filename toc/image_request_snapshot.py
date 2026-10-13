@@ -1433,13 +1433,17 @@ def bind_request_snapshot_references(
     *,
     run_dir: Path,
     allow_existing_hash_changes: bool = False,
+    preserve_generated_dependencies: bool = False,
     expected_root_identity: PathIdentity | None = None,
 ) -> ImageRequestSnapshot:
-    """Replace every deferred reference with a hash-bound reference.
+    """Bind ready reference bytes and optionally preserve intra-snapshot producers.
 
     Review-time snapshots may defer assets that are generated earlier in the
-    same run.  A provider-ready revision must instead bind the exact bytes now
-    present on disk so later mutations invalidate that revision.
+    same run. With ``preserve_generated_dependencies=True``, only a deferred
+    reference produced by another item in this same snapshot remains declared
+    as a dependency; external references must bind to current bytes. The image
+    executor then generates dependency groups in order and records the actual
+    bytes hash used for every provider call.
     """
 
     base, root_identity = _snapshot_root(
@@ -1453,6 +1457,9 @@ def bind_request_snapshot_references(
         expected_root_identity=root_identity,
     )
     bound_items: list[ImageRequestSnapshotItem] = []
+    producer_by_destination = {
+        item.destination: item.item_id for item in snapshot.items
+    }
     for item in snapshot.items:
         bound_references: list[ImageRequestReference] = []
         for reference in item.references:
@@ -1461,6 +1468,14 @@ def bind_request_snapshot_references(
                 reference.path,
                 field="reference",
             )
+            if (
+                preserve_generated_dependencies
+                and reference.deferred
+                and producer_by_destination.get(reference_path) == reference.producer_item_id
+                and reference.producer_item_id != item.item_id
+            ):
+                bound_references.append(reference)
+                continue
             try:
                 actual_sha256 = _snapshot_file_sha256(
                     base,

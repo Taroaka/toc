@@ -46,7 +46,7 @@ end state、identity を変更できない。
 ## Projection registry
 
 code source of truth は `toc/video_prompt_projection_registry.py`、version は
-`video_prompt_projection_registry_v5`。
+`video_prompt_projection_registry_v7`。
 
 | axis | values | purpose |
 | --- | --- | --- |
@@ -83,15 +83,23 @@ internal references は diagnostics に留め、prompt 本文へ入れない。
 ## Compiler contract
 
 `cinematic_contract.execution` があるcutは、解決済みの光・焦点・演技・物理を
-`cinematic_execution_projection_v1` / `cinematic_execution_compiler_v1`として既存groupへ投影する。
+`cinematic_execution_projection_v2` / `cinematic_execution_compiler_v2`として既存groupへ投影する。
 明示された項目を固定件数で切り捨てない。`video_generation.native_audio` は実行時の音声設定を
 所有し、p400の発話原稿から解決された台詞を使う。詳細は[撮影方針](cinematic-language.md)を参照。
+
+親cutに `shot_plan` がある場合は、各shotを個別のvideo requestへ投影する。shot planの
+cut内開始時刻・timeline尺と `video_generation.duration_seconds` は別の値として保持する。
+現在のKling projectionではproviderへ整数の3〜15秒（`max(3, ceil(timeline尺))`）を要求するため、
+fractionalなtimeline尺を使え、生成clipがtimeline尺を超えることがある。親cutへ配置するときは
+shotの開始時刻とtimeline尺に合わせて
+余分なprovider出力をtrimし、親cutの音声/ナレーション尺を延ばさない。provider native multishotは
+使わず、生成clipを親cutのshot列へ組み立てる。詳細は[Cut内ショット設計](shot-direction.md)。
 
 ```yaml
 api_prompt_payload:
   policy_version: video_api_prompt_v1
-  compiler_version: conditional_video_prompt_compiler_v5
-  projection_registry_version: video_prompt_projection_registry_v5
+  compiler_version: conditional_video_prompt_compiler_v6
+  projection_registry_version: video_prompt_projection_registry_v7
   provider: kling_3_0
   mode: image_to_video
   provider_policy:

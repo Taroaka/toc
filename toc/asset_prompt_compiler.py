@@ -6,7 +6,7 @@ from typing import Any
 
 
 ASSET_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
-ASSET_PROMPT_COMPILER_VERSION = "asset_final_image_prompt_compiler_v2"
+ASSET_PROMPT_COMPILER_VERSION = "asset_final_image_prompt_compiler_v3"
 
 _ASSET_REUSE_MODES = {"neutral_anchor", "time_variant", "state_variant"}
 _SCENE_TIME_MARKERS = (
@@ -132,20 +132,27 @@ def _subject_contract(entry: dict[str, Any]) -> tuple[str, int, list[str]]:
     return scope, count, member_ids
 
 
-def _appearance_lines(entry: dict[str, Any], *, fallback_role: str) -> list[str]:
-    appearance = _mapping(entry.get("appearance_contract"))
-    labels = (
+_APPEARANCE_LABELS = (
         ("身分", "social_position"),
         ("役割", "occupation_or_role"),
         ("衣装状態", "occasion_or_state"),
+        ("年齢感", "age_impression"),
+        ("顔立ち", "face_shape"),
+        ("髪・毛並みなど", "hair"),
+        ("体格・シルエット", "build_silhouette"),
+        ("配色・衣装", "palette_costume"),
+        ("識別特徴", "identifying_features"),
         ("シルエット", "silhouette"),
         ("素材", "materials"),
         ("状態", "condition"),
         ("色", "palette"),
         ("避ける衣装", "must_avoid"),
     )
+
+
+def _appearance_value_lines(appearance: dict[str, Any]) -> list[str]:
     lines: list[str] = []
-    for label, key in labels:
+    for label, key in _APPEARANCE_LABELS:
         raw = appearance.get(key)
         if isinstance(raw, list):
             value = "、".join(_text_list(raw))
@@ -153,11 +160,73 @@ def _appearance_lines(entry: dict[str, Any], *, fallback_role: str) -> list[str]
             value = str(raw or "").strip()
         if value:
             lines.append(f"{label}: {value}。")
+    return lines
+
+
+def _comparison_lines(appearance: dict[str, Any]) -> list[str]:
+    lines = []
+    for row in appearance.get("intentional_similarities", []) if isinstance(appearance.get("intentional_similarities"), list) else []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("with_name") or row.get("with_id") or "別の人物").strip()
+        cues = str(row.get("shared_cues") or "").strip()
+        if cues:
+            lines.append(f"意図した共通点（{name}）: {cues}。共通点は保つ。")
+    for row in appearance.get("distinguish_from", []) if isinstance(appearance.get("distinguish_from"), list) else []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("with_name") or row.get("with_id") or "別の人物").strip()
+        differences = str(row.get("visual_differences") or "").strip()
+        if differences:
+            lines.append(f"混同しやすい{name}との視覚的な区別: {differences}。")
+    return lines
+
+
+def _appearance_lines(entry: dict[str, Any], *, fallback_role: str) -> list[str]:
+    appearance = _mapping(entry.get("appearance_contract"))
+    if appearance.get("identity_scope") == "ensemble":
+        lines = _appearance_value_lines(appearance)
+        shared = _mapping(appearance.get("shared_appearance"))
+        if shared:
+            lines.append("グループで共有する外見: " + "、".join(
+                f"{key}: {value}" for key, value in shared.items() if str(value or "").strip()
+            ) + "。")
+        members = appearance.get("members") if isinstance(appearance.get("members"), list) else []
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            member_name = str(member.get("name") or member.get("member_id") or "group member").strip()
+            member_role = str(member.get("role") or "").strip()
+            lines.extend([f"[{member_name}の個別デザイン]", f"役割: {member_role or fallback_role}。"])
+            lines.extend(_appearance_value_lines(_mapping(member.get("appearance"))))
+            lines.extend(_comparison_lines(member))
+        if not lines:
+            lines.append(f"役割: {fallback_role or '物語上の役割'}。")
+        lines.append("各memberの顔・頭部・毛並み/皮膚/羽毛などの個体差を保ち、意図した共通点も残す。")
+        return lines
+
+    lines = _appearance_value_lines(appearance)
+    lines.extend(_comparison_lines(appearance))
     if not lines:
         lines.append(
             f"衣装は、{fallback_role or '物語上の役割'}と身分が仕立て、素材、装飾量、手入れの状態から読めるものにする。"
         )
-    lines.append("後続画像で衣装の主要形状、素材、配色を保つ。")
+    lines.append("後続画像で同一個体の識別特徴、主要な外見、衣装/表面の形状・素材・配色を保つ。")
+    return lines
+
+
+def _state_variant_identity_lines(entry: dict[str, Any]) -> list[str]:
+    transition = _mapping(entry.get("state_transition"))
+    lines = []
+    if str(transition.get("from_state") or "").strip():
+        lines.append(f"変化前: {str(transition['from_state']).strip()}。")
+    if str(transition.get("to_state") or "").strip():
+        lines.append(f"変化後: {str(transition['to_state']).strip()}。")
+    lines.append(
+        "派生元参照画像は同一人物/個体のidentity anchorとして使う。generation_promptと状態遷移で"
+        "明示された特徴変化を優先し、その変更を親参照の見た目で打ち消さない。"
+        "変更が指定されていない特徴は参照から連続性を保つ。"
+    )
     return lines
 
 
@@ -184,8 +253,24 @@ def compile_asset_prompt(
         if time_constraint and normalized_time not in explicit_prompt:
             prefixes.append(time_constraint)
         reuse_lines = [line for line in _reuse_prompt_lines(reuse, asset_type=asset_type) if line]
-        if reuse_lines and reuse.get("time_of_day") not in explicit_prompt:
+        if reuse_lines and not (reuse.get("time_of_day") and reuse.get("time_of_day") in explicit_prompt):
             prefixes.extend(reuse_lines)
+        if asset_type == "character_reference" and reuse.get("mode") == "state_variant":
+            return "\n\n".join([
+                *prefixes,
+                explicit_prompt,
+                "[状態変化と親参照のidentity continuity]",
+                *_state_variant_identity_lines(entry),
+            ])
+        if asset_type == "character_reference":
+            appearance = _mapping(entry.get("appearance_contract"))
+            if appearance.get("cast_design_schema_version"):
+                identity_lines = _appearance_lines(
+                    entry,
+                    fallback_role=str(entry.get("story_purpose") or "").strip(),
+                )
+                suffix = ["[全キャスト比較で決めた個体識別条件]", *identity_lines]
+                return "\n\n".join([*prefixes, explicit_prompt, *suffix])
         return "\n\n".join([*prefixes, explicit_prompt]) if prefixes else explicit_prompt
 
     generation_plan = entry.get("generation_plan") if isinstance(entry.get("generation_plan"), dict) else {}
@@ -193,18 +278,18 @@ def compile_asset_prompt(
     visual_spec = entry.get("visual_spec") if isinstance(entry.get("visual_spec"), dict) else {}
     if asset_type == "character_reference":
         identity_scope, subject_count, _member_ids = _subject_contract(entry)
-        subject = str(visual_spec.get("subject") or "登場人物の全身参照画像").strip()
+        subject = str(visual_spec.get("subject") or "キャラクターの全体形態が分かる参照画像").strip()
         purpose = str(entry.get("story_purpose") or "後続画像で同じ人物として保つ").strip()
         if identity_scope == "ensemble":
-            creation_line = f"{subject}。主対象は{subject_count}人の人物群で、{subject_count}人をそれぞれ別人として固定する。"
-            views_line = "1枚の横長画像の中に、各人物の正面・側面・背面の全身3ビューを人物ごとに並べた実写キャラクター参照シートとして作る。"
-            identity_line = f"{purpose}。{subject_count}人それぞれの顔、髪、体格、衣装を混同せず、後続画像でも同じ組み合わせとして保つ。"
-            global_identity_style = "自然な肌。人物ごとに異なる顔、髪型、体格を安定させる。"
+            creation_line = f"{subject}。主対象は{subject_count}体のキャラクター群で、member_idsごとに別々の個体として保つ。"
+            views_line = "1枚の横長画像の中に、各memberの正面・側面・背面の全体ビューをmemberごとに並べる。"
+            identity_line = f"{purpose}。{subject_count}体それぞれの個体識別特徴、体形、表面、衣装を対応づけ、後続画像でも同じ組み合わせとして保つ。"
+            global_identity_style = "memberごとの主要形態と個体識別特徴を安定させる。"
         else:
-            creation_line = f"{subject}。主対象は人物1人で、場所参照や空の部屋ではない。"
-            views_line = "1枚の横長画像の中に、同じ人物の正面・側面・背面の全身3ビューを並べた実写キャラクター参照シートとして作る。"
-            identity_line = f"{purpose}。自然な髪、自然な体格。後続画像で同じ顔、髪、体格を保つ。"
-            global_identity_style = "自然な肌、同じ顔と髪型。"
+            creation_line = f"{subject}。主対象はキャラクター1体で、場所参照や空の部屋ではない。"
+            views_line = "1枚の横長画像の中に、同一個体の正面・側面・背面の全体ビューを並べた実写キャラクター参照シートとして作る。"
+            identity_line = f"{purpose}。後続画像で同じ個体識別特徴、頭部の形、体形、表面と衣装を保つ。"
+            global_identity_style = "自然で具体的な素材感。同一個体として識別できる主要形態を固定する。"
         lines = [
             "[全体 / 不変条件]",
             f"実写、シネマティック、全身、頭からつま先まで。{global_identity_style}画面内テキストなし、字幕なし、ロゴなし。",
@@ -220,8 +305,8 @@ def compile_asset_prompt(
         if reference_inputs:
             lines.extend(
                 [
-                    "参照画像が渡される場合は、その人物の顔・髪・体格・年齢感を同一人物として維持し、衣装や状態だけを変更する。",
-                    "別人の顔、別人の髪型、体格の大きな変化、年齢の変化は失敗。",
+                    "参照画像が渡される場合は、受け入れ済みの個体識別特徴、種別、頭部/体形、表面を維持し、明示された衣装や状態だけを変更する。",
+                    "参照と異なる個体、種別、年齢感、主要形態への変更は失敗。",
                 ]
             )
         lines.extend(
@@ -233,7 +318,7 @@ def compile_asset_prompt(
                 *_extra_visual_constraints(entry, subject=subject),
                 "",
                 "[禁止]",
-                "人物なし、空の部屋、場所だけ、単一ポートレートのみ、顔が読めない構図、アニメ、漫画、イラスト、文字、ロゴ、ウォーターマーク、途中クロップ、低情報量のポスター風。",
+                "キャラクターなし、空の部屋、場所だけ、単一ポートレートのみ、頭部または主要識別形態が読めない構図、アニメ、漫画、イラスト、文字、ロゴ、ウォーターマーク、途中クロップ、低情報量のポスター風。",
                 *_individual_forbidden(entry),
             ]
         )
