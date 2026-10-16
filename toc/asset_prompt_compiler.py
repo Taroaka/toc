@@ -6,7 +6,7 @@ from typing import Any
 
 
 ASSET_PROMPT_POLICY_VERSION = "image_api_prompt_v1"
-ASSET_PROMPT_COMPILER_VERSION = "asset_final_image_prompt_compiler_v3"
+ASSET_PROMPT_COMPILER_VERSION = "asset_final_image_prompt_compiler_v4"
 
 _ASSET_REUSE_MODES = {"neutral_anchor", "time_variant", "state_variant"}
 _SCENE_TIME_MARKERS = (
@@ -79,15 +79,28 @@ def _reuse_contract(entry: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _validate_neutral_asset_lighting(entry: dict[str, Any], reuse: dict[str, str]) -> None:
+def _validate_neutral_asset_lighting(
+    entry: dict[str, Any], reuse: dict[str, str], *, story_time: str = ""
+) -> None:
     if reuse.get("mode") != "neutral_anchor":
         return
     visual_spec = _mapping(entry.get("visual_spec"))
-    probe_values = [
-        entry.get("generation_prompt"),
-        visual_spec.get("subject"),
-        *_text_list(entry.get("fixed_prompts")),
-    ]
+    # The legacy profile adapter embeds the canonical setting verbatim in this
+    # period-consistency clause. Its chronology is context, not a light request.
+    # Exempt only that exact source-bound clause in descriptive fields; explicit
+    # generation instructions and all text outside the clause remain checked.
+    context_clause = (
+        f"実写映画の同一人物として固定し、{story_time}の衣装・髪型・素材・身分表現を守る"
+        if story_time and entry.get("asset_type") == "character_reference"
+        else ""
+    )
+    descriptive_values = [visual_spec.get("subject"), *_text_list(entry.get("fixed_prompts"))]
+    probe_values = [str(entry.get("generation_prompt") or "")]
+    for value in descriptive_values:
+        text = str(value or "")
+        if context_clause:
+            text = text.replace(context_clause, "")
+        probe_values.append(text)
     probe = "\n".join(str(value or "") for value in probe_values)
     for marker in _SCENE_TIME_MARKERS:
         if marker in probe:
@@ -96,6 +109,13 @@ def _validate_neutral_asset_lighting(entry: dict[str, Any], reuse: dict[str, str
 
 def _reuse_prompt_lines(reuse: dict[str, str], *, asset_type: str) -> list[str]:
     mode = reuse.get("mode") or ""
+    if mode == "neutral_anchor":
+        return [
+            "",
+            "[基準参照の照明]",
+            "特定の朝昼夕夜に固定しない中性的な参照照明で、形状、素材、配色を読み取れるようにする。",
+            "時代背景や物語上の役割に含まれる時間帯の記述を照明指定として使わない。",
+        ]
     if mode == "time_variant":
         reference_label = "場所参照画像" if asset_type == "location_reference" else "対象参照画像"
         return [
@@ -246,7 +266,7 @@ def compile_asset_prompt(
     )
     asset_type = str(entry.get("asset_type") or "").strip()
     reuse = _reuse_contract(entry)
-    _validate_neutral_asset_lighting(entry, reuse)
+    _validate_neutral_asset_lighting(entry, reuse, story_time=normalized_time)
     explicit_prompt = str(entry.get("generation_prompt") or "").strip()
     if explicit_prompt:
         prefixes = []

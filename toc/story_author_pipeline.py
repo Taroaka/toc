@@ -40,6 +40,7 @@ from .story_authoring import (
 )
 from .story_selection import selected_event_order, StorySelectionError
 from .story_duration import build_duration_plan, normalize_target_duration
+from .story_characters import SCENE_CHARACTER_BINDING_CONTRACT, collect_scene_character_ids
 from .production_repair import RepairSession, RepairNoProgress, author_with_repair, with_repair_context
 
 
@@ -159,6 +160,7 @@ SCENE_AUTHOR_OUTPUT_SCHEMA: dict[str, Any] = {
         "title",
         "phase",
         "purpose",
+        "character_ids",
         "conflict",
         "turn",
         "affect",
@@ -178,6 +180,10 @@ SCENE_AUTHOR_OUTPUT_SCHEMA: dict[str, Any] = {
     ],
     "properties": {
         "scene_id": {"type": "string"},
+        "character_ids": {
+            "type": "array", "uniqueItems": True,
+            "items": {"type": "string", "minLength": 1},
+        },
         "title": {"type": "string"},
         "phase": {"type": "string"},
         "purpose": {"type": "string"},
@@ -231,6 +237,7 @@ SCENE_AUTHOR_OUTPUT_SCHEMA: dict[str, Any] = {
                     "beat_id",
                     "beat_function",
                     "source_event_ids",
+                    "participants",
                     "what_happens",
                     "visible_action",
                     "immediate_consequence",
@@ -241,6 +248,9 @@ SCENE_AUTHOR_OUTPUT_SCHEMA: dict[str, Any] = {
                     "beat_id": {"type": "string"},
                     "beat_function": {"type": "string"},
                     "source_event_ids": {"type": "array", "items": {"type": "string"}},
+                    "participants": {
+                        "type": "array", "items": {"type": "string", "minLength": 1},
+                    },
                     "what_happens": {"type": "string"},
                     "visible_action": {"type": "string"},
                     "immediate_consequence": {"type": "string"},
@@ -638,6 +648,7 @@ def build_scene_author_prompt(
             "Author only the declared scene; do not move source events between scenes.",
             "Preserve every source-backed fact and keep creative complements explicit.",
             "Define the complete lifecycle: start_state, event_sequence, turning_event, end_state, preservation/reveal contract, and handoff_chain.",
+            "Write scene.character_ids as the union of source_basis.character_ids, start/end state characters, and every beat's participants/character_ids. Use registered character IDs only; [] is valid when no character is referenced. This index is rebound from those explicit references before publication, never guessed from names or prose.",
             "Make each event_sequence beat concrete, observable, causally consequential, and traceable to source event IDs.",
             "Also author the downstream story overview fields title, phase, purpose, conflict, turn, affect, visualizable_action, grounding_note, location, time_of_day, and time_of_day_visual_basis from the same lifecycle; do not use generic filler.",
             "location must name the authored place and preserve its ordered sequence; purpose/conflict/turn must be specific projections of this scene rather than template prose.",
@@ -687,6 +698,7 @@ def build_scene_batch_author_prompt(
             "Do not add, remove, reorder, merge, or split plans or source-event ownership.",
             "For every scene write the complete lifecycle and all concrete causal beats; one source event may expand into multiple beats.",
             "Each beat must name participants, location, visible action, visible evidence, consequence, and source event IDs.",
+            "Write scene.character_ids as the union of source_basis.character_ids, start/end state characters, and every beat's participants/character_ids. Use registered character IDs only; write participants=[] explicitly for a beat with no characters. The index is rebound from those references before publication.",
             "Preserve adjacent state IDs and handoffs exactly as frozen by the Architect.",
             "Use specific research details rather than generic filler; keep source facts and creative complements distinguishable.",
             "Author all downstream overview fields from the same lifecycle, including time-of-day visual basis with 光源, 明るさ, 影, and 色温度.",
@@ -827,7 +839,7 @@ def _ensure_scene_binding(
             # source_basis, not authored prose. They keep legacy consumers
             # from losing actor/location bindings when the model expresses
             # them only once at scene scope.
-            if not (beat.get("participants") or beat.get("character_ids")):
+            if "participants" not in beat and "character_ids" not in beat:
                 beat["participants"] = list(character_ids)
             if not (
                 beat.get("location_id")
@@ -868,6 +880,9 @@ def _ensure_scene_binding(
                     )
                     if value
                 ]
+    # Mechanical index only: preserve every authored lifecycle layer and
+    # collect explicit IDs, including characters entering after the start.
+    authored["character_ids"], _ = collect_scene_character_ids(authored)
     authored["conflict"] = _text(authored.get("conflict")) or _text(
         scene_intent.get("conflict")
         or first_beat.get("conflict_or_constraint")
@@ -1205,6 +1220,7 @@ def _metadata_injected(
     metadata.update(
         {
             "scene_authoring_contract": STORY_CONTRACT_VERSION,
+            "scene_character_binding_contract": SCENE_CHARACTER_BINDING_CONTRACT,
             "source_digest": source_digest,
             "topic": topic,
             "target_duration_seconds": target_duration_seconds,
@@ -1586,7 +1602,7 @@ async def author_story_from_research(
             def validate_fields(response):
                 try:
                     candidate = apply_field_patch(field_scene, response, field_issues)
-                    _ensure_scene_binding(candidate, field_plan)
+                    candidate = _ensure_scene_binding(candidate, field_plan)
                 except (FieldPatchError, StoryAuthoringError) as exc:
                     return [str(exc)]
                 patched['scene'] = candidate

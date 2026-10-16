@@ -177,6 +177,44 @@ class AssetPromptCompilerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "asset_prompt_scene_time_leak"):
             compile_asset_prompt(entry, topic_label="物語", story_time="17世紀")
 
+    def test_neutral_asset_preserves_period_context_without_treating_chronology_as_light(self) -> None:
+        period = "年代を特定しない昔。深夜の出来事を描く。王朝は指定しない。"
+        subject = f"旅人の全身参照。実写映画の同一人物として固定し、{period}の衣装・髪型・素材・身分表現を守る"
+        entry = {
+            "asset_type": "character_reference",
+            "reuse_contract": {"mode": "neutral_anchor"},
+            "visual_spec": {"subject": subject},
+            "fixed_prompts": [subject],
+        }
+        prompt = compile_asset_prompt(entry, topic_label="創作", story_time=period)
+        self.assertIn(period, prompt)
+        self.assertIn("時間帯の記述を照明指定として使わない", prompt)
+        self.assertIn("中性的な参照照明", prompt)
+        # A lighting directive outside the exact adapter period clause still fails.
+        entry["fixed_prompts"].append("月光を顔に当てる")
+        with self.assertRaisesRegex(ValueError, "asset_prompt_scene_time_leak"):
+            compile_asset_prompt(entry, topic_label="創作", story_time=period)
+
+    def test_period_context_exception_cannot_hide_explicit_scene_light(self) -> None:
+        period = "月光"
+        for field in ("generation_prompt", "fixed_prompts"):
+            entry = {
+                "asset_type": "object_reference",
+                "reuse_contract": {"mode": "neutral_anchor"},
+                field: period if field == "generation_prompt" else [period],
+            }
+            with self.assertRaisesRegex(ValueError, "asset_prompt_scene_time_leak"):
+                compile_asset_prompt(entry, topic_label="創作", story_time=period)
+
+    def test_neutral_explicit_prompt_receives_lighting_contract(self) -> None:
+        prompt = compile_asset_prompt({
+            "asset_type": "object_reference",
+            "reuse_contract": {"mode": "neutral_anchor"},
+            "generation_prompt": "革の旅行鞄の単体参照。",
+        }, topic_label="創作")
+        self.assertIn("中性的な参照照明", prompt)
+        self.assertIn("革の旅行鞄", prompt)
+
     def test_time_variant_uses_explicit_contract_instead_of_keyword_inference(self) -> None:
         prompt = compile_asset_prompt(
             {

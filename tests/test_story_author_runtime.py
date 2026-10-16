@@ -78,6 +78,26 @@ def test_json_object_helper_returns_a_clean_receipt_without_changing_text() -> N
     assert receipt.original_text == receipt.normalized_text == '{"nested": {"x": 1}}'
 
 
+@pytest.mark.parametrize('raw, expected', [
+    ('{"items":[{"name":"本文"],"kept":true}}', None),
+    ('{"items":[{"name":"本文"]},"kept":true}', {'items': [{'name': '本文'}], 'kept': True}),
+    ('{"data":{"values":[1,2}]}}', None),
+    ('{"data":{"values":[1,2}]}', {'data': {'values': [1, 2]}}),
+])
+def test_single_reversed_closing_pair_is_bounded_and_preserves_all_tokens(raw, expected):
+    from toc.story_syntax_patch import _tokens
+    if expected is None:
+        with pytest.raises(StoryAuthorRuntimeError):
+            decode_story_transport_payload({'result_json': raw})
+        return
+    decoded, receipt = decode_story_transport_payload_with_receipt({'result_json': raw})
+    assert decoded == expected
+    assert receipt.rule == 'one_transposed_closing_pair'
+    assert len(receipt.original_text) == len(receipt.normalized_text)
+    assert _tokens(receipt.original_text)[0] == _tokens(receipt.normalized_text)[0]
+    assert receipt.as_dict()['edit_offset'] >= 0
+
+
 @pytest.mark.parametrize(
     "result_json",
     [

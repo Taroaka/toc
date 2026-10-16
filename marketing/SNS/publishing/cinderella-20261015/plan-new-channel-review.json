@@ -1,0 +1,53 @@
+{
+  "job_id": "cinderella-20261015",
+  "source_run": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554",
+  "mode": "publish",
+  "visibility": "public",
+  "timezone": "Asia/Tokyo",
+  "scheduled_at": null,
+  "status": "blocked_youtube_verification_under_review",
+  "authorization": "User requested publication with specified files, then requested progress excluding Instagram; resumed after enabling local file uploads.",
+  "platforms": {
+    "youtube": {
+      "account_handle": null,
+      "channel_name": "英雄の旅｜AIシネマ",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/シンデレラ_全編統合版_冒頭移動修正_BGM_SE完成_9分38秒.mp4",
+      "title": "シンデレラ / Cinderella｜ガラスの靴がつなぐ物語【AI映像作品】",
+      "description": "午前0時、魔法が消える。\n残されたのは、ガラスの靴。\n\nシンデレラの物語を、映像と日本語ナレーションでお届けします。\n舞踏会の出会いから、ガラスの靴、そして物語の結末まで。全編9分38秒です。\n\n本作品の映像・音声にはAI生成技術を使用しています。\n\n#シンデレラ #Cinderella #AI映像 #物語",
+      "pinned_comment": "最後までご覧いただきありがとうございます。心に残った場面を、ぜひコメントで教えてください。",
+      "cover_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/thumbnails/cinderella-bilingual-v2-upload.jpg",
+      "cover_sha256": "0c679edc3b251a1925ab974e1c008fc72a4eb13c605f06f9eadc1cec636d5b3e",
+      "audience": "not_made_for_kids",
+      "ai_disclosure": true,
+      "video_sha256": "9c24b8ad9303eabaa9d1461b8e50d4fd4e434a5af212dedfc0d2002327625b8f"
+    },
+    "tiktok": {
+      "account_handle": "@eiyu_no_tabi",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/midnight_20261015/letterbox/cinderella_midnight_letterbox_341-394_v2_youtube.mp4",
+      "caption": "午前0時、魔法が消える。\n残されたのは、ガラスの靴。\n\nシンデレラ / Cinderella\n全編はYouTube「英雄の旅｜AIシネマ」にて。\n\nAIで制作した映像作品です。\n\n#シンデレラ #Cinderella #AI映像 #物語",
+      "ai_disclosure": true,
+      "video_sha256": "dac54cc24b81016762823f24c3cf48852f32ee9e907038871da71d577943e1de",
+      "youtube_link_status": "pending_channel_creation"
+    }
+  },
+  "active_platforms": [
+    "youtube",
+    "tiktok"
+  ],
+  "instagram_status": "deferred_by_user",
+  "youtube_target": {
+    "google_account": "zion.japan0@gmail.com",
+    "channel_name": "英雄の旅｜AIシネマ",
+    "channel_id": null,
+    "channel_url": null,
+    "status": "verification_submitted_under_review",
+    "description_file": "channel-description.txt",
+    "observed_message": "動画は現在審査中です 結果は24時間以内にお知らせいたします。"
+  },
+  "prior_youtube_upload": {
+    "channel_id": "UC77RM7vM0VBuxpakfj2odQw",
+    "video_id": "jbOHntynqjE",
+    "last_observed_visibility": "private",
+    "publish_not_authorized_after_target_change": true
+  }
+}

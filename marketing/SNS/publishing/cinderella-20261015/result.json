@@ -1,0 +1,84 @@
+{
+  "job_id": "cinderella-20261015",
+  "source_run": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554",
+  "mode": "publish",
+  "visibility": "public",
+  "timezone": "Asia/Tokyo",
+  "scheduled_at": null,
+  "status": "complete",
+  "authorization": "User personally created 英雄の旅 @eiyu_no_tabi and instructed continued publication; existing publication authorization persists.",
+  "platforms": {
+    "youtube": {
+      "account_handle": "@eiyu_no_tabi",
+      "channel_name": "英雄の旅",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/シンデレラ_全編統合版_冒頭移動修正_BGM_SE完成_9分38秒.mp4",
+      "title": "シンデレラ / Cinderella｜ガラスの靴がつなぐ物語【AI映像作品】",
+      "description": "午前0時、魔法が消える。\n残されたのは、ガラスの靴。\n\nシンデレラの物語を、映像と日本語ナレーションでお届けします。\n舞踏会の出会いから、ガラスの靴、そして物語の結末まで。全編9分38秒です。\n\n本作品の映像・音声にはAI生成技術を使用しています。\n\n#シンデレラ #Cinderella #AI映像 #物語",
+      "pinned_comment": "最後までご覧いただきありがとうございます。心に残った場面を、ぜひコメントで教えてください。",
+      "cover_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/thumbnails/cinderella-bilingual-v2-upload.jpg",
+      "cover_sha256": "0c679edc3b251a1925ab974e1c008fc72a4eb13c605f06f9eadc1cec636d5b3e",
+      "audience": "not_made_for_kids",
+      "ai_disclosure": true,
+      "video_sha256": "9c24b8ad9303eabaa9d1461b8e50d4fd4e434a5af212dedfc0d2002327625b8f",
+      "video_id": "QDqkV_QsmM4",
+      "permalink": "https://youtu.be/QDqkV_QsmM4",
+      "upload_status": "complete",
+      "thumbnail_status": "uploaded_after_user_phone_verification",
+      "status": "published",
+      "pinned_comment_status": "pinned",
+      "pinned_comment_id": "UgzVc3i1moASnSzgJwF4AaABAg"
+    },
+    "tiktok": {
+      "account_handle": "@eiyu_no_tabi",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/midnight_20261015/letterbox/cinderella_midnight_letterbox_341-394_v2_youtube.mp4",
+      "caption": "午前0時、魔法が消える。\n残されたのは、ガラスの靴。\n\nシンデレラ / Cinderella\n全編はYouTube「英雄の旅」にて。\n\nAIで制作した映像作品です。\n\n#シンデレラ #Cinderella #AI映像 #物語\n\nYouTube： https://www.youtube.com/@eiyu_no_tabi",
+      "ai_disclosure": true,
+      "video_sha256": "dac54cc24b81016762823f24c3cf48852f32ee9e907038871da71d577943e1de",
+      "youtube_link_status": "profile_bio_saved_and_reloaded",
+      "cover_selection": {
+        "type": "video_frame",
+        "approx_seconds": 23,
+        "description": "主人公がガラスの靴を手にしている場面",
+        "ui_cover_saved": true
+      },
+      "preparation_state": "prepared_not_draft_saved",
+      "pending": [
+        "New YouTube channel URL",
+        "Public submission after full video is available"
+      ],
+      "post_id": "7696716002406468885",
+      "permalink": "https://www.tiktok.com/@eiyu_no_tabi/video/7696716002406468885",
+      "status": "existing_public_posts_route_updated",
+      "profile_bio": "AIで世界の物語を映像に。\n全編はYouTube「英雄の旅」へ。\nhttps://www.youtube.com/@eiyu_no_tabi",
+      "profile_bio_saved": true,
+      "caption_status": "existing_post_captions_unchanged_no_edit_control_available",
+      "duplicate_upload_forbidden": true,
+      "scope": "No new posts per latest user answer; existing videos remain public, profile YouTube route updated"
+    }
+  },
+  "active_platforms": [
+    "youtube",
+    "tiktok"
+  ],
+  "instagram_status": "deferred_by_user",
+  "youtube_target": {
+    "google_account": "zion.japan0@gmail.com",
+    "channel_name": "英雄の旅",
+    "channel_id": "UCsa0kB-OjTCXgj4bI9muG9A",
+    "channel_url": "https://www.youtube.com/@eiyu_no_tabi",
+    "status": "created_by_user_description_saved",
+    "description_file": "channel-description.txt",
+    "observed_message": "動画は現在審査中です 結果は24時間以内にお知らせいたします。",
+    "account_handle": "@eiyu_no_tabi"
+  },
+  "prior_youtube_upload": {
+    "channel_id": "UC77RM7vM0VBuxpakfj2odQw",
+    "video_id": "jbOHntynqjE",
+    "last_observed_visibility": "private",
+    "publish_not_authorized_after_target_change": true,
+    "status": "upload_interrupted_not_published",
+    "next_action": "Do not resume old-channel upload; upload original master to new channel after creation"
+  },
+  "completed_at": "2026-10-16T09:11:19.271096+09:00",
+  "plan_sha256": "f7ffc7d8dbf5e5d50733535e3247173689f7353b8429f6c013da6d4f92871051"
+}

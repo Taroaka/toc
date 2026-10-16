@@ -20,6 +20,30 @@ from toc.script_narration import resolve_manifest_narration
 POLICY = 'scene_video_preparation_v1'
 BASE = 'logs/video_preparation'
 
+
+def phase_base(phase):
+    if phase == 'video':return BASE
+    if phase == 'images':
+        from toc.image_consistency import BASE as image_base
+        return image_base
+    raise ValueError('unknown preparation phase')
+
+
+def phase_policy(phase):
+    if phase == 'images':
+        from toc.image_consistency import POLICY as image_policy
+        return image_policy
+    phase_base(phase)
+    return POLICY
+
+
+def preparation_snapshot(root,data,scene_id,phase='video'):
+    if phase == 'images':
+        from toc.image_consistency import image_snapshot
+        return image_snapshot(root,data,scene_id)
+    phase_base(phase)
+    return scene_snapshot(root,data,scene_id)
+
 class NeedsInput(ValueError):
     pass
 
@@ -184,14 +208,32 @@ class CostLedger:
             save_json(self.root,BASE+'/costs.json',rows)
 
 
-def read_status(root):
-    state=read_json(root,BASE+'/current.json',{'runId':root.name,'enabled':False,
+def read_status(root,phase='video'):
+    state=read_json(root,phase_base(phase)+'/current.json',{'runId':root.name,'enabled':False,
         'operationId':None,'status':'idle','scenes':[]})
     if state.get('enabled'):state['budget']=CostLedger(root).summary()
     return state
 
 
 def is_enabled(root):return read_status(root).get('enabled',False)
+
+
+def image_consistency_required(root,data):
+    from toc.image_consistency import POLICY as image_policy
+    metadata=data.get('video_metadata') or {}
+    return (metadata.get('video_preparation_policy')==POLICY or
+            metadata.get('image_consistency_policy')==image_policy or
+            read_status(root,'images').get('enabled',False))
+
+
+def require_images_ready(root,data):
+    if not image_consistency_required(root,data):return
+    for scene in data.get('scenes',[]):
+        sid=str(scene['scene_id'])
+        snap=preparation_snapshot(root,data,sid,'images')
+        receipt=read_json(root,f'{phase_base("images")}/ready/{digest(sid)}.json',{})
+        if receipt.get('snapshot')!=snap['digest'] or receipt.get('policy')!=phase_policy('images'):
+            raise NeedsInput('ナレーション前の画像整合確認・修正が未完了です: scene '+sid)
 
 
 def scenes_for_items(data, item_ids):
@@ -235,38 +277,68 @@ def can_reuse(old,new):
 async def prepare_run(root,hooks,options):
     """All entrypoints call this service. Hooks are the existing runtime adapters."""
     root=Path(root)
+    phase=options.get('phase','video');base=phase_base(phase);policy=phase_policy(phase)
+    revision=options.get('review_revision',0)
+    if type(revision) is not int or not 0<=revision<=3:raise ValueError('review_revision must be between 0 and 3')
     async with async_file_lock(root/'.locks/video_preparation.lock',wait=False):
         data=hooks.load()
         ids=options.get('scene_ids') or [str(s['scene_id']) for s in data.get('scenes',[])]
         if len(set(ids))!=len(ids):raise ValueError('duplicate scene IDs')
         for sid in ids:_scene(data,sid)
-        state={'runId':root.name,'enabled':True,'operationId':uuid.uuid4().hex,'status':'running','scenes':[],
+        state={'runId':root.name,'enabled':True,'phase':phase,'operationId':uuid.uuid4().hex,'status':'running','scenes':[],
+            'review_revision':revision,
+            'fixed_image_paths':list(options.get('fixed_image_paths') or []),'target_video_model':options.get('target_video_model'),
             'limits':{'max_image_generations':options['max_image_generations'],'max_cost_usd':options.get('max_cost_usd')}}
         ledger=CostLedger(root)
         def save():
-            state['budget']=ledger.summary();save_json(root,BASE+'/current.json',state)
-            save_json(root,BASE+'/operations/'+state['operationId']+'.json',state)
+            state['budget']=ledger.summary();save_json(root,base+'/current.json',state)
+            save_json(root,base+'/operations/'+state['operationId']+'.json',state)
         save()
         try:
             for sid in ids:
                 row={'sceneId':sid,'status':'running','reason':'','changedCuts':[],'imageCount':0}
                 state['scenes'].append(row);save()
                 try:
-                    data=hooks.load();snap=scene_snapshot(root,data,sid)
-                    ready=read_json(root,f'{BASE}/ready/{digest(sid)}.json',{})
-                    if ready.get('snapshot')==snap['digest'] and ready.get('policy')==POLICY and getattr(hooks,'target_satisfied',lambda scene:True)(snap['scene']):
-                        row.update(status='unchanged',reason='同じ音声・画像・設計を確認済みです。');save();continue
-                    hooks.check_audio(data,sid)
+                    data=hooks.load();snap=preparation_snapshot(root,data,sid,phase)
+                    ready=read_json(root,f'{base}/ready/{digest(sid)}.json',{})
+                    if ready.get('snapshot')==snap['digest'] and ready.get('policy')==policy and getattr(hooks,'target_satisfied',lambda scene:True)(snap['scene']):
+                        row.update(status='unchanged',reason='同じ画像・視覚設計を確認済みです。' if phase=='images' else '同じ音声・画像・設計を確認済みです。');save();continue
+                    if phase=='video':hooks.check_audio(data,sid)
                     context=hooks.context(data,sid,snap)
                     fixed=sorted(options.get('fixed_image_paths') or [])
                     for path in fixed:asset_bytes(root,path)
                     context['fixed_image_paths']=fixed
                     cache_key=digest({'snapshot':snap['digest'],'fixed':fixed,'target_model':options.get('target_video_model')})
-                    checkpoint_path=f'{BASE}/drafts/{cache_key}.json'
+                    from toc.preparation_review_revision import revision_path,revision_context,image_request_key,image_plan_keys
+                    checkpoint_path=revision_path(base,cache_key,revision)
                     checkpoint=read_json(root,checkpoint_path,{})
                     if not checkpoint:
-                        proposed=await hooks.author(context,[root/p for p in snap['images']])
+                        images=snap['images'];previous_plans={};previous_image_keys=[]
+                        if revision:
+                            for prior_revision in range(revision):
+                                parent=read_json(root,revision_path(base,cache_key,prior_revision),{})
+                                if parent.get('snapshot')!=snap['digest'] or (parent.get('review') or {}).get('status')!='needs_input':
+                                    raise NeedsInput('同じ入力の画像不一致記録がないため再修正できません。')
+                            context,images,previous_plans,previous_image_keys=revision_context(root,hooks,data,sid,snap,parent)
+                            context['fixed_image_paths']=fixed
+                        proposed=await hooks.author(context,[root/p for p in images])
+                        if revision:
+                            if proposed.get('status')!='revised':
+                                raise NeedsInput('不一致が残る画像は具体的な設計修正が必要です。')
+                            proposed['cuts']={**previous_plans,**(proposed.get('cuts') or {})}
                         checkpoint={'proposal':proposed,'images':{},'snapshot':snap['digest']}
+                        if revision:
+                            checkpoint['revision_parent']=revision_path(base,cache_key,revision-1)
+                            checkpoint['previous_image_plan_keys']=previous_image_keys
+                            checkpoint['image_plan_key_version']=2
+                        save_json(root,checkpoint_path,checkpoint)
+                    if revision and checkpoint.get('image_plan_key_version')!=2:
+                        parent=read_json(root,revision_path(base,cache_key,revision-1),{})
+                        if parent.get('snapshot')!=snap['digest']:
+                            raise NeedsInput('再修正の元の入力記録が一致しません。')
+                        _,_,_,previous_image_keys=revision_context(root,hooks,data,sid,snap,parent)
+                        checkpoint['previous_image_plan_keys']=previous_image_keys
+                        checkpoint['image_plan_key_version']=2
                         save_json(root,checkpoint_path,checkpoint)
                     proposed=checkpoint['proposal']
                     if proposed.get('status')=='needs_input':raise NeedsInput(str(proposed.get('reason') or '演出の指定が必要です。'))
@@ -294,11 +366,14 @@ async def prepare_run(root,hooks,options):
                     if not isinstance(declared_repairs,list) or any(not isinstance(x,str) for x in declared_repairs):
                         raise ValueError('image_repairs must contain shot selector:frame strings')
                     actual_repairs={item+':'+kind for item,kind,_ in repairs}
+                    row['imageTargets']=sorted(actual_repairs)
+                    if revision and image_plan_keys(new_scene)==checkpoint['previous_image_plan_keys']:
+                        raise NeedsInput('不一致を修正する画像条件の変更がありません。同じ画像を再判定・再送しません。')
                     if set(declared_repairs)-actual_repairs:
                         raise NeedsInput('画像修正に必要な開始・終了画像の設計差分がありません。静的条件を具体化してください。')
                     # Validate even unchanged plans against adopted audio intervals.
                     hooks.validate(new_scene)
-                    extra=hooks.extra_video_cost(old_scene,new_scene)
+                    extra=hooks.extra_video_cost(old_scene,new_scene) if phase=='video' else 0
                     if repairs or extra is None or extra>0:
                         image_price=hooks.image_cost()
                         cost=None if (repairs and image_price is None) or extra is None else len(repairs)*(image_price or 0)+extra
@@ -310,10 +385,9 @@ async def prepare_run(root,hooks,options):
                     for source,destination in reuses:
                         await hooks.stage_image(source,destination)
                     for item,kind,node in repairs:
-                        if scene_snapshot(root,hooks.load(),sid)['digest']!=snap['digest']:
+                        if preparation_snapshot(root,hooks.load(),sid,phase)['digest']!=snap['digest']:
                             raise NeedsInput('画像生成前に入力が変更されました。最新状態で再開してください。')
-                        key=digest({'selector':item,'kind':kind,'request':node,
-                            'references':{p:hashlib.sha256(asset_bytes(root,p)).hexdigest() for p in node.get('references') or []}})
+                        key=image_request_key(root,item,kind,node)
                         image_receipt=f'{BASE}/images/{key}.json'
                         record=read_json(root,image_receipt) or checkpoint['images'].get(key)
                         if record and record.get('status')=='completed':
@@ -344,7 +418,7 @@ async def prepare_run(root,hooks,options):
                         if checkpoint['review'].get('status')!='ready':
                             raise NeedsInput(str(checkpoint['review'].get('reason') or '修正画像の追加確認が必要です。'))
                     after=await hooks.publish(sid,snap,new_scene,expected_outputs=prepared_files)
-                    save_json(root,f'{BASE}/ready/{digest(sid)}.json',{'policy':POLICY,'snapshot':after['digest'],
+                    save_json(root,f'{base}/ready/{digest(sid)}.json',{'policy':policy,'snapshot':after['digest'],
                         'source_snapshot':snap['digest'],'operation_id':state['operationId'],'draft':checkpoint_path})
                     row.update(status='revised' if row['changedCuts'] else 'unchanged',reason=str(proposed.get('reason') or '準備完了'))
                 except NeedsInput as exc:row.update(status='needs_input',reason=str(exc))

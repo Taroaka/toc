@@ -4783,6 +4783,41 @@ scenes:
             self.assertNotIn("top-secret", persisted)
             self.assertNotIn("#private", persisted)
 
+    def test_video_materialization_persists_exact_child_without_overwriting_parent(self) -> None:
+        from copy import deepcopy
+        from dataclasses import replace
+        parent_video = {"duration_seconds": 18, "output": "assets/parent.mp4"}
+        shots = [{"shot_id": sid, "selector": f"scene1_cut01_shot_{sid}",
+                  "video_generation": {"duration_seconds": duration, "output": f"assets/{sid}.mp4"}}
+                 for sid, duration in (("a", 8), ("b", 10))]
+        manifest = {"scenes": [{"scene_id": 1, "cuts": [{"cut_id": "01",
+                    "video_generation": deepcopy(parent_video), "shots": deepcopy(shots)}]}]}
+        targets = [MODULE.VideoRenderTargetSpec(
+            selector=shot["selector"], manifest_scene_id="1", unit_id=None,
+            source_cut_ids=["1"], source_selectors=["scene1_cut01"], source_scenes=[],
+            video_tool="higgsfield", video_input_image=None, video_first_frame=None,
+            video_last_frame=None, video_motion_prompt="action", video_output=f"assets/{shot['shot_id']}.mp4",
+            video_applied_request_ids=[], duration_seconds=shot["video_generation"]["duration_seconds"],
+            timestamp=None, parent_selector="scene1_cut01", shot_id=shot["shot_id"],
+        ) for shot in shots]
+        entries = [{"selector": target.selector, "tool": "higgsfield", "output": target.video_output,
+                    "duration_seconds": target.duration_seconds, "api_prompt_payload": {"prompt": target.shot_id}}
+                   for target in targets]
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "video_manifest.md"
+            MODULE._persist_video_materializations(manifest_path=path, original_text="", manifest=manifest,
+                                                   targets=targets, entries=entries)
+        cut = manifest["scenes"][0]["cuts"][0]
+        self.assertEqual(cut["video_generation"], parent_video)
+        for shot, target in zip(cut["shots"], targets):
+            self.assertEqual(shot["video_generation"]["duration_seconds"], target.duration_seconds)
+            self.assertEqual(shot["video_generation"]["api_prompt_payload"], {"prompt": target.shot_id})
+        for bad in (replace(targets[0], shot_id="missing"), replace(targets[0], selector="different"),
+                    replace(targets[0], source_cut_ids=[]), replace(targets[0], unit_id="unit1")):
+            before = deepcopy(manifest)
+            self.assertIsNone(MODULE._manifest_video_generation_node(manifest, bad))
+            self.assertEqual(manifest, before)
+
     def test_cli_execution_options_match_server_for_direct_kling_and_seedance(self) -> None:
         from server import image_gen_app
 

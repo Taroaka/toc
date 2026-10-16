@@ -215,6 +215,39 @@ def _read_direction(root: Path, data: dict[str, Any]) -> tuple[dict[str, Any], A
         actual_binding = source_binding(DIRECTION_ARTIFACT, raw)
         if declared_binding != actual_binding:
             raise ValueError("cinematic direction projection binding is stale; refresh p400 first")
+    if "cast_design" in direction:
+        from toc.cast_design import appearance_contract_from_design, validate_cast_design
+
+        cast = direction["cast_design"]
+        issues = validate_cast_design(
+            cast, resources,
+            expected_source_bindings=_mapping(direction.get("metadata")).get("source_bindings"),
+        )
+        if issues:
+            raise ValueError("cinematic cast design is invalid: " + "; ".join(issues))
+        from toc.p400_authoring import _cast_design_artifact_binding
+
+        direction_metadata = _mapping(direction.get("metadata"))
+        expected_cast_binding = _cast_design_artifact_binding(
+            direction_metadata.get("source_bindings"), resources, cast,
+            cast.get("reference_identity_bindings", {}),
+        )
+        if direction_metadata.get("cast_design_binding") != expected_cast_binding:
+            raise ValueError("cinematic cast design binding is stale; refresh p400 first")
+        # The saved resource registry predates the cast-authoring step. Resolve
+        # declared ensemble members in memory without modifying bound source data.
+        resources = copy.deepcopy(resources)
+        for character_id, record in cast["characters"].items():
+            target = resources["characters"][character_id]
+            member_rows = target.get("members") if isinstance(target.get("members"), list) else []
+            existing = {row["member_id"]: row for row in member_rows
+                        if isinstance(row, dict) and isinstance(row.get("member_id"), str)}
+            appearance = appearance_contract_from_design(record, all_records=cast["characters"])
+            target["subject_contract"] = copy.deepcopy(record["subject_contract"])
+            target["members"] = [
+                {**copy.deepcopy(existing.get(member["member_id"], {})), **member}
+                for member in appearance.get("members", [])
+            ]
     return resources, direction, raw
 
 

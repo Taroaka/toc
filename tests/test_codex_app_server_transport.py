@@ -425,6 +425,48 @@ def test_generate_image_recovers_completed_item_from_transport_transcript() -> N
         asyncio.run(run_case(Path(tmp)))
 
 
+@pytest.mark.parametrize("prior_status,prior_has_path,accepted", [
+    ("failed", False, True), ("cancelled", False, True),
+    ("completed", True, False), ("failed", True, False), ("inProgress", False, False),
+])
+def test_image_cardinality_counts_outputs_not_terminal_no_output_attempts(prior_status, prior_has_path, accepted) -> None:
+    async def run_case(root: Path) -> None:
+        client = CodexAppServerClient(cwd=root)
+        saved = root / "one.png"
+        prior = {"id": "attempt-1", "type": "imageGeneration", "status": prior_status}
+        if prior_has_path:
+            prior["savedPath"] = str(root / "other.png")
+        transcript = [
+            {"method": "item/completed", "params": {"turnId": "turn-1", "item": prior}},
+            {"method": "item/completed", "params": {"turnId": "turn-1", "item": {
+                "id": "output-1", "type": "imageGeneration", "status": "completed", "savedPath": str(saved),
+            }}},
+        ]
+        async def start(**_kwargs):
+            return "thread-1"
+        async def turn(**_kwargs):
+            return transcript
+        client.start_thread = start
+        client.run_turn = turn
+        kwargs = dict(prompt="authored prompt", output_path=root / "candidate.png", reference_images=[],
+                      item_id="cut-a", run_dir=root, generation_job_id="job-1",
+                      allow_generated_images_fallback=False, provenance_policy="request_bound_v2")
+        if accepted:
+            result = await client.generate_image(**kwargs)
+            assert result.saved_path == saved
+            assert result.image_generation_item_count == 1
+            assert result.image_generation_item_id == "output-1"
+            assert result.provenance_authoritative
+            assert result.transcript == transcript
+        else:
+            with pytest.raises(CodexAppServerError, match="exactly one distinct") as error:
+                await client.generate_image(**kwargs)
+            assert error.value.transcript == transcript
+            assert error.value.diagnostics["threadId"] == "thread-1"
+    with tempfile.TemporaryDirectory() as tmp:
+        asyncio.run(run_case(Path(tmp)))
+
+
 def test_generate_image_recovers_saved_path_with_thread_read() -> None:
     async def run_case(root: Path) -> None:
         saved = root / "generated.png"

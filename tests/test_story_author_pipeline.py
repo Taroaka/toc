@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from toc.story_authoring import AUDIENCE_MEANING_INSTRUCTION, build_research_registry
+from toc.story_authoring import AUDIENCE_MEANING_INSTRUCTION, build_research_registry, validate_story_document
 from toc.story_author_pipeline import (
     ARCHITECT_OUTPUT_SCHEMA,
     SCENE_AUTHOR_OUTPUT_SCHEMA,
@@ -122,6 +122,7 @@ def test_scene_author_schema_requires_rich_and_legacy_downstream_fields() -> Non
     required = set(SCENE_AUTHOR_OUTPUT_SCHEMA["required"])
 
     assert {
+        "character_ids",
         "title",
         "phase",
         "purpose",
@@ -142,6 +143,9 @@ def test_scene_author_schema_requires_rich_and_legacy_downstream_fields() -> Non
         "handoff_chain",
         "preservation",
     } <= required
+    beats = SCENE_AUTHOR_OUTPUT_SCHEMA["properties"]["event_sequence"]["items"]
+    assert "participants" in beats["required"]
+    assert beats["properties"]["participants"]["type"] == "array"
 
 
 def test_architect_schema_requires_story_metadata_and_adaptation_root() -> None:
@@ -151,6 +155,146 @@ def test_architect_schema_requires_story_metadata_and_adaptation_root() -> None:
         "selection",
         "scene_plan",
     } <= set(ARCHITECT_OUTPUT_SCHEMA["required"])
+
+
+@pytest.mark.parametrize("character_id, substitutions", [
+    ("CH1", {}),
+    ("traveler_alpha", {"時計": "潮流", "工房": "船室", "塔": "海岸"}),
+])
+def test_published_story_binds_character_key_for_arbitrary_ids(tmp_path, character_id, substitutions):
+    research = _research()
+    research["story_materials"]["characters"][0]["character_id"] = character_id
+    research["story_materials"]["characters"][0]["role"] = "時計を調べる旅人"
+    for event in research["story_materials"]["chronological_events"]:
+        event["involved_characters"] = [character_id]
+
+    def transform(value):
+        encoded = json.dumps(value, ensure_ascii=False).replace('"C01"', json.dumps(character_id))
+        for old, new in substitutions.items():
+            encoded = encoded.replace(old, new)
+        return json.loads(encoded)
+
+    research = transform(research)
+    runner = FakeTurnRunner()
+
+    async def renamed_runner(**kwargs):
+        response = await runner(**kwargs)
+        return transform(response)
+
+    output = tmp_path / "story.md"
+    result = asyncio.run(author_story_from_research(
+        research, topic="時計の旅", target_duration_seconds=600,
+        turn_runner=renamed_runner, output_path=output,
+    ))
+    assert result.story["story_metadata"]["scene_character_binding_contract"] == "scene_character_binding_v1"
+    assert [s["character_ids"] for s in result.story["script"]["scenes"]] == [[character_id], [character_id]]
+    import yaml
+    saved = yaml.safe_load(output.read_text().split("```yaml\n", 1)[1].split("```", 1)[0])
+    assert saved["script"]["scenes"][0]["character_ids"] == [character_id]
+
+
+def test_character_key_includes_later_and_state_only_characters_without_rewriting_prose():
+    from toc.story_author_pipeline import _ensure_scene_binding
+
+    scene = _scene("scene_01", "E01", "state_before", "state_after", None, None)
+    scene["start_state"]["characters"] = [{"character_id": "observer", "state": "窓辺で待つ"}]
+    scene["event_sequence"][0]["participants"] = ["C01", "arrival", "C01"]
+    scene["end_state"]["characters"] = ["arrival", {"character_id": "end_only"}]
+    scene["character_ids"] = ["stale_model_guess"]
+    before = deepcopy(scene)
+    plan = {
+        "scene_id": "scene_01", "source_event_ids": ["E01"],
+        "incoming_state_id": "state_before", "outgoing_state_id": "state_after",
+    }
+    bound = _ensure_scene_binding(scene, plan)
+    assert bound["character_ids"] == ["C01", "observer", "arrival", "end_only"]
+    assert bound["event_sequence"] == before["event_sequence"]
+    assert scene == before
+
+    # The same boundary runs after scene regeneration/field repair: a
+    # corrected lifecycle must not retain a stale downstream character index.
+    bound["event_sequence"][0]["participants"] = ["C01", "replacement"]
+    bound["end_state"]["characters"] = []
+    rebound = _ensure_scene_binding(bound, plan)
+    assert rebound["character_ids"] == ["C01", "observer", "replacement"]
+
+
+@pytest.mark.parametrize("corruption", ["missing", "mismatch", "bad_type", "unknown", "malformed_state"])
+def test_character_key_contract_rejects_missing_or_inconsistent_refs(corruption):
+    from toc.story_author_pipeline import _assemble_story, _ensure_scene_binding
+
+    scene = _scene("scene_01", "E01", "state_before", "state_after", None, "scene_02")
+    plan = {"scene_id": "scene_01", "source_event_ids": ["E01"],
+            "incoming_state_id": "state_before", "outgoing_state_id": "state_after"}
+    scene = _ensure_scene_binding(scene, plan)
+    story = _assemble_story({}, [scene], topic="test", target_duration_seconds=None,
+                            source_digest="test", source_research="research.md")
+    canonical = story["script"]["scenes"][0]
+    if corruption == "missing":
+        del canonical["character_ids"]
+    elif corruption == "mismatch":
+        canonical["character_ids"] = []
+    elif corruption == "bad_type":
+        canonical["character_ids"] = "C01"
+    elif corruption == "unknown":
+        canonical["start_state"]["characters"] = [{"character_id": "missing_person"}]
+        canonical["character_ids"].append("missing_person")
+    else:
+        canonical["start_state"]["characters"] = [{"state": "no identity"}]
+    errors = validate_story_document(story, build_research_registry(_research()))
+    expected = {"missing": "story.scene_character_ids_missing",
+                "mismatch": "story.scene_character_ids_mismatch",
+                "bad_type": "story.scene_character_ids_invalid",
+                "unknown": "story.scene_unknown_id",
+                "malformed_state": "story.scene_character_refs_invalid"}
+    assert expected[corruption] in errors
+
+
+def test_characterless_scene_preserves_explicit_empty_participants():
+    from toc.story_author_pipeline import _assemble_story, _ensure_scene_binding
+
+    research = _research()
+    for event in research["story_materials"]["chronological_events"]:
+        event["involved_characters"] = []
+    scene = _scene("scene_01", "E01", "state_before", "state_after", None, None)
+    scene["source_basis"]["character_ids"] = []
+    scene["event_sequence"][0]["participants"] = []
+    plan = {"scene_id": "scene_01", "source_event_ids": ["E01"],
+            "incoming_state_id": "state_before", "outgoing_state_id": "state_after"}
+    bound = _ensure_scene_binding(scene, plan)
+    assert bound["character_ids"] == []
+    assert bound["event_sequence"][0]["participants"] == []
+    story = _assemble_story({}, [bound], topic="test", target_duration_seconds=None,
+                            source_digest="test", source_research="research.md")
+    errors = validate_story_document(story, build_research_registry(research))
+    assert "story.scene_event_beat_grounding_missing" not in errors
+    assert not any("character" in error for error in errors)
+
+    # Source references can mention a character without that character acting
+    # in every beat. Explicit [] must not be filled with all scene characters.
+    scene["source_basis"]["character_ids"] = ["C01"]
+    bound = _ensure_scene_binding(scene, plan)
+    assert bound["character_ids"] == ["C01"]
+    assert bound["event_sequence"][0]["participants"] == []
+
+
+@pytest.mark.parametrize("invalid_refs", [[{"state": "waiting"}], [{"character_id": "unregistered"}]])
+def test_invalid_lifecycle_character_reference_never_publishes(tmp_path, invalid_refs):
+    runner = FakeTurnRunner()
+
+    async def invalid_runner(**kwargs):
+        response = await runner(**kwargs)
+        if kwargs["role"] == "scene_author":
+            for scene in response["scenes"]:
+                scene["start_state"]["characters"] = deepcopy(invalid_refs)
+        return response
+
+    output = tmp_path / "story.md"
+    with pytest.raises(StoryAuthoringError) as exc:
+        asyncio.run(author_story_from_research(_research(), topic="test", turn_runner=invalid_runner, output_path=output))
+    assert any(error in exc.value.validation_errors for error in (
+        "story.scene_character_refs_invalid", "story.scene_unknown_id"))
+    assert not output.exists()
 
 
 class FakeTurnRunner:

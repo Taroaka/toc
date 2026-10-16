@@ -6,6 +6,8 @@ story_metadata:
   # New story artifacts are authored by the Story Architect / Scene Author
   # pipeline and must carry a complete research-grounded scene lifecycle.
   scene_authoring_contract: "story_scene_contract_v1"
+  # 各sceneの人物参照から決定論的に集約する、下流向け人物一覧の契約。
+  scene_character_binding_contract: "scene_character_binding_v1"
   story_author_model: "gpt-6-astra"
   scene_author_model: "gpt-6-astra"
   repair_author_model: "gpt-6-luna"
@@ -199,6 +201,10 @@ script:
       creative_inventions: ["必要時のみ: invented symbol / dialogue / psychology"]
       # Rich authoring source of truth.  The prose volume is variable; IDs,
       # lifecycle, and source coverage determine completeness.
+      # 必須の派生index。source_basis.character_ids → start_state.characters →
+      # event_sequenceのparticipants/character_ids → end_state.characters の
+      # 順で既出IDを除き集約する。名前・本文から推測せず、人物なしは[]。
+      character_ids: ["character_01"]
       source_basis:
         event_ids: ["event_01"]
         passage_ids: ["passage_01"]

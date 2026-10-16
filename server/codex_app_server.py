@@ -1010,12 +1010,27 @@ Rules:
                 json.dumps(image_item, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
             ).hexdigest()
             distinct_image_items[identity] = image_item
+        # A native tool can retry after a failed attempt that produced no file.
+        # Such a terminal attempt is evidence, not another image candidate.
+        # Keep failed items with output and unfinished items in the ambiguity
+        # check; never choose between multiple actual or potential outputs.
+        distinct_image_items = {
+            identity: image_item
+            for identity, image_item in distinct_image_items.items()
+            if not (
+                str(image_item.get("status") or "").strip().lower()
+                in {"failed", "cancelled", "canceled"}
+                and not image_generation_saved_path(image_item)
+            )
+        }
         if len(distinct_image_items) > 1 and not use_generated_images_fallback:
             raise CodexAppServerError(
                 "request-bound image generation requires exactly one distinct imageGeneration item",
+                transcript=transcript,
                 diagnostics={
                     "generationJobId": generation_job_id,
                     "itemId": item_id,
+                    "threadId": thread_id,
                     "turnId": turn_id,
                     "imageGenerationItemCount": len(distinct_image_items),
                     "imageGenerationItemIds": list(distinct_image_items),

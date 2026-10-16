@@ -1,0 +1,17 @@
+{
+  "updated_at": "2026-10-16T09:17:08.860303+09:00",
+  "source_icon": "/Users/kantaro/Downloads/toc/marketing/SNS/YouTube/youtubeアイコン1.png",
+  "source_sha256": "9ef2c9c269b9e44f7bad37ae49a50c097258080fb534ea13f42569969de2c924",
+  "youtube": {
+    "channel_id": "UCsa0kB-OjTCXgj4bI9muG9A",
+    "account_handle": "@eiyu_no_tabi",
+    "status": "saved_and_reloaded",
+    "evidence_path": "youtube-icon-saved.png"
+  },
+  "tiktok": {
+    "account_handle": "@eiyu_no_tabi",
+    "status": "save_submitted_result_unverified",
+    "observed_status": "Same source icon uploaded, crop applied, Save clicked; browser then returned HTTP403. One normal reload remained Please wait. Do not resubmit until reconcile saved state.",
+    "evidence_path": "tiktok-icon-verification-403.png"
+  }
+}

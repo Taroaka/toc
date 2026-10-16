@@ -59,6 +59,11 @@ adaptation_source_contract:
 各 value/event/meaning は research/source passage の ID を持つ。新しい事実を足す場合は
 追加調査または明示された creative hypothesis として隔離する。
 
+`non_negotiable_events`、`non_negotiable_meanings`、`iconic_moments` は、従来の非空文字列に加え、
+出典付きレコードを保持できる。それぞれ非空の `requirement`、`meaning`、`moment` と、
+非空文字列配列の `source_event_refs` が必須。任意の `source_passage_refs` も同じ配列型とする。
+空の本文や参照、型違いを受理せず、検証のために出典を削って文字列へ変換しない。
+
 ## 2. Visual value authoring
 
 p300 `visual_value.md` の `adaptation_intent` は全編方針、各

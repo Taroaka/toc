@@ -1218,6 +1218,53 @@ class VideoPromptCompilerTests(unittest.TestCase):
                 }
             )
 
+    def test_typed_shot_identity_reveal_retains_causal_constraints(self) -> None:
+        forbidden = '足音が訪問者を呼び戻したという未確認の因果'
+        contract = {
+            'shot_direction': {'schema_version': 'shot_direction_v1', 'shot': {
+                'initial_view': {'subjects': []},
+                'end_view': {'subjects': [{'kind': 'character', 'entity_id': 'visitor'}]},
+                'events': [{'kind': 'camera_reveal', 'entity_ids': ['visitor']}],
+            }},
+            'asset_dependency': {'character_ids_required': ['visitor']},
+            'motion_contract': {
+                'motion_brief': 'カメラが右へ移り、訪問者が画角に入る。',
+                'end_state': '訪問者は作業者の隣に立っている。',
+                'allowed_new_reveal_elements': ['訪問者'],
+                'must_not_add': [forbidden],
+            },
+        }
+        end_path = 'assets/scenes/end.png'
+        video = {'result_frame': {'output': end_path, 'image_generation': {
+            'output': end_path, 'character_ids': ['visitor'],
+            'references': ['assets/characters/visitor.png'],
+            'first_frame_visual_plan': {'reference_binding': {'character_references': [{
+                'target_character_id': 'visitor', 'target_character_name': '訪問者',
+                'path': 'assets/characters/visitor.png',
+            }]}},
+        }}}
+        options = {'video_generation': video, 'first_frame': 'assets/scenes/start.png', 'last_frame': end_path}
+        for tool in ('kling_3_0', 'seedance'):
+            with self.subTest(tool=tool):
+                payload = compile_video_api_prompt_v1(cut_contract=contract, tool=tool, **options)
+                self.assertIn('訪問者', payload['prompt'])
+                self.assertIn(forbidden, payload['prompt'] + payload.get('negative_prompt', ''))
+                blocked = copy.deepcopy(contract)
+                blocked['motion_contract']['must_not_add'] = ['訪問者']
+                with self.assertRaisesRegex(ValueError, 'video_reveal_allowlist_conflicts_with_forbidden'):
+                    compile_video_api_prompt_v1(cut_contract=blocked, tool=tool, **options)
+                for fault in ('schema_tag_only', 'unregistered', 'already_visible', 'no_event', 'wrong_end_frame'):
+                    with self.subTest(fault=fault):
+                        unbound = copy.deepcopy(contract)
+                        bad_options = copy.deepcopy(options)
+                        if fault == 'schema_tag_only': unbound['shot_direction'].pop('shot')
+                        elif fault == 'unregistered': unbound['asset_dependency']['character_ids_required'] = []
+                        elif fault == 'already_visible': unbound['shot_direction']['shot']['initial_view']['subjects'] = [{'entity_id': 'visitor'}]
+                        elif fault == 'no_event': unbound['shot_direction']['shot']['events'] = []
+                        else: bad_options['last_frame'] = 'assets/scenes/other.png'
+                        with self.assertRaisesRegex(ValueError, 'video_reveal_allowlist_conflicts_with_forbidden'):
+                            compile_video_api_prompt_v1(cut_contract=unbound, tool=tool, **bad_options)
+
     def test_reveal_allowlist_rejects_additional_negative_that_negates_allowed_element(self) -> None:
         for tool in ("kling_3_0", "seedance"):
             with self.subTest(tool=tool):

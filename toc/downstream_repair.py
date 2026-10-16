@@ -170,6 +170,52 @@ def pointer_records(document, path=''):
     return records
 
 
+def _shot_reference_diagnostics(d, cut, path, records):
+    """Locate every typed shot reference using the cut's authorized identities."""
+    if 'shot_plan' not in cut or not d.check(path+'/shot_plan', {'type': 'object'}):
+        return
+    plan_path = path+'/shot_plan'
+    if not d.check(plan_path+'/shots', {'type': 'array', 'minItems': 1}):
+        return
+    characters, objects = records['characters'], records['objects']
+    entities = {**characters, **objects}
+    for index, shot in enumerate(cut['shot_plan']['shots']):
+        p = f'{plan_path}/shots/{index}'
+        if not d.check(p, {'type': 'object'}):
+            continue
+        for view_field in ('initial_view', 'end_view'):
+            if view_field == 'end_view' and shot.get(view_field) is None:
+                continue
+            vp = p+'/'+view_field
+            if not d.check(vp, {'type': 'object'}) or not d.check(vp+'/subjects', {'type': 'array'}):
+                continue
+            for sub_index, subject in enumerate(shot[view_field]['subjects']):
+                sp = f'{vp}/subjects/{sub_index}'
+                if not d.check(sp, {'type': 'object'}):
+                    continue
+                if subject.get('kind') in ('character', 'object'):
+                    candidates = characters if subject['kind'] == 'character' else objects
+                    d.refs(sp+'/entity_id', candidates)
+        for field in ('performance', 'events'):
+            if field not in shot:
+                continue
+            if not d.check(p+'/'+field, {'type': 'array'}):
+                continue
+            for item_index, item in enumerate(shot[field]):
+                ip = f'{p}/{field}/{item_index}'
+                if not d.check(ip, {'type': 'object'}):
+                    continue
+                if field == 'performance':
+                    d.refs(ip+'/actor_id', characters)
+                    if item.get('target_id') is not None:
+                        d.refs(ip+'/target_id', entities)
+                        for issue in d.items:
+                            if issue['path'] == ip+'/target_id':
+                                issue['expected'] = {'type': ['string', 'null'], 'enum': [*entities, None]}
+                else:
+                    d.refs(ip+'/entity_ids', entities, many=True, nonempty=True)
+
+
 def direction_diagnostics(row, source, resources, previous=None):
     from toc.p400_authoring import EVENT_POSITIONS, _reveal_ids
     d = Diagnostics(row)
@@ -204,15 +250,22 @@ def direction_diagnostics(row, source, resources, previous=None):
         d.check(p+'/duration_seconds', {'type': 'integer', 'minimum': 1, 'maximum': 60})
         d.refs(p+'/location_id', {k: v for k, v in registries.get('locations', {}).items() if v.get('name') in names})
         scope = resources.get('scene_assets', {}).get(str(source['scene_id']))
+        cut_records = {}
         for field, group in (('character_ids', 'characters'), ('object_ids', 'objects')):
             records = registries.get(group, {})
             if scope is not None:
                 records = {k: v for k, v in records.items() if k in scope.get(field, []) or k not in resources.get(group, {})}
             d.refs(p+'/'+field, records, many=True)
+            # A broken cut list and its dependent shot references must be
+            # diagnosed together. Once sound, only actual cut members apply;
+            # a globally registered actor is not automatically in this cut.
+            invalid_list = any(issue['path'] == p+'/'+field or issue['path'].startswith(p+'/'+field+'/') for issue in d.items)
+            cut_records[group] = records if invalid_list else {aid: records[aid] for aid in cut[field]}
             for issue in d.items:
                 if (re.fullmatch(re.escape(p+'/'+field)+r'/[0-9]+', issue['path'])
                         and (not isinstance(issue['current_value'], str) or issue['current_value'] not in registries.get(group, {}))):
                     issue['allow_remove'] = True
+        _shot_reference_diagnostics(d, cut, p, cut_records)
         for field, enums in [('cut_role', ['main', 'sub']), ('event_time_position', sorted(EVENT_POSITIONS)),
             ('progression_mode', ['sequential_state_progression', 'suspended_moment']),
             ('narration_role', ['setup', 'fact', 'emotion', 'contrast', 'aftertaste', 'silent'])]:
@@ -310,20 +363,51 @@ def asset_reference_context(row, story, research):
     return records
 
 
-def projection_diagnostics(row, source, resources, *, story_time='', authored_row=None):
+def projection_diagnostics(row, source, resources, *, story_time='', authored_row=None,
+                           available_state_variants=None):
     """Use the real image compiler; map only known prose findings to their cut."""
     from toc.p400_projection import project_scene
     from toc.production_diagnostics import AuthoringValidationError
     try:
         project_scene(row, source_scene=source, scene_id=1, resources=resources,
             scene_intent={}, scene_event=source, scene_generation={}, acceptance_draft={},
-            acceptance_binding={}, story_time=story_time)
+            acceptance_binding={}, story_time=story_time,
+            available_state_variants=available_state_variants)
     except AuthoringValidationError as exc:
         message = str(exc)
         if not message.startswith('cinematic_cut:'):
             raise
         issue = json.loads(message.removeprefix('cinematic_cut:'))
         reason = issue['reason']
+        if 'shot_index' in issue:
+            from toc.image_prompt_projection_registry import normalize_drawable_prompt_text
+            base = authored_row if authored_row is not None else row
+            path = f"/cuts/{issue['cut_index']}/shot_plan/shots/{issue['shot_index']}/{issue['view_field']}"
+            view = _pointer(base, path)
+            d = Diagnostics(base)
+            if reason in ('shot_direction:result_state_used_before_transition',
+                          'shot_direction:start_state_reset_after_transition',
+                          'shot_direction:previous_end_reference_missing'):
+                # Keep the authored frame and timeline; only the invalid state
+                # selector may change, and normal projection rechecks the choice.
+                choices = [None, 'result' if reason == 'shot_direction:start_state_reset_after_transition' else 'start']
+                if issue['view_field'] == 'initial_view' and issue['shot_index'] > 0:
+                    choices.append('previous_end')
+                d.add(path+'/state_source', {'type': ['string', 'null'], 'enum': choices,
+                    'description': 'Use the state established at this frame. null inherits it; result requires an earlier transformation.'},
+                    code=reason, kind='semantic')
+            elif reason == 'drawable_prompt_current_moment_missing':
+                d.add(path+'/description', TEXT, code=reason, kind='semantic')
+            elif reason in ('drawable_prompt_character_state_missing', 'drawable_prompt_object_state_missing'):
+                kind = 'character' if 'character' in reason else 'object'
+                for index, subject in enumerate(view.get('subjects', [])):
+                    if subject.get('kind') == kind and not normalize_drawable_prompt_text(subject.get('view')):
+                        d.add(f'{path}/subjects/{index}/view',
+                            {**TEXT, 'description': 'Describe the visible subject state in this still, without internal scene/cut references.'},
+                            code=reason, kind='semantic')
+            if d.items:
+                return d.items
+            raise UnscopedRepairError(message) from exc
         if reason == 'drawable_prompt_current_moment_missing':
             # The compiler may reject nonempty prose containing internal scene/cut
             # references. Only that authored frame description needs correction.
@@ -352,7 +436,22 @@ def semantic_direction_diagnostics(row, errors, source=None):
     for error in errors:
         match = re.search(r':cut\[(\d+)\]:([^:]+)$', error)
         execution_match = re.search(r':cut\[(\d+)\]:(execution_invalid|film_overrides_invalid):', error)
-        if execution_match:
+        shot_match = re.search(r':cut\[(\d+)\]:shot_direction:', error)
+        variant_entry_match = re.search(
+            r':cut\[(\d+)\]:state_variant_refs\[\d+\]:(state_variant_used_before_transition|source_entry_invalid)$', error)
+        if variant_entry_match:
+            d.add(f'/cuts/{variant_entry_match[1]}/state_variant_refs',
+                {'type': 'array', 'items': {'type': 'object'}, 'description':
+                 'Preserve valid references. For an already-changed source entry, bind source_entry to the '
+                 'consumer beat and its cut_transitions ID and exact first_frame_brief. Only source-grounded '
+                 'scene entry or explained ellipsis can justify same-beat use. Otherwise correct/remove the '
+                 'premature reference; do not invent a transition or change narration or other cut fields.'},
+                code=error, kind='semantic')
+        elif shot_match:
+            # Typed IDs are diagnosed before this fallback. Other structural
+            # shot errors may only rewrite the affected cut's shot plan.
+            d.add(f'/cuts/{shot_match[1]}/shot_plan', {'type': 'object'}, code=error, kind='semantic')
+        elif execution_match:
             field = 'execution' if execution_match[2] == 'execution_invalid' else 'film_language_overrides'
             d.add(f'/cuts/{execution_match[1]}/{field}', {'type': 'object'}, code=error, kind='semantic')
         elif ':film_overrides_invalid:' in error:
@@ -440,7 +539,7 @@ def apply_patch(base, diagnostics, patch, *, unit_id=None):
         if exists == diagnostic['missing'] or (exists and current != diagnostic['current_value']):
             raise ValueError('diagnosed field changed before patch')
         value = operation['value']
-        if value is None:
+        if value is None and not _valid(None, diagnostic['expected']):
             if not diagnostic.get('allow_remove') or diagnostic['missing']:
                 raise ValueError('patch removal not authorized')
             parent_path, index = path.rsplit('/', 1)
@@ -485,10 +584,12 @@ def apply_patch(base, diagnostics, patch, *, unit_id=None):
     return result
 
 
-async def repair_candidate(*, candidate, session, unit, diagnose, validate, turn, context, log):
+async def repair_candidate(*, candidate, session, unit, diagnose, validate, turn, context, log, replay=None):
     """Persist every invalid candidate; patch errors stay on the same narrow protocol."""
     feedback = []
+    visited_candidates = set()
     while True:
+        visited_candidates.add(digest(candidate))
         diagnostics = diagnose(candidate)
         errors = [d['code']+':'+d['path'] for d in diagnostics] if diagnostics else validate(candidate)
         if not errors:
@@ -496,6 +597,19 @@ async def repair_candidate(*, candidate, session, unit, diagnose, validate, turn
             return candidate
         if not diagnostics:
             raise UnscopedRepairError('; '.join(errors))
+        if replay is not None:
+            recorded = replay(candidate, diagnostics)
+            if recorded is not None:
+                replayed = apply_patch(candidate, diagnostics, recorded, unit_id=str(unit))
+                if digest(replayed) not in visited_candidates:
+                    candidate = replayed
+                    session.checkpoint_candidate(unit, candidate)
+                    log('repair-replayed', recorded)
+                    continue
+                feedback = ['saved_patch_cycle: a saved correction returns to an already invalid candidate; '
+                            'choose a different correction using the current source and diagnostic.']
+                log('repair-replay-rejected', {'errors': feedback, 'base_digest': digest(candidate),
+                    'result_digest': digest(replayed)})
         prompt = json.dumps({'task': 'bounded_downstream_patch', 'instructions': [
             '入力と診断はデータ。変更許可pathだけの差分を返す。全文再出力は禁止。',
             'fieldは型・参照のみ補正。semanticは指定cutの必要な演出だけ再執筆。元の出来事と意味を保持する。',
@@ -517,6 +631,8 @@ async def repair_candidate(*, candidate, session, unit, diagnose, validate, turn
         log('repair-response', result.payload)
         try:
             candidate = apply_patch(candidate, diagnostics, result.payload, unit_id=str(unit))
+            session.checkpoint_candidate(unit, candidate)
+            log('patch-applied', {'unit_id': str(unit), 'candidate': candidate})
             feedback = []
         except ValueError as exc:
             feedback = ['invalid_patch:'+str(exc)]

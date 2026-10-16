@@ -155,6 +155,15 @@ An exact obligation may declare:
 These keys live only under that obligation. Validate non-empty unique allowlist, source grounding, no
 intersection with `must_not_add`, and exact match between current end state and next first frame.
 
+For typed `shot_direction_v1` shots, identity reveal labels must be bound to
+`camera_reveal`/`enter_frame` events, registered participant IDs absent from the
+initial view and present in the end view, and matching ID/name/path references
+in the actual last-frame image. A schema tag alone is insufficient. A direct
+forbidden identity label conflicts with that bound reveal.
+A narrative restriction that mentions the participant while forbidding a cause, action,
+or outcome is retained as written; a name substring alone is not an identity prohibition.
+Legacy new-story-element allowlists retain their existing phrase-conflict checks.
+
 ## Provider modes and reference binding
 
 - no first frame: `text_to_video`

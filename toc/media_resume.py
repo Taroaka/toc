@@ -151,11 +151,29 @@ class MediaJournal:
                 scopes = {f"{family}:{item.get('item_id', '*')}" for item in items}
             else:
                 scopes = {f"{family}:{request.get('output', '*')}"}
-            if journal.data['status'] == 'completed':
+            if journal.data['status'] in {'completed', 'superseded'}:
                 covered.update(scopes)
             elif not scopes <= covered:
                 return journal
         return None
+
+    @classmethod
+    def supersede_narration_operations(cls, root: Path) -> None:
+        """A full-run rewrite replaces every unfinished narration request scope."""
+        require_bound_run_root(root)
+        directory = root / 'logs/media_operations'
+        if directory.is_symlink():
+            raise ValueError('unsafe media journal directory')
+        journals = [cls.load(root, path.stem) for path in directory.glob('*.json')]
+        for journal in journals:
+            if journal.data['kind'] in {'narration', 'narration_bulk', 'narration_drafts'} and journal.data['status'] not in {'completed', 'superseded'}:
+                journal.supersede('explicit full-run narration rewrite')
+
+    def supersede(self, reason: str) -> None:
+        """Keep old requests/results but retire them after an explicit replacement."""
+        self.data['status'] = 'superseded'
+        self.data['superseded_reason'] = reason
+        self.save()
 
     def verify_inputs(self) -> None:
         if self.data.get('input_conflict'):

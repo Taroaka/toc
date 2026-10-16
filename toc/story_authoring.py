@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from toc.story_selection import selected_event_order, StorySelectionError
 from toc.scene_entry_guidance import SCENE_ENTRY_GUIDANCE
+from toc.story_characters import SCENE_CHARACTER_BINDING_CONTRACT, collect_scene_character_ids
 
 from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
@@ -817,8 +818,8 @@ def _validate_scene_references(
     all_source_ids = set().union(*(set(category) for category in maps.values()))
     _validate_source_basis(scene, maps, errors)
 
-    # Direct scene-level references are accepted as a convenience for author
-    # adapters which have not nested them under source_basis yet.
+    # character_ids is a required derived index under the new character
+    # contract. Other direct references remain legacy convenience aliases.
     direct_specs = (
         ("character_ids", "characters"),
         ("place_ids", "places"),
@@ -945,6 +946,8 @@ def _beat_source_ids(beat: Mapping[str, Any]) -> list[str]:
 def _validate_scene_lifecycle(
     scene: Mapping[str, Any],
     errors: list[str],
+    *,
+    character_binding: bool = False,
 ) -> tuple[str, str]:
     """Check authored lifecycle fields and return start/end state tokens."""
 
@@ -1012,6 +1015,10 @@ def _validate_scene_lifecycle(
             if not _text_id(beat.get("immediate_consequence") or beat.get("consequence")):
                 _append_error(errors, "story.scene_event_sequence_invalid")
             participants = beat.get("participants") or beat.get("character_ids")
+            explicit_empty = character_binding and any(
+                isinstance(beat.get(field), list) and beat[field] == []
+                for field in ("participants", "character_ids")
+            )
             locations = (
                 beat.get("location_id")
                 or beat.get("place_ids")
@@ -1020,7 +1027,7 @@ def _validate_scene_lifecycle(
             )
             visual_evidence = beat.get("required_visual_evidence")
             if (
-                not participants
+                (not participants and not explicit_empty)
                 or not locations
                 or not isinstance(visual_evidence, (list, tuple))
                 or not any(_text_id(item) for item in visual_evidence)
@@ -1199,6 +1206,11 @@ def validate_story_document(
         return ["story.document_invalid"]
     registry = _registry_for_validation(registry)
     maps = _registry_maps(registry)
+    metadata = _mapping(story.get("story_metadata")) or {}
+    character_contract = metadata.get("scene_character_binding_contract")
+    character_binding = character_contract == SCENE_CHARACTER_BINDING_CONTRACT
+    if character_contract is not None and not character_binding:
+        _append_error(errors, "story.scene_character_binding_contract_invalid")
     try:
         expected_event_order = selected_event_order(story, registry)
     except StorySelectionError as exc:
@@ -1235,6 +1247,21 @@ def validate_story_document(
         _validate_scene_authoring_surface(scene, errors)
         _validate_scene_references(scene, maps, errors)
         _validate_segment_subject_bindings(scene, registry, errors)
+        if character_binding:
+            expected_characters, valid_refs = collect_scene_character_ids(scene)
+            if not valid_refs:
+                _append_error(errors, "story.scene_character_refs_invalid")
+            if set(expected_characters) - set(maps["characters"]):
+                _append_error(errors, "story.scene_unknown_id")
+            actual_characters = scene.get("character_ids")
+            if "character_ids" not in scene:
+                _append_error(errors, "story.scene_character_ids_missing")
+            elif not isinstance(actual_characters, list) or any(
+                not isinstance(value, str) or not value.strip() for value in actual_characters
+            ):
+                _append_error(errors, "story.scene_character_ids_invalid")
+            elif actual_characters != expected_characters:
+                _append_error(errors, "story.scene_character_ids_mismatch")
 
         beats = _sequence_beats(scene)
         if beats is not None:
@@ -1248,9 +1275,9 @@ def validate_story_document(
                 _append_error(errors, "story.scene_event_ownership_mismatch")
 
         if scene_id:
-            scene_states[scene_id] = _validate_scene_lifecycle(scene, errors)
+            scene_states[scene_id] = _validate_scene_lifecycle(scene, errors, character_binding=character_binding)
         else:
-            _validate_scene_lifecycle(scene, errors)
+            _validate_scene_lifecycle(scene, errors, character_binding=character_binding)
 
     if expected_event_order:
         expected_set = set(expected_event_order)

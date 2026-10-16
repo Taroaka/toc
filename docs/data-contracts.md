@@ -398,4 +398,12 @@ critic report, aggregate report, score, or approval certificate to start the nex
 p420の `asset_requests` は原作にある未登録素材の追加/scene binding依頼。
 `source_asset_requests_v1` のruntimeが仮参照を解決し、`base_resources` と拡張registryを照合する。
 解決記録はscript/manifestの `asset_resolutions`、根拠と使用cutはp500 asset inventory/planへ引き継ぐ。
+物理的なobjectの正本には、`research.story_materials.symbols_and_themes[]` のうち明示的に
+`kind: object` を持つレコードの `item` も使える。theme/motifやmeaning本文を実物へ変換してはならない。
+使用根拠が後のbeatでも、そのobjectが同じsceneの `start_state.objects` に一意に明記されている場合は、
+runtimeがその正確な開始状態のpointer/quoteを補助根拠として保存できる。開始状態にない物や
+曖昧な複数候補を推測で先行表示せず、元の根拠も保持する。
+一つのsource beatを複数cutで描く場合、同じbeat内の途中の状態variantは、厳密に前のcutが対象assetを
+持ち、同じ変化beatを担い、次cutへcontinuousに同じstate ID・状態factsを渡している場合に限り利用できる。
+beat IDが同じという理由だけで許可せず、最初のcutや引き継ぎのないcutで変化後を先取りしない。
 詳細は [p400演出契約](implementation/p400-cinematic-authoring.md#p420の未登録素材--source_asset_requests_v1)。

@@ -27,7 +27,7 @@ from toc.cast_design import (
 
 from toc.production_diagnostics import AuthoringValidationError
 from toc.production_repair import RepairSession, handoff_session, digest
-from toc.downstream_repair import (repair_candidate, direction_diagnostics, semantic_direction_diagnostics, projection_diagnostics, asset_request_diagnostics, asset_reference_context, Diagnostics, UnscopedRepairError, failure_kind, decode_author_payload)
+from toc.downstream_repair import (repair_candidate, direction_diagnostics, semantic_direction_diagnostics, projection_diagnostics, asset_request_diagnostics, asset_reference_context, Diagnostics, UnscopedRepairError, failure_kind, decode_author_payload, apply_patch as apply_downstream_patch)
 from toc.cinematic_language import (FILM_SCHEMA, FILM_FIELDS, EXECUTION_FORMAT, STAGING_FORMAT, validate_film_language,
     resolve_film_language, execution_from_cut)
 
@@ -197,6 +197,29 @@ def _resolve_state_variant_request_assets(rows, records):
                         raise AssetRequestValidationError(error)
                     binding['asset_id'] = resolved_id
     return result
+
+
+def _source_entry_matches(entry, *, beats, consumer_ids, transition_ids, continuity, cut_index):
+    """Bind an authored already-changed entry to an actual source first frame."""
+    if not isinstance(entry, dict) or set(entry) != {'beat_id', 'transition_id', 'first_frame_brief'}:
+        return False
+    if not all(_text(entry.get(key)) for key in entry):
+        return False
+    beat_id = entry['beat_id']
+    if beat_id not in consumer_ids or beat_id not in transition_ids or beat_id not in beats:
+        return False
+    if not isinstance(continuity, dict):
+        return False
+    mode = continuity.get('mode')
+    if not ((cut_index == 0 and mode == 'scene_entry')
+            or (mode == 'ellipsis' and _text(continuity.get('ellipsis_reason')))):
+        return False
+    transitions = beats[beat_id].get('cut_transitions')
+    if not isinstance(transitions, list):
+        return False
+    matches = [row for row in transitions if isinstance(row, dict)
+               and row.get('transition_id') == entry['transition_id']]
+    return len(matches) == 1 and matches[0].get('first_frame_brief') == entry['first_frame_brief']
 
 
 def validate_scene_direction(
@@ -403,7 +426,41 @@ def validate_scene_direction(
                     if isinstance(event_id, str) and event_id in ranks
                 ]
                 consumer_ranks = [ranks[event_id] for event_id in consumer_ids_list if isinstance(event_id, str) and event_id in ranks]
-                if transition_ranks and consumer_ranks and max(transition_ranks) >= min(consumer_ranks):
+                continuity = cut.get('continuity') or {}
+                previous_visible = (previous_cut.get(target_field) if previous_cut else [])
+                if target_field == 'location_id':
+                    previous_visible = [previous_visible]
+                # One authored event may span several cuts. A strictly earlier
+                # cut can establish an intermediate state within that event,
+                # but sharing the beat alone is not evidence of its completion.
+                same_beat_handoff = bool(i and previous_cut and transition_ranks and consumer_ranks
+                    and max(transition_ranks) == min(consumer_ranks)
+                    and _strings(state_variant.get('source_event_beat_ids'))
+                    and _strings(previous_cut.get('source_beat_ids'))
+                    and set(state_variant.get('source_event_beat_ids') or []) <= set(previous_cut.get('source_beat_ids') or [])
+                    and isinstance(previous_visible, list) and variant_ref.get('asset_id') in previous_visible
+                    and isinstance(continuity, dict) and continuity.get('mode') == 'continuous'
+                    and continuity.get('previous_cut_id') == previous_cut.get('cut_id')
+                    and continuity.get('previous_end_state') == previous_cut.get('motion_end_state')
+                    and cut.get('start_state_id') == previous_cut.get('end_state_id')
+                    and isinstance(cut.get('start_state_facts'), dict) and bool(cut['start_state_facts'])
+                    and cut['start_state_facts'] == previous_cut.get('end_state_facts'))
+                source_entry = variant_ref.get('source_entry')
+                source_entry_valid = bool(
+                    transition_ranks and consumer_ranks
+                    and max(transition_ranks) == min(consumer_ranks)
+                    and isinstance(source_entry, dict)
+                    and isinstance(source_entry.get('beat_id'), str)
+                    and ranks.get(source_entry['beat_id']) == min(consumer_ranks)
+                    and _source_entry_matches(source_entry, beats=beats,
+                        consumer_ids=consumer_ids_list,
+                        transition_ids=state_variant.get('source_event_beat_ids') or [],
+                        continuity=continuity, cut_index=i)
+                )
+                if 'source_entry' in variant_ref and not source_entry_valid:
+                    errors.append(f'{variant_path}:source_entry_invalid')
+                if (transition_ranks and consumer_ranks and max(transition_ranks) >= min(consumer_ranks)
+                        and not same_beat_handoff and not source_entry_valid):
                     errors.append(f'{variant_path}:state_variant_used_before_transition')
         camera = cut.get('camera')
         if not isinstance(camera, dict) or any(not _text(camera.get(k)) for k in ('framing', 'movement', 'composition', 'light', 'focus')):
@@ -636,7 +693,8 @@ SCENE_FORMAT = {
                        'connection': '前の状態から今回の開始画へどうつながるか。省略/時間移行も理由を書く'},
         'allowed_reveal_info_ids': [], 'allowed_new_reveal_elements': [],
         'result_frame': 'optional; when present, {state_variant_refs: [{entity_type: character|object|location, asset_id, variant_id, transition_id, consumer_source_event_beat_ids: この終了状態を担うsource beat IDs}], brief: 同じ場所・構図でこのcutの終了状態を見せるscene-specificな結果画}',
-        'state_variant_refs': [{'entity_type': 'character|object|location', 'asset_id': 'visible parent asset ID', 'variant_id': 'state variant selected for this cut first image', 'transition_id': 'matching transition ID', 'consumer_source_event_beat_ids': 'このscene/cutの開始画でこの状態を使うsource beat IDs'}],
+        'state_variant_refs': [{'entity_type': 'character|object|location', 'asset_id': 'visible parent asset ID', 'variant_id': 'state variant selected for this cut first image', 'transition_id': 'matching transition ID', 'consumer_source_event_beat_ids': 'このscene/cutの開始画でこの状態を使うsource beat IDs',
+            'source_entry': 'optional; sourceが変化後から始めると明記するscene入口/理由付きellipsisだけに使用。{beat_id: 最初のconsumer beat IDかつvariant作成beat ID, transition_id: そのsource beatのcut_transitions内のID, first_frame_brief: そのsource transitionの開始画原文を正確に引用}。無関係な開始画を根拠にせず、sourceにない変身過程を創作しない。通常の後続利用では省略。'}],
     }]}
 
 
@@ -749,6 +807,13 @@ async def author_cinematic_direction(*, run_dir: Path, resources: dict, groundin
             diagnostic_rows = json.loads(prompt)['diagnostics']
             if all(d['kind'] == 'field' for d in diagnostic_rows):
                 selected_model = repair_model
+        from toc.author_response_cache import replay_recorded_turn
+        recorded = replay_recorded_turn(run_dir, logs, prompt=prompt, schema=schema, model=selected_model, expected_identity=identity)
+        if recorded is not None:
+            current()
+            repair_log('turn-replayed', {'prompt_sha256': recorded.prompt_sha256,
+                'payload_sha256': recorded.payload_sha256, 'thread_id': recorded.thread_id})
+            return recorded
         result = await turn_runner(client_factory=client_factory, cwd=run_dir, prompt=prompt,
             output_schema=schema, model=selected_model, timeout_seconds=timeout_seconds,
             allow_multiple_completed_messages=True)
@@ -881,7 +946,8 @@ async def author_cinematic_direction(*, run_dir: Path, resources: dict, groundin
                 resolved, expanded, records = resolve_asset_requests([*rows, row], story, research, resources)
                 resolved = _resolve_state_variant_request_assets(resolved, records)
                 return projection_diagnostics(resolved[-1], scene, expanded,
-                    story_time=story.get('story_metadata', {}).get('time', ''), authored_row=row)
+                    story_time=story.get('story_metadata', {}).get('time', ''), authored_row=row,
+                    available_state_variants=available_state_variants)
 
             pending = session.pending(unit)
             if pending:
@@ -913,13 +979,32 @@ async def author_cinematic_direction(*, run_dir: Path, resources: dict, groundin
                     repair_log('raw-response', captured['payload'])
                     row = await decode_author_payload(captured['payload'], session=session, unit=unit, turn=turn, log=repair_log)
                     write(raw_path, {'binding': cache_binding, 'payload': {'result_json': json.dumps(row, ensure_ascii=False)}})
+            def replay_saved_patch(candidate, diagnostics):
+                pending_context = session.pending(unit)
+                if not pending_context or not pending_context.get('dispatched') or pending_context['previous_output'] != candidate:
+                    return None
+                # Exact-base, source-bound pending work only. Recheck the old
+                # response against current allowed fields and references.
+                for path in sorted((run_dir/logs).glob('*repair-response-*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
+                    recorded = json.loads(read_regular_file_nofollow(run_dir, path.relative_to(run_dir), expected_root_identity=identity))
+                    if not isinstance(recorded, dict):
+                        continue
+                    if recorded.get('base_digest') != digest(candidate) or recorded.get('unit_id') != str(unit):
+                        continue
+                    try:
+                        apply_downstream_patch(candidate, diagnostics, recorded, unit_id=str(unit))
+                    except ValueError:
+                        continue
+                    return recorded
+                return None
+
             row = await repair_candidate(candidate=row, session=session, unit=unit, diagnose=diagnose,
                 validate=validate, turn=turn, context=lambda candidate: {'source_scene': scene, 'previous_scene': previous,
                     'resources': effective_resources, 'current_scene': candidate,
                     'available_state_variants': available_state_variants,
                     'stage_rules': grounding, 'field_contract': SCENE_FORMAT,
                     'execution_field_contract': EXECUTION_FORMAT, 'film_language': film_language,
-                    'source_references': asset_reference_context(candidate, story, research)}, log=repair_log)
+                    'source_references': asset_reference_context(candidate, story, research)}, log=repair_log, replay=replay_saved_patch)
             write(cache_path, {'binding': cache_binding, 'source_binding': session.binding, 'row': row})
             resolved, effective_resources, records = resolve_asset_requests([*rows, row], story, research, resources)
             resolved = _resolve_state_variant_request_assets(resolved, records)
@@ -1042,6 +1127,19 @@ async def author_cinematic_direction(*, run_dir: Path, resources: dict, groundin
         raise
 
 
+def _image_projection_value(value):
+    # Recompilation records its nonexecuting source trace alongside the
+    # authoritative image plan and provider payload; that trace is not a
+    # change to the director's image or to executable prompt bytes.
+    return {k: v for k, v in value.items() if k != 'debug_prompt_source'} if isinstance(value, dict) else value
+
+
+def _result_frame_projection_value(value):
+    if not isinstance(value, dict):
+        return value
+    return {key: _image_projection_value(item) if key == 'image_generation' else item for key, item in value.items()}
+
+
 def projection_issues(data, metadata_key, direction, story=None):
     errors = asset_projection_issues(data, direction, manifest=metadata_key == "video_metadata")
     metadata = data.get(metadata_key, {})
@@ -1141,10 +1239,12 @@ def projection_issues(data, metadata_key, direction, story=None):
                     else:
                         for actual_shot, canonical_shot in zip(actual_shots, canonical_shots):
                             if not isinstance(actual_shot, dict) or any(actual_shot.get(k) != canonical_shot.get(k)
-                                    for k in ('shot_id', 'selector', 'parent_selector', 'start_seconds', 'duration_seconds', 'cut_contract', 'image_generation')):
+                                    for k in ('shot_id', 'selector', 'parent_selector', 'start_seconds', 'duration_seconds', 'cut_contract')) or (
+                                        _image_projection_value(actual_shot.get('image_generation')) != _image_projection_value(canonical_shot.get('image_generation'))):
                                 errors.append('cinematic:shot_projection_changed')
                             elif any((actual_shot.get('video_generation') or {}).get(k) != canonical_shot['video_generation'].get(k)
-                                     for k in ('first_frame', 'last_frame', 'result_frame', 'motion_prompt', 'tool', 'model')):
+                                     for k in ('first_frame', 'last_frame', 'motion_prompt', 'tool', 'model')) or (
+                                         _result_frame_projection_value((actual_shot.get('video_generation') or {}).get('result_frame')) != _result_frame_projection_value(canonical_shot['video_generation'].get('result_frame'))):
                                 errors.append('cinematic:shot_video_projection_changed')
                     image = actual_cut.get('image_generation') or {}
                     for key in ('character_ids', 'character_variant_ids', 'object_ids', 'object_variant_ids',
@@ -1154,7 +1254,10 @@ def projection_issues(data, metadata_key, direction, story=None):
                     video = actual_cut.get('video_generation') or {}
                     canonical_video = canonical_cut.get('video_generation') or {}
                     for key in ('result_state_reference', 'result_frame'):
-                        if video.get(key) != canonical_video.get(key):
+                        actual_value, expected_value = video.get(key), canonical_video.get(key)
+                        if key == 'result_frame':
+                            actual_value, expected_value = _result_frame_projection_value(actual_value), _result_frame_projection_value(expected_value)
+                        if actual_value != expected_value:
                             errors.append(f'cinematic:video_result_projection_changed:{key}')
     return errors
 

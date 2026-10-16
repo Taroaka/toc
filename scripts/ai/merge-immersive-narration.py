@@ -431,7 +431,7 @@ def _has_revision_aware_narration(node: dict[str, Any]) -> bool:
     return revision.get("schema_version") == "narration_revision_v1"
 
 
-def _sync_script_projection(*, run_dir: Path, script_path: Path) -> None:
+def _sync_script_projection(*, run_dir: Path, script_path: Path, narration_only: bool = False) -> None:
     subprocess.run(
         [
             sys.executable,
@@ -441,6 +441,7 @@ def _sync_script_projection(*, run_dir: Path, script_path: Path) -> None:
             "--manifest",
             str(run_dir / "video_manifest.md"),
             "--assume-run-lock-held",
+            *(["--narration-only"] if narration_only else []),
         ],
         check=True,
         cwd=REPO_ROOT,
@@ -456,6 +457,7 @@ def _merge_scratch_into_script(
     derive_audio_story_if_missing: bool,
     force: bool,
     no_backup: bool,
+    narration_only: bool = False,
 ) -> tuple[list[str], bool] | None:
     if yaml is None:
         raise SystemExit("PyYAML is required. Install with: pip install pyyaml")
@@ -577,7 +579,7 @@ def _merge_scratch_into_script(
             full_run_changed = True
     if not changed_scenes and not full_run_changed:
         try:
-            _sync_script_projection(run_dir=run_dir, script_path=script_path)
+            _sync_script_projection(run_dir=run_dir, script_path=script_path, **({"narration_only": True} if narration_only else {}))
         except Exception:
             restore_transaction()
             raise
@@ -616,7 +618,7 @@ def _merge_scratch_into_script(
                 encoding="utf-8",
             )
         script_path.write_text(replace_yaml_block(script_md, new_yaml), encoding="utf-8")
-        _sync_script_projection(run_dir=run_dir, script_path=script_path)
+        _sync_script_projection(run_dir=run_dir, script_path=script_path, **({"narration_only": True} if narration_only else {}))
     except Exception:
         restore_transaction()
         raise

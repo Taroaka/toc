@@ -582,8 +582,12 @@ def compile_video_api_prompt_v1(
     forbidden = authored_forbidden or fallback_forbidden
     additional_negative = _clean_text(additional_negative_prompt)
     forbidden_conflict_values = (*forbidden, additional_negative)
+    identity_reveal_names = _typed_visible_reveal_names(contract, vg, last_frame=last)
     if any(
-        element.casefold() in forbidden_value.casefold()
+        # Typed shots reveal registered participants, not new story facts.
+        # Mentioning an identity in a causal/action restriction does not ban it.
+        (element.casefold() == forbidden_value.casefold() if element.casefold() in identity_reveal_names
+         else element.casefold() in forbidden_value.casefold())
         for element in allowed_new_reveal_elements
         for forbidden_value in forbidden_conflict_values
         if forbidden_value
@@ -975,6 +979,41 @@ def _strip_first_frame_meta(value: Any) -> str:
     text = str(value or "").strip()
     text = re.sub(r"^動画が動き出す直前に見えている初期状態[。:：\s]*", "", text)
     return _clean_text(text)
+
+
+def _typed_visible_reveal_names(contract, video_generation, *, last_frame):
+    """Resolve identity labels only from typed reveals bound to the actual end frame."""
+    direction = _mapping(contract.get('shot_direction'))
+    if direction.get('schema_version') != 'shot_direction_v1':
+        return set()
+    shot = _mapping(direction.get('shot'))
+    initial = {s.get('entity_id') for s in _sequence(_mapping(shot.get('initial_view')).get('subjects'))
+               if isinstance(s, Mapping) and isinstance(s.get('entity_id'), str)}
+    ends = {(s.get('kind'), s.get('entity_id')) for s in _sequence(_mapping(shot.get('end_view')).get('subjects'))
+            if isinstance(s, Mapping) and isinstance(s.get('entity_id'), str) and isinstance(s.get('kind'), str)}
+    revealed = {aid for event in _sequence(shot.get('events')) if isinstance(event, Mapping)
+                and event.get('kind') in ('enter_frame', 'camera_reveal')
+                for aid in _sequence(event.get('entity_ids')) if isinstance(aid, str)} - initial
+    result = _mapping(video_generation.get('result_frame'))
+    image = _mapping(result.get('image_generation'))
+    if not last_frame or result.get('output') != last_frame or image.get('output') != last_frame:
+        return set()
+    bindings = _mapping(_mapping(image.get('first_frame_visual_plan')).get('reference_binding'))
+    dependencies = _mapping(contract.get('asset_dependency'))
+    labels = set()
+    for kind in ('character', 'object'):
+        for ref in _sequence(bindings.get(kind + '_references')):
+            if not isinstance(ref, Mapping):
+                continue
+            aid, name = ref.get('target_' + kind + '_id'), ref.get('target_' + kind + '_name')
+            if (isinstance(aid, str) and isinstance(name, str) and name.strip()
+                    and aid in revealed and (kind, aid) in ends
+                    and aid in _sequence(dependencies.get(kind + '_ids_required'))
+                    and aid in _sequence(image.get(kind + '_ids'))
+                    and isinstance(ref.get('path'), str) and ref['path']
+                    and ref['path'] in _sequence(image.get('references'))):
+                labels.add(name.strip().casefold())
+    return labels
 
 
 def _first_frame_plan_start_values(plan: Mapping[str, Any] | None) -> list[Any]:

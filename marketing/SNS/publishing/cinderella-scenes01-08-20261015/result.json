@@ -1,0 +1,82 @@
+{
+  "job_id": "cinderella-scenes01-08-20261015",
+  "completed_at": "2026-10-15T22:59:59.327803+09:00",
+  "account_handle": "@eiyu_no_tabi",
+  "tiktok_status": "published",
+  "published_count": 8,
+  "instagram_status": "skipped_by_user",
+  "scenes": [
+    {
+      "number": 1,
+      "title": "灰かぶりの願い",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene01/scene01_letterbox.mp4",
+      "duration_seconds": 96,
+      "video_sha256": "a632aee7155a57c14cd9760959dc099114c993fbb93fc7335802ec89d9dda7c1",
+      "state": "published",
+      "permalink": "https://www.tiktok.com/@eiyu_no_tabi/video/7696891302981471508"
+    },
+    {
+      "number": 2,
+      "title": "魔法と真夜中の約束",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene02/scene02_letterbox.mp4",
+      "duration_seconds": 100,
+      "video_sha256": "bc0b833f2bf35eb196ea6e112ce74bd8e50afd54378d7249383a1081fbff3e62",
+      "state": "published",
+      "permalink": "https://www.tiktok.com/@eiyu_no_tabi/video/7696892069763124501"
+    },
+    {
+      "number": 3,
+      "title": "はじめての舞踏会",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene03/scene03_letterbox.mp4",
+      "duration_seconds": 66,
+      "video_sha256": "b6315260d3a4f67167af9307c247ea9cb0e6c35ff08c54ea113ccbfc4549fd4e",
+      "state": "published",
+      "permalink": "https://www.tiktok.com/@eiyu_no_tabi/video/7696892348583742741"
+    },
+    {
+      "number": 4,
+      "title": "もう一度、あの場所へ",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene04/scene04_letterbox.mp4",
+      "duration_seconds": 62,
+      "video_sha256": "d236ae3986f82950115e4d58ace4c7b0944c59aac8eedf648739dcf3f8be9378",
+      "state": "published",
+      "permalink": "https://www.tiktok.com/@eiyu_no_tabi/video/7696892641207700788"
+    },
+    {
+      "number": 5,
+      "title": "真夜中とガラスの靴",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene05/scene05_letterbox.mp4",
+      "duration_seconds": 70,
+      "video_sha256": "271086995bcf2c1c082088e26aa2eecd137e3ffa14e62d667ff0d7dc4cc81e2b",
+      "state": "published",
+      "permalink": "https://www.tiktok.com/@eiyu_no_tabi/video/7696892850155425044"
+    },
+    {
+      "number": 6,
+      "title": "靴の持ち主を探して",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene06/scene06_letterbox.mp4",
+      "duration_seconds": 52,
+      "video_sha256": "5960cdfcd1312baefb53ae949dda8a6f7cedd6f8757bb84353afc15b5106c8a5",
+      "state": "published",
+      "permalink": "https://www.tiktok.com/@eiyu_no_tabi/video/7696893041348611349"
+    },
+    {
+      "number": 7,
+      "title": "明かされる正体",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene07/scene07_letterbox.mp4",
+      "duration_seconds": 64,
+      "video_sha256": "554712bafd4fdeb3b97a27fd9d9796b1b39a2cb1b15e5da9c3a40fdee552dfef",
+      "state": "published",
+      "permalink": "https://www.tiktok.com/@eiyu_no_tabi/video/7696893273671077141"
+    },
+    {
+      "number": 8,
+      "title": "赦しと新しい人生",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene08/scene08_letterbox.mp4",
+      "duration_seconds": 43,
+      "video_sha256": "9b1d6bac8b8bd3e38a1b4ca0ccf2e2c825b555ca9eba58a564c71541760a32c1",
+      "state": "published",
+      "permalink": "https://www.tiktok.com/@eiyu_no_tabi/video/7696893471361191188"
+    }
+  ]
+}

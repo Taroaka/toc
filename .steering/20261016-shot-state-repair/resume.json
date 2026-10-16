@@ -1,0 +1,44 @@
+{
+  "run_id": "鶴の恩返し_20261015_2224",
+  "started_at": "2026-10-16T00:05:00.137109+09:00",
+  "upstream_sha256": {
+    "research.md": "73eb5a67667b5a9b8cc35239fc356681dec1c8a02246e2a6abe7c02903944451",
+    "story.md": "052a395ab58e4b422f96993e35498d133aeb017b127e8f08985de95fb7d1e5fc",
+    "visual_value.md": "5d0a25f001483cc12b433890d1fa12eacbcad37fd78d24f7c51496b6913219af"
+  },
+  "request": {
+    "stop_target": "p680"
+  },
+  "response": {
+    "jobId": "092f29a8141d4581b999dd547c68e5d7",
+    "runId": "鶴の恩返し_20261015_2224",
+    "path": "output/鶴の恩返し_20261015_2224",
+    "status": "running",
+    "title": "鶴の恩返し",
+    "createMode": "normal",
+    "resumeMode": "authoring_subprocess",
+    "mediaOperationId": null,
+    "targetDurationSeconds": 600,
+    "stopTarget": "p680",
+    "stopTargetNumber": 680,
+    "currentProcess": "p120",
+    "currentProcessNumber": 120,
+    "pid": 5472,
+    "error": null,
+    "errorCode": null,
+    "message": "p120からp680へ再開中",
+    "processStore": {
+      "enabled": false,
+      "reason": "psycopg is not installed"
+    }
+  },
+  "verified_at": "2026-10-16T00:05:51.283382+09:00",
+  "repaired_scene_accepted": {
+    "scene_id": "scene_04",
+    "receipt": "logs/authoring/p400/accepted-adaff2f378dc1e9deaf8b9c88b82969092b9d17cdfc3b16625ca1341ccc3bf2b.json"
+  },
+  "upstream_unchanged": true,
+  "repair_event_count": 7,
+  "pending_repair_count": 0,
+  "generation_complete": false
+}

@@ -23,7 +23,7 @@ _INTERNAL_META_RE = re.compile(
     r"drawable_prompt_ir|dependencies|included_fragments|omitted_groups|required_groups|compiler_version|"
     r"shot_design_contract|cut_location_frame_plan|cut_visual_delta|blocking_and_interaction|"
     r"scene_state_progression_plan|cut_state_progression|"
-    r"\bscene\d+(?:\.\d+)?(?:[_-](?:cut|event)[A-Za-z0-9_.-]*)?\b)",
+    r"(?<![A-Za-z0-9_])(?:scene|cut)[_-]?\d+(?:[_.-][A-Za-z0-9]+)*(?![A-Za-z0-9_.-]))",
     re.IGNORECASE,
 )
 _ABSTRACT_STORY_RE = re.compile(

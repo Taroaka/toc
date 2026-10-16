@@ -8769,6 +8769,10 @@ def _manifest_video_generation_node(
     manifest: dict[str, Any],
     target: VideoRenderTargetSpec,
 ) -> dict[str, Any] | None:
+    if target.shot_id is not None and (
+        target.unit_id is not None or len(target.source_cut_ids) != 1
+    ):
+        return None
     raw_scenes = manifest.get("scenes")
     if not isinstance(raw_scenes, list):
         return None
@@ -8796,6 +8800,20 @@ def _manifest_video_generation_node(
                     isinstance(raw_cut, dict)
                     and normalize_dotted_id(raw_cut.get("cut_id")) == cut_id
                 ):
+                    if target.shot_id is not None:
+                        shots = raw_cut.get("shots")
+                        matches = [
+                            shot for shot in shots if isinstance(shot, dict)
+                            and shot.get("shot_id") == target.shot_id
+                            and shot.get("selector") == target.selector
+                        ] if isinstance(shots, list) else []
+                        if len(matches) != 1:
+                            return None
+                        video_generation = matches[0].get("video_generation")
+                        if not isinstance(video_generation, dict):
+                            video_generation = {}
+                            matches[0]["video_generation"] = video_generation
+                        return video_generation
                     video_generation = raw_cut.get("video_generation")
                     if not isinstance(video_generation, dict):
                         video_generation = {}
@@ -10334,7 +10352,7 @@ def main() -> None:
         seadream_client=seadream_client,
     )
 
-    # Pass 2: audio (TTS). The production order is images/assets -> narration -> videos.
+    # Pass 2: audio (TTS), after current image-only preparation.
     audio_scenes: list[SceneSpec] = []
     for scene in scenes:
         if not _scene_matches_filter(scene, scene_filter):
@@ -10345,6 +10363,10 @@ def main() -> None:
             continue
         audio_scenes.append(scene)
 
+    if audio_scenes and not args.dry_run:
+        from toc.scene_direction_service import require_images_ready
+        from toc.visual_planning_contract import decode_document
+        require_images_ready(base_dir, decode_document(manifest_path.read_bytes()))
     audio_max_concurrency = max(1, min(int(args.audio_max_concurrency or 1), 12))
     _generate_audio_scenes_in_parallel(
         audio_scenes=audio_scenes,

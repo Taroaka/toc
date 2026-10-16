@@ -28,11 +28,19 @@ def _fail(reason):
     raise AssetRequestValidationError(reason)
 
 
-def _source_text(ref, documents):
+def _source_text(ref, documents, *, allow_physical_symbol=False):
     if not isinstance(ref, dict) or ref.get('source') not in ('story', 'research') or not isinstance(ref.get('pointer'), str):
         _fail('source_reference_invalid')
     pointer = ref['pointer']
-    if not pointer.startswith('/') or any(token in pointer.split('/') for token in ('symbols_and_themes', 'theme', 'motifs', 'visual_notes')):
+    physical_symbol = False
+    match = re.fullmatch(r'/story_materials/symbols_and_themes/(\d+)/item', pointer)
+    if allow_physical_symbol and ref['source'] == 'research' and match:
+        try:
+            record = documents['research']['story_materials']['symbols_and_themes'][int(match[1])]
+            physical_symbol = isinstance(record, dict) and record.get('kind') == 'object'
+        except (KeyError, IndexError, TypeError):
+            pass
+    if not pointer.startswith('/') or (not physical_symbol and any(token in pointer.split('/') for token in ('symbols_and_themes', 'theme', 'motifs', 'visual_notes'))):
         _fail('physical_source_required')
     try:
         value = _pointer(documents[ref['source']], pointer)
@@ -56,6 +64,8 @@ def _evidence_rank(ref, *, scene, scene_index, documents):
             return int(match[1])
         if tail.startswith('location/'):
             return 0
+        if re.fullmatch(r'start_state/objects/\d+(?:/name)?', tail):
+            return 0
         _fail('evidence_must_address_event_or_location')
     match = re.match(r'/story_materials/chronological_events/(\d+)/', ref['pointer'])
     if not match:
@@ -68,6 +78,22 @@ def _evidence_rank(ref, *, scene, scene_index, documents):
     if not ranks:
         _fail('evidence_outside_source_scene')
     return min(ranks)
+
+
+def _opening_object_evidence(scene, scene_index, name, documents):
+    """Corroborate presence only from this scene's explicit opening objects."""
+    state = scene.get('start_state')
+    objects = state.get('objects') if isinstance(state, dict) else None
+    if not isinstance(objects, list):
+        return None
+    root = '/script/scenes' if isinstance(documents['story'].get('script'), dict) else '/scenes'
+    matches = []
+    for index, item in enumerate(objects):
+        text = item.get('name') if isinstance(item, dict) else item
+        if isinstance(text, str) and name in text:
+            suffix = '/name' if isinstance(item, dict) else ''
+            matches.append({'source': 'story', 'pointer': f'{root}/{scene_index}/start_state/objects/{index}{suffix}', 'quote': text})
+    return matches[0] if len(matches) == 1 else None
 
 
 def resolve_asset_requests(rows, story, research, base_resources):
@@ -106,13 +132,13 @@ def resolve_asset_requests(rows, story, research, base_resources):
                     _fail('kind_name_or_description_missing')
                 group, field = KINDS[kind]
                 entity = request.get('source_entity')
-                entity_text = _source_text(entity, documents)
+                entity_text = _source_text(entity, documents, allow_physical_symbol=kind == 'object')
                 if name not in entity_text:
                     _fail('name_not_in_source_entity')
                 used = request.get('used_in_cuts')
                 if not isinstance(used, list) or not used or any(not isinstance(cid, str) or cid not in cut_by_id for cid in used) or len(set(used)) != len(used):
                     _fail('used_in_cuts_invalid')
-                evidence = request.get('source_evidence')
+                evidence = deepcopy(request.get('source_evidence'))
                 if not isinstance(evidence, list) or not evidence:
                     _fail('source_evidence_required')
                 evidence_ranks = []
@@ -123,15 +149,22 @@ def resolve_asset_requests(rows, story, research, base_resources):
                     rank = _evidence_rank(ref, scene=source, scene_index=scene_index, documents=documents)
                     if name in ref['quote']:
                         evidence_ranks.append(rank)
-                if not any(name in ref['quote'] for ref in evidence):
-                    _fail('name_not_in_usage_evidence')
                 beat_ranks = {b['beat_id']: i for i, b in enumerate(source['event_sequence'])}
+                first_use_ranks = []
                 for cid in used:
                     assigned = cut_by_id[cid].get('source_beat_ids')
                     if not isinstance(assigned, list) or not assigned or any(b not in beat_ranks for b in assigned):
                         _fail('cut_source_beats_invalid')
-                    if min(evidence_ranks) > min(beat_ranks[b] for b in assigned):
-                        _fail('evidence_belongs_to_future_beat')
+                    first_use_ranks.append(min(beat_ranks[b] for b in assigned))
+                if kind == 'object' and (not evidence_ranks or min(evidence_ranks) > min(first_use_ranks)):
+                    opening = _opening_object_evidence(source, scene_index, name, documents)
+                    if opening:
+                        evidence.append(opening)
+                        evidence_ranks.append(_evidence_rank(opening, scene=source, scene_index=scene_index, documents=documents))
+                if not evidence_ranks:
+                    _fail('name_not_in_usage_evidence')
+                if min(evidence_ranks) > min(first_use_ranks):
+                    _fail('evidence_belongs_to_future_beat')
                 normalized_name = unicodedata.normalize('NFKC', name).strip()
                 identity = {'kind': kind, 'source': entity['source'], 'pointer': entity['pointer'], 'name': normalized_name}
                 key = hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:20]
@@ -148,14 +181,21 @@ def resolve_asset_requests(rows, story, research, base_resources):
                     if unicodedata.normalize('NFKC', resource.get('name', '')).strip() != normalized_name or resource.get('source_identity') == identity:
                         _fail('distinct_identity_targets_invalid')
                 ambiguous_existing = {other for other, resource in resources[group].items()
-                    if not resource.get('source_identity') and unicodedata.normalize('NFKC', resource.get('name', '')).strip() == normalized_name}
+                    if (not resource.get('source_identity') and unicodedata.normalize('NFKC', resource.get('name', '')).strip() == normalized_name)
+                    or (resource.get('source_entity') == entity and other != f'source-{kind}-{key}')}
                 if not existing and not ambiguous_existing <= set(distinct):
                     _fail('existing_candidate_requires_explicit_choice')
                 if existing:
                     entry = resources[group].get(existing)
-                    if not entry or unicodedata.normalize('NFKC', entry.get('name', '')).strip() != normalized_name:
+                    same_source = bool(entry) and entry.get('source_entity') == entity
+                    if entry and entry.get('source_entity') and not same_source:
+                        _fail('existing_asset_identity_mismatch')
+                    if not entry or (not same_source and unicodedata.normalize('NFKC', entry.get('name', '')).strip() != normalized_name):
                         _fail('existing_asset_unknown_or_name_mismatch')
-                    if entry.get('source_identity') and entry['source_identity'] != identity:
+                    if entry.get('source_identity') and any(
+                        entry['source_identity'].get(field) != identity[field]
+                        for field in ('kind', 'source', 'pointer')
+                    ):
                         _fail('existing_asset_identity_mismatch')
                     aid, created = existing, False
                 else:

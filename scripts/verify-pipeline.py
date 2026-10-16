@@ -273,8 +273,13 @@ def _strict_snapshot_provenance_failures(
     for item in snapshot.items:
         if item.item_id in excluded:
             continue
-        if not any(_strict_snapshot_provenance_record_matches(run_dir, snapshot=snapshot, item=item, payload=payload) for payload in payloads):
-            failures.append(f"{item.destination}: no strict request_bound_v2 provenance matches the current per-item snapshot digest and bytes")
+        native = any(_strict_snapshot_provenance_record_matches(run_dir, snapshot=snapshot, item=item, payload=payload) for payload in payloads)
+        from toc.image_adoption import has_current_image_adoption
+        adopted = has_current_image_adoption(run_dir, item_id=item.item_id, destination=item.destination,
+            prompt_sha256=item.prompt_sha256, reference_sha256s=current_reference_sha256s(run_dir, item),
+            request_digest=item.request_digest, compiler_version=item.compiler_version, source_digest=item.source_digest)
+        if not native and not adopted:
+            failures.append(f"{item.destination}: no strict request_bound_v2 provenance or explicit image adoption matches the current per-item snapshot digest and bytes")
     return failures
 
 
@@ -309,6 +314,27 @@ def _entry_asset_type(entry: dict[str, Any]) -> str:
 
 def _entry_required_views(entry: dict[str, Any]) -> list[str]:
     return [str(item).strip().lower() for item in as_list(_entry_generation_plan(entry).get("required_views")) if str(item).strip()]
+
+
+
+def _character_views_valid(entry: dict[str, Any], *, entries_by_id: dict, expected_variants: dict) -> bool:
+    views = set(_entry_required_views(entry))
+    reuse = as_dict(entry.get('reuse_contract'))
+    if reuse.get('mode') != 'state_variant':
+        return {'front', 'side', 'back'}.issubset(views)
+    parent = entry.get('parent_asset_id')
+    base = entries_by_id.get(parent, {}) if isinstance(parent, str) else {}
+    expected = expected_variants.get(_entry_asset_id(entry), {})
+    return (parent != _entry_asset_id(entry) and 'character' in _entry_asset_type(base)
+            and as_dict(base.get('reuse_contract')).get('mode') != 'state_variant'
+            and {'front', 'side', 'back'}.issubset(set(_entry_required_views(base)))
+            and expected.get('parent_asset_id') == parent
+            and expected.get('reference_variant_id') == entry.get('reference_variant_id')
+            and expected.get('asset_type') == entry.get('asset_type')
+            and isinstance(parent, str) and bool(parent.strip())
+            and parent == reuse.get('derived_from_asset_id')
+            and isinstance(entry.get('reference_variant_id'), str)
+            and bool(entry['reference_variant_id'].strip()) and views == {'single'})
 
 
 def _entry_reference_inputs(entry: dict[str, Any]) -> list[str]:
@@ -449,10 +475,20 @@ def check_asset(run_dir: Path, *, target_slot: str = "p570") -> tuple[dict[str, 
         if not _entry_asset_id(entry) or not _entry_asset_type(entry) or not isinstance(entry.get("source_script_selectors"), list) or not isinstance(entry.get("generation_plan"), dict):
             malformed.append(asset_id)
     add_check(checks, "asset.required_fields", target_number < 530 or (not entries or not malformed), "asset plan entries have IDs, source selectors, type, and generation plan" + (f" (invalid: {','.join(malformed[:8])})" if malformed else ""))
+    expected_variants = {}
+    if any(as_dict(entry.get('reuse_contract')).get('mode') == 'state_variant' for entry in entries):
+        from toc.asset_state_variants import required_state_variant_plan_entries
+        try:
+            manifest = _document_if_file(run_dir / 'video_manifest.md')[1]
+            expected_variants = {_entry_asset_id(entry): entry for entry in required_state_variant_plan_entries(manifest)}
+        except (ValueError, TypeError) as exc:
+            details['state_variant_contract_error'] = str(exc)
+    entries_by_id = {_entry_asset_id(entry): entry for entry in entries}
     view_failures = [
         _entry_asset_id(entry) or "<missing_asset_id>"
         for entry in entries
-        if "character" in _entry_asset_type(entry) and not {"front", "side", "back"}.issubset(set(_entry_required_views(entry)))
+        if "character" in _entry_asset_type(entry) and not _character_views_valid(
+            entry, entries_by_id=entries_by_id, expected_variants=expected_variants)
     ]
     add_check(checks, "asset.character_views", target_number < 530 or not view_failures, "character assets declare required reference views" + (f" (invalid: {','.join(view_failures[:8])})" if view_failures else ""))
     lane_failures: list[str] = []
@@ -853,7 +889,7 @@ def main() -> int:
     parser.add_argument("--profile", default="standard", choices=["fast", "standard"])
     parser.add_argument("--stage-target", "--p-slot", default="p900")
     args = parser.parse_args()
-    run_dir = Path(args.run_dir)
+    run_dir = Path(args.run_dir).resolve()
     try:
         target = normalize_stage_target(args.stage_target)
     except ValueError as exc:

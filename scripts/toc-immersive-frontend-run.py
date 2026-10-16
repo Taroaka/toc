@@ -1269,20 +1269,20 @@ def _profile_from_research(profile: dict[str, Any], research: dict[str, Any]) ->
     if canonical_dump:
         projected["summary"] = canonical_dump
     characters = materials.get("characters") if isinstance(materials.get("characters"), list) else []
-    protagonist = next(
-        (
-            item
-            for item in characters
-            if isinstance(item, dict)
-            and (
-                str(item.get("character_id") or "").strip() == "protagonist"
-                or "主人公" in str(item.get("role") or "")
-            )
-        ),
-        None,
-    )
+    # The legacy primary alias requires an explicit, unique declaration.
+    # Arbitrary research IDs and ensemble stories use their registered IDs;
+    # prose such as "主人公を支える人物" must never select a different actor.
+    primary_candidates = [item for item in characters if isinstance(item, dict) and (
+        str(item.get("character_id") or "").strip() == "protagonist"
+        or str(item.get("role") or "").strip().lower() in {"protagonist", "主人公"}
+    )]
+    protagonist = primary_candidates[0] if len(primary_candidates) == 1 else None
     if isinstance(protagonist, dict) and str(protagonist.get("name") or "").strip():
         projected["protagonist_name"] = str(protagonist["name"]).strip()
+        projected["protagonist_source_character_id"] = str(protagonist.get("character_id") or "").strip()
+    elif len(primary_candidates) > 1:
+        projected["protagonist_name"] = ""
+        projected["protagonist_source_character_id"] = ""
     raw_places = setting.get("places") or []
     projected["places"] = [
         str(place.get("name") or "").strip() if isinstance(place, dict) else str(place).strip()
@@ -1961,6 +1961,16 @@ def _artifact_first_scene_index(profile: dict[str, Any]) -> int:
     )
 
 
+def _source_scene_character_ids(scene: dict[str, Any]) -> list[str]:
+    """Read current and historical typed references, never actor names/prose."""
+    from toc.story_characters import collect_scene_character_ids
+    values, _ = collect_scene_character_ids(scene)
+    direct = scene.get("character_ids")
+    if isinstance(direct, list):
+        values.extend(value for value in direct if isinstance(value, str) and value.strip())
+    return list(dict.fromkeys(values))
+
+
 def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str, Any]]:
     specs: list[dict[str, Any]] = []
 
@@ -1975,14 +1985,15 @@ def _supporting_character_asset_specs(profile: dict[str, Any]) -> list[dict[str,
     slug = str(profile.get("slug") or "story")
     for index, record in enumerate(character_records, start=1):
         source_character_id = str(record.get("character_id") or "").strip()
-        if not source_character_id or source_character_id == "protagonist":
+        primary_id = profile.get("protagonist_source_character_id") or "protagonist"
+        if not source_character_id or (source_character_id == primary_id and profile.get("protagonist_name")):
             continue
         scene_indices = [
-            int(scene.get("canonical_scene_index") or scene.get("scene_id") or scene_index)
+            int(scene.get("canonical_scene_index") or scene_index)
             for scene_index, scene in enumerate(story_scenes or [], start=1)
             if isinstance(scene, dict)
             and source_character_id
-            in {str(value).strip() for value in scene.get("character_ids") or [] if str(value).strip()}
+            in _source_scene_character_ids(scene)
         ]
         if not scene_indices:
             continue
@@ -2068,7 +2079,7 @@ def _protagonist_appearance_contract(profile: dict[str, Any]) -> dict[str, Any]:
             item
             for item in records or []
             if isinstance(item, dict)
-            and str(item.get("character_id") or "").strip() == "protagonist"
+            and str(item.get("character_id") or "").strip() == (profile.get("protagonist_source_character_id") or "protagonist")
         ),
         {},
     )
@@ -8482,12 +8493,22 @@ def _cinematic_resources(profile: dict[str, Any]) -> dict[str, Any]:
         "references": [f"assets/characters/{protagonist}.png"],
         "subject_contract": {"identity_scope": "individual", "subject_count": 1, "member_ids": []},
         "appearance_contract": _protagonist_appearance_contract(profile),
-        "appearance_continuity": {"costume_state": _protagonist_appearance_contract(profile)["occasion_or_state"]}}}
+        "appearance_continuity": {"costume_state": _protagonist_appearance_contract(profile)["occasion_or_state"]}}} if profile.get("protagonist_name") else {}
     characters.update({s["character_id"]: {"name": s["name"], "references": list(s["reference_images"]),
         "subject_contract": deepcopy(s.get("subject_contract") or {"identity_scope": "individual", "subject_count": 1, "member_ids": []}),
         "appearance_contract": deepcopy(s.get("appearance_contract") or {}),
         "appearance_continuity": deepcopy(s.get("appearance_continuity") or {})}
         for s in _supporting_character_asset_specs(profile)})
+    research = profile.get("research") or {}
+    records = (research.get("story_materials") or {}).get("characters") or []
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            continue
+        source_id = str(record.get("character_id") or "").strip()
+        asset_id = _scene_acceptance_role_character_id(profile, scene_index=1, role_id=source_id)
+        if asset_id in characters:
+            characters[asset_id]["source_entity"] = {"source": "research", "pointer": f"/story_materials/characters/{index}/name"}
+            characters[asset_id]["source_role_ids"] = [source_id]
     objects = {s["object_id"]: {"name": s["name"], "references": list(s["reference_images"])}
         for s in _supporting_object_asset_specs(profile)}
     if profile.get("artifact_name"):
@@ -8497,7 +8518,7 @@ def _cinematic_resources(profile: dict[str, Any]) -> dict[str, Any]:
         for s in _location_asset_specs(profile)}
     scene_assets = {}
     for idx, source_scene in enumerate(profile.get("story_scenes") or [], 1):
-        roles = {str(role) for beat in source_scene.get("event_sequence", [])
+        roles = set(_source_scene_character_ids(source_scene)) | {str(role) for beat in source_scene.get("event_sequence", [])
             for role in (beat.get("required_roles") or beat.get("participants") or beat.get("character_ids") or [])}
         allowed_characters = {_scene_acceptance_role_character_id(profile, scene_index=idx, role_id=role) for role in roles}
         allowed_objects = [profile["artifact_asset_id"]] if _scene_uses_artifact(profile, idx) and profile.get("artifact_name") else []
@@ -8959,7 +8980,7 @@ def _scene_acceptance_role_character_id(
     """Resolve an authored role once while the whole-set contract is planned."""
 
     normalized = str(role_id).strip()
-    if normalized == "protagonist":
+    if normalized == "protagonist" or normalized == profile.get("protagonist_source_character_id"):
         return str(
             _protagonist_asset_for_cut(profile, scene_index, "")
             or profile["protagonist_asset_id"]
@@ -11711,6 +11732,8 @@ def _build_script_and_manifest(
             "reuse_contract": {"mode": "neutral_anchor"},
         }
     ]
+    if not profile.get("protagonist_name"):
+        character_bible = []
     for spec in _supporting_character_asset_specs(profile):
         appearance_continuity = (
             deepcopy(spec.get("appearance_continuity"))

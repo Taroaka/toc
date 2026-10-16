@@ -7,6 +7,16 @@ import re
 
 from toc.image_prompt_compiler import compile_image_api_prompt_v2
 from toc.shot_direction import normalize_shot_plan, parent_duration_seconds, SCHEMA
+from toc.production_diagnostics import AuthoringValidationError
+from toc.image_prompt_projection_registry import normalize_drawable_prompt_text
+
+
+class ShotImageProjectionError(AuthoringValidationError):
+    """A child still failed state validation or compilation at an authored shot/view."""
+
+    def __init__(self, *, shot_index, view_field, reason):
+        self.issue = {'shot_index': shot_index, 'view_field': view_field, 'reason': reason}
+        super().__init__('shot_image:' + json.dumps(self.issue, ensure_ascii=False))
 
 
 def _ids(parent, kind):
@@ -19,6 +29,25 @@ def _ids(parent, kind):
 
 def _unique(values):
     return list(dict.fromkeys(values))
+
+
+def _forward_view_reference(value):
+    return isinstance(value, str) and bool(re.search(
+        r'(?:次|後続)(?:の)?\s*(?:cut|scene|shot|カット|シーン|ショット)'
+        r'|(?<![A-Za-z0-9_])(?:next|following)[\s_-]+(?:cut|scene|shot)(?![A-Za-z])', value, re.I))
+
+
+def _current_view_text(value):
+    """Keep complete drawable sentences from one authored current-view field."""
+    if _forward_view_reference(value):
+        return ''
+    text = normalize_drawable_prompt_text(value)
+    if text or not isinstance(value, str):
+        return text
+    # Continuity metadata may occupy a separate sentence. Do not rewrite a
+    # mixed sentence or borrow descriptions from another temporal boundary.
+    return '。'.join(filter(None, (normalize_drawable_prompt_text(part)
+                    for part in re.split(r'[。\n]+', value))))
 
 
 def project_cut_shots(parent_cut, plan, resources, *, story_time='', time_of_day=''):
@@ -73,11 +102,20 @@ def project_cut_shots(parent_cut, plan, resources, *, story_time='', time_of_day
                                         if r.get('character_id') in changed)
         return combined
 
-    def image_for(view, output, *, changed, anchor=None, camera=None):
-        if view.get('state_source') == 'result' and not changed:
-            raise ValueError('shot_direction:result_state_used_before_transition')
+    def image_for(view, output, *, changed, anchor=None, camera=None, view_field='initial_view'):
+        if _forward_view_reference(view['description']):
+            raise ShotImageProjectionError(shot_index=shot_index, view_field=view_field,
+                reason='drawable_prompt_current_moment_missing')
+        # Ordinary motion can have an end still without a new appearance asset.
+        # A parent result binding, however, must never leak ahead of its event.
+        ordinary_end = (view_field == 'end_view' and not result_image
+                        and not source_video.get('result_state_reference'))
+        if view.get('state_source') == 'result' and not changed and not ordinary_end:
+            raise ShotImageProjectionError(shot_index=shot_index, view_field=view_field,
+                reason='shot_direction:result_state_used_before_transition')
         if view.get('state_source') == 'start' and any(s['entity_id'] in changed for s in view['subjects']):
-            raise ValueError('shot_direction:start_state_reset_after_transition')
+            raise ShotImageProjectionError(shot_index=shot_index, view_field=view_field,
+                reason='shot_direction:start_state_reset_after_transition')
         state_image = state_image_at(changed)
         state_plan = state_image.get('first_frame_visual_plan') or {}
         source_bindings = state_plan.get('reference_binding') or {}
@@ -105,9 +143,27 @@ def project_cut_shots(parent_cut, plan, resources, *, story_time='', time_of_day
         if anchor:
             bindings['scene_references'] = [{'path': anchor, 'role': 'spatial_continuity_anchor'}]
             refs.append(anchor)
-        visible_lines = [identity(s) + '：' + s['view'] +
+        # Relative continuity metadata is not drawable by itself. The same
+        # authored frame's concrete description is an existing source of
+        # current state; never synthesize replacement scene prose here.
+        def current_subject_view(subject):
+            return (_current_view_text(subject['view'])
+                    or _current_view_text(view['description']))
+
+        visible_lines = [identity(s) + '：' + current_subject_view(s) +
                          ('。見える部分は' + '、'.join(s['visible_parts']) if s['visible_parts'] else '')
                          for s in view['subjects']]
+        current_moment = _current_view_text(view['description']) or view['description']
+        if (not normalize_drawable_prompt_text(view['description']) and view['subjects']
+                and all(_current_view_text(s['view']) for s in view['subjects'])):
+            # The same authored view already supplies each visible subject's
+            # state. Keep those facts when its overall description is relative.
+            # Never use another shot, future result, or generic replacement prose.
+            current_moment = '。'.join(filter(None, [_current_view_text(view['description']), *visible_lines,
+                normalize_drawable_prompt_text(view['framing']),
+                normalize_drawable_prompt_text(view['composition'])]))
+        character_lines = [line for subject, line in zip(view['subjects'], visible_lines)
+                           if subject['kind'] == 'character']
         states = []
         for aid in visible['character']:
             row = old_state_by_id.get(aid)
@@ -120,18 +176,20 @@ def project_cut_shots(parent_cut, plan, resources, *, story_time='', time_of_day
             'schema_version': 'first_frame_visual_plan_v1', 'cut_role': 'main' if visible['character'] else 'sub',
             'shot_direction_contract': SCHEMA,
             'source_grounding': {'character_ids': visible['character']},
-            'temporal_boundary': {'event_fact_visible_in_still': view['description'], 'not_yet_happened_in_still': []},
-            'subject_binding': {'primary_subject': {'name': view['description']}},
-            'character_state_gate': {'pose': '\n'.join(visible_lines), 'character_states': states},
+            'temporal_boundary': {'event_fact_visible_in_still': current_moment, 'not_yet_happened_in_still': []},
+            'subject_binding': {'primary_subject': {'name': current_moment}},
+            'character_state_gate': {'pose': '\n'.join(character_lines), 'character_states': states},
             'object_visibility_gate': {'objects': [{'object_id': aid, 'name': names[aid],
-                'object_state': '\n'.join(s['view'] for s in view['subjects'] if s['entity_id'] == aid)} for aid in visible['object']]},
+                'object_state': '\n'.join(current_subject_view(s) for s in view['subjects'] if s['entity_id'] == aid)} for aid in visible['object']]},
             'reference_binding': bindings,
-            'spatial_composition': {'foreground': view['composition'], 'midground': view['description'],
+            'spatial_composition': {'foreground': view['composition'], 'midground': current_moment,
                 'background': '背景はこの画角に収まる範囲だけ。参照画像の全景を再現しない',
                 'shot_size': view['framing'], 'focus_intent': view['focus'] or ''},
             'scene_material_pack': {'light_source': light},
             'source_preservation_constraints': [],
         }
+        if view_field == 'initial_view' and view.get('state_source') == 'previous_end' and shot_index:
+            visual_plan['source_grounding']['previous_shot_end_state'] = plan['shots'][shot_index-1]['end_state']
         if camera and camera.get('angle'):
             visual_plan['spatial_composition']['camera_angle'] = camera['angle']
         if camera and camera.get('lens_mm') is not None:
@@ -142,9 +200,12 @@ def project_cut_shots(parent_cut, plan, resources, *, story_time='', time_of_day
                 '参照は同一性と見える衣装の状態に使う。画角の外の顔・身体・道具を追加して全景に戻さない']
         if (source_image.get('first_frame_visual_plan') or {}).get('film_language'):
             visual_plan['film_language'] = deepcopy(source_image['first_frame_visual_plan']['film_language'])
-        payload = compile_image_api_prompt_v2(first_frame_visual_plan=visual_plan,
-            character_ids=visible['character'], object_ids=visible['object'], location_ids=locations,
-            reference_images=_unique(refs), story_time=story_time, scene_time_of_day=time_of_day)
+        try:
+            payload = compile_image_api_prompt_v2(first_frame_visual_plan=visual_plan,
+                character_ids=visible['character'], object_ids=visible['object'], location_ids=locations,
+                reference_images=_unique(refs), story_time=story_time, scene_time_of_day=time_of_day)
+        except AuthoringValidationError as exc:
+            raise ShotImageProjectionError(shot_index=shot_index, view_field=view_field, reason=str(exc)) from exc
         from toc.asset_state_variants import state_variant_output_path
         variants = {kind + '_variant_ids': [variant for variant in state_image.get(kind + '_variant_ids', [])
             if any(state_variant_output_path(kind, aid, variant) in refs
@@ -160,7 +221,7 @@ def project_cut_shots(parent_cut, plan, resources, *, story_time='', time_of_day
 
     shots = []
     changed_entities, previous_end = set(), None
-    for shot in plan['shots']:
+    for shot_index, shot in enumerate(plan['shots']):
         sid = selector + '_shot' + shot['shot_id']
         output_stem = sid + '_' + revision
         initial_ids = {s['entity_id'] for s in shot['initial_view']['subjects']}
@@ -189,8 +250,9 @@ def project_cut_shots(parent_cut, plan, resources, *, story_time='', time_of_day
                         or not any(r.get('path') == path and r.get('target_' + kind + '_id') == aid
                                    for r in bound.get(kind + '_references', []))):
                     raise ValueError('shot_direction:transformed_entity_result_reference_unbound:' + aid)
-        if shot['initial_view'].get('state_source') == 'previous_end' and previous_end is None:
-            raise ValueError('shot_direction:previous_end_reference_missing')
+        if shot['initial_view'].get('state_source') == 'previous_end' and shot_index == 0:
+            raise ShotImageProjectionError(shot_index=shot_index, view_field='initial_view',
+                reason='shot_direction:previous_end_reference_missing')
         next_state = changed_entities | transitions
         if revealed - initial_ids - end_ids:
             raise ValueError('shot_direction:later_identity_reference_unencodable:' + ','.join(sorted(revealed - initial_ids - end_ids)))
@@ -206,7 +268,7 @@ def project_cut_shots(parent_cut, plan, resources, *, story_time='', time_of_day
         contract['asset_dependency'] = {'character_ids_required': [i for i in characters if i in participants],
                                       'object_ids_required': [i for i in objects if i in participants],
                                       'location_ids_required': locations}
-        visible_brief = shot['initial_view']['description']
+        visible_brief = image['first_frame_visual_plan']['temporal_boundary']['event_fact_visible_in_still']
         contract.setdefault('first_frame_contract', {}).update(first_frame_brief=visible_brief,
             event_fact_visible_in_still=visible_brief, must_include=[visible_brief],
             visible_start_state={'spatial_state': visible_brief})
@@ -252,7 +314,7 @@ def project_cut_shots(parent_cut, plan, resources, *, story_time='', time_of_day
             'native_audio': {'mode': 'off', 'sound_events': [], 'dialogue': []}}
         if shot['end_view']:
             end_image = image_for(shot['end_view'], f'assets/scenes/{output_stem}_result.png', changed=next_state,
-                                  anchor=image['output'], camera=shot['camera'])
+                                  anchor=image['output'], camera=shot['camera'], view_field='end_view')
             generation.update(last_frame=end_image['output'], result_frame={'output': end_image['output'], 'image_generation': end_image})
             if shot['end_view'].get('state_source') != 'start':
                 from toc.asset_state_variants import normalize_state_variant_bindings

@@ -168,6 +168,30 @@ def source_value_ids(story: Mapping[str, Any]) -> set[str]:
     }
 
 
+
+def _preservation_list_issues(contract: Mapping[str, Any], prefix: str) -> list[str]:
+    text_keys = {'non_negotiable_events': 'requirement', 'non_negotiable_meanings': 'meaning',
+                 'iconic_moments': 'moment'}
+    issues = _required_list_issues(contract, ('forbidden_value_distortions',), prefix)
+    for key, text_key in text_keys.items():
+        entries = contract.get(key)
+        if not isinstance(entries, list) or not entries:
+            issues.append(f'{prefix}.{key}:missing_or_non_string')
+            continue
+        for index, entry in enumerate(entries):
+            if isinstance(entry, str) and entry.strip():
+                continue  # Retain the legacy compact representation.
+            item_prefix = f'{prefix}.{key}[{index}]'
+            if not isinstance(entry, Mapping):
+                issues.append(f'{prefix}.{key}:missing_or_non_string')
+                continue
+            issues.extend(_required_string_issues(entry, (text_key,), item_prefix))
+            issues.extend(_required_list_issues(entry, ('source_event_refs',), item_prefix))
+            if 'source_passage_refs' in entry:
+                issues.extend(_required_list_issues(entry, ('source_passage_refs',), item_prefix))
+    return issues
+
+
 def story_adaptation_issues(data: Mapping[str, Any]) -> list[str]:
     enabled, issues = _marker_issues(data, "story_metadata")
     if not enabled:
@@ -177,7 +201,7 @@ def story_adaptation_issues(data: Mapping[str, Any]) -> list[str]:
         return [*issues, "adaptation_source_contract:missing"]
     prefix = "adaptation_source_contract"
     issues.extend(_required_string_issues(contract, SOURCE_REQUIRED_STRINGS, prefix))
-    issues.extend(_required_list_issues(contract, SOURCE_REQUIRED_LISTS, prefix))
+    issues.extend(_preservation_list_issues(contract, prefix))
     if not _list(contract.get("core_values")):
         issues.append(f"{prefix}.core_values:missing")
     if _text(contract.get("schema_version")) != ADAPTATION_SOURCE_SCHEMA:

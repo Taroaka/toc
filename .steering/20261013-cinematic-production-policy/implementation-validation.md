@@ -57,3 +57,14 @@
 - 演出authorが画像の不備を見つけた場合は、対象画像を明示し、開始/終了画の不足条件を具体化した設計差分を出す。差分がなく必要画像が修正されない提案をreadyにしない。
 - 準備状態は採用素材と別のoperation記録へ保存し、変更不要のsceneでも完了状態をappend-only stateとindexへ反映する。
 - 最終buildはアプリ同梱の対応Node.jsで実行し成功。
+
+## ローカル環境への反映
+
+新APIが稼働中のbackendへ未読込だったため、既存ToC listenerと生成leaseが開かれていないことを確認して公式restart helperを実行した。helperはlistener停止後、Docker APIへ接続できずDB起動で停止した。Docker UI確認もタイムアウトしたため、それ以上のUI操作は行っていない。
+
+DBの設定・volume・role・データは変更せず、既存runtimeとloopbackポートでbackend/frontendを復旧した。HTTP応答とOpenAPI上の新準備routeを確認。Docker側APIの不調と、別に稼働しているnative PostgresにはToC用roleがない問題は未解消。DB依存機能を含む本番全編制作の確認は行っていない。
+
+- Frontend: http://127.0.0.1:5173/image_gen/
+- Backend: http://127.0.0.1:8000/image_gen
+- 起動ログ: `.codex/run/toc-server/backend.log` / `frontend.log`
+- 本番生成は開始していない。

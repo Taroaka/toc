@@ -32,7 +32,12 @@ from toc.immersive_manifest import (
 from toc.narration_revision import apply_authoring_update, ensure_narration_revision
 from toc.narration_continuity import invalidate_stale_tts_context_audio, reconcile_audio_story_text
 from toc.runtime_locks import sync_file_lock
-from toc.script_narration import is_b_roll, resolve_manifest_narration, resolve_script_cut_tts_text
+from toc.script_narration import (
+    is_b_roll,
+    resolve_manifest_narration,
+    resolve_script_cut_tts_text,
+    resolve_script_metadata_elevenlabs,
+)
 
 
 def replace_yaml_block(text: str, new_yaml: str) -> str:
@@ -642,6 +647,397 @@ def _sync_narration_source_binding(
     return True
 
 
+_NARRATION_DELIVERY_FIELDS = (
+    "model_id",
+    "voice_id",
+    "voice_name",
+    "voice_settings",
+    "output_format",
+    "language_code",
+    "pronunciation_dictionary_locators",
+    "pronunciation_alias_file",
+)
+
+
+def _script_narration_projection(
+    script_cut: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Read the canonical flat script fields and compatible nested narration forms."""
+
+    audio = _as_dict(script_cut.get("audio"))
+    audio_narration = _as_dict(audio.get("narration"))
+    narration_mapping = _as_dict(script_cut.get("narration"))
+    # The usual script schema is flat.  Nested forms are accepted for scripts
+    # authored by clients that keep narration in an audio.narration object.
+    fields: dict[str, Any] = {}
+    fields.update(audio_narration)
+    fields.update(narration_mapping)
+    for key in (
+        "tts_text",
+        "narration_tool",
+        "narration_authoring",
+        "human_review",
+        "elevenlabs_prompt",
+        "silence_contract",
+        *_NARRATION_DELIVERY_FIELDS,
+    ):
+        if key in script_cut:
+            fields[key] = script_cut[key]
+
+    raw_narration = script_cut.get("narration")
+    if not isinstance(raw_narration, dict) and "narration" in script_cut:
+        fields["text"] = raw_narration
+    elif "text" not in fields and "narration" in fields:
+        fields["text"] = fields.get("narration")
+
+    authoring = _as_dict(fields.get("narration_authoring"))
+    if not authoring:
+        authoring = _as_dict(fields.get("authoring"))
+    review = _as_dict(fields.get("human_review"))
+    return fields, authoring, review
+
+
+def _sync_nested_audio_from_flat_script(script_data: dict[str, Any]) -> int:
+    """Make an existing nested audio projection agree with explicit flat fields."""
+
+    changed = 0
+    for scene in _as_list(script_data.get("scenes")):
+        if not isinstance(scene, dict):
+            continue
+        for cut in _as_list(scene.get("cuts")):
+            if not isinstance(cut, dict):
+                continue
+            audio = cut.get("audio")
+            if not isinstance(audio, dict):
+                continue
+            nested = audio.get("narration")
+            if not isinstance(nested, dict):
+                continue
+
+            flat_fields: dict[str, Any] = {}
+            flat_narration = cut.get("narration")
+            if "narration" in cut and not isinstance(flat_narration, dict):
+                flat_fields["text"] = "" if flat_narration is None else str(flat_narration)
+            if "tts_text" in cut:
+                flat_value = cut.get("tts_text")
+                flat_fields["tts_text"] = "" if flat_value is None else str(flat_value)
+            if "narration_tool" in cut:
+                flat_value = cut.get("narration_tool")
+                flat_fields["tool"] = "" if flat_value is None else str(flat_value)
+
+            for key, value in flat_fields.items():
+                if nested.get(key) != value:
+                    nested[key] = value
+                    changed += 1
+    return changed
+
+
+def _copy_script_delivery_settings(
+    narration: dict[str, Any], *, script_data: dict[str, Any], script_fields: dict[str, Any]
+) -> tuple[bool, bool]:
+    """Project authored voice and provider settings into the narration payload."""
+
+    changed = False
+    untracked_tts_delivery_changed = False
+    script_metadata = _as_dict(script_data.get("script_metadata"))
+    raw_global_settings = _as_dict(script_metadata.get("elevenlabs"))
+    resolved_global_settings = (
+        resolve_script_metadata_elevenlabs(script_data) if "elevenlabs" in script_metadata else {}
+    )
+
+    for key in ("model_id", "voice_id", "voice_name"):
+        if key in script_fields:
+            value = script_fields[key]
+        elif key in raw_global_settings:
+            # Use the shared model normalizer while retaining explicitly
+            # authored values for the other voice identifiers.
+            value = resolved_global_settings.get(key)
+        else:
+            value = None
+        if value is not None and narration.get(key) != value:
+            narration[key] = deepcopy(value)
+            changed = True
+
+    for key in (
+        "voice_settings",
+        "output_format",
+        "language_code",
+        "pronunciation_dictionary_locators",
+        "pronunciation_alias_file",
+    ):
+        if key in script_fields:
+            value = script_fields[key]
+        else:
+            value = raw_global_settings.get(key)
+        if value is not None and narration.get(key) != value:
+            narration[key] = deepcopy(value)
+            changed = True
+            if key in {
+                "output_format",
+                "language_code",
+                "pronunciation_dictionary_locators",
+                "pronunciation_alias_file",
+            }:
+                untracked_tts_delivery_changed = True
+
+    prompt_present = "elevenlabs_prompt" in script_fields or "elevenlabs_prompt" in raw_global_settings
+    prompt_value = script_fields.get("elevenlabs_prompt", raw_global_settings.get("elevenlabs_prompt"))
+    if prompt_present and isinstance(prompt_value, dict) and narration.get("elevenlabs_prompt") != prompt_value:
+        narration["elevenlabs_prompt"] = deepcopy(prompt_value)
+        changed = True
+
+    # The run-level stability profile supplies the default for a cut that did
+    # not choose one.  Keep any other per-cut prompt fields intact.
+    default_profile = str(raw_global_settings.get("default_stability_profile") or "").strip().lower()
+    if default_profile in {"creative", "natural", "robust"}:
+        current_prompt = _as_dict(narration.get("elevenlabs_prompt"))
+        if not str(current_prompt.get("stability_profile") or "").strip():
+            updated_prompt = {**current_prompt, "stability_profile": default_profile}
+            if updated_prompt != narration.get("elevenlabs_prompt"):
+                narration["elevenlabs_prompt"] = updated_prompt
+                changed = True
+    return changed, untracked_tts_delivery_changed
+
+
+def _clear_narration_audio_selection(narration: dict[str, Any]) -> None:
+    selection = _as_dict(narration.get("audio_selection"))
+    selection.update(
+        {
+            "status": "unselected",
+            "candidate_id": "",
+            "revision": 0,
+            "text_hash": "",
+            "tts_hash": "",
+            "selected_at": "",
+        }
+    )
+    narration["audio_selection"] = selection
+
+
+def _invalidate_untracked_tts_delivery_change(narration: dict[str, Any]) -> None:
+    """Invalidate audio when provider settings are outside the revision hash."""
+
+    _invalidate_audio_for_source_binding_migration(narration)
+    _clear_narration_audio_selection(narration)
+    revision = _as_dict(narration.get("revision"))
+    revision["number"] = int(revision.get("number") or 0) + 1
+    revision["tts_revision"] = int(revision.get("tts_revision") or 0) + 1
+    revision["source"] = "script_sync_delivery_settings"
+    revision["updated_at"] = now_iso()
+    narration["revision"] = revision
+
+
+def _sync_narration_only_cut(
+    cut: dict[str, Any],
+    script_cut: dict[str, Any],
+    *,
+    script_data: dict[str, Any],
+    selector: str,
+) -> tuple[bool, bool]:
+    """Sync only narration and its revision/source bindings for one cut."""
+
+    narration = _ensure_audio_narration(cut)
+    revision = ensure_narration_revision(narration)
+    fields, authoring, review = _script_narration_projection(script_cut)
+
+    delivery_changed, untracked_tts_delivery_changed = _copy_script_delivery_settings(
+        narration,
+        script_data=script_data,
+        script_fields=fields,
+    )
+    starting_tts_revision = int(revision.get("tts_revision") or 0)
+
+    approved_text = str(review.get("approved_narration") or "").strip()
+    new_text = approved_text or str(fields.get("text") or "").strip()
+    approved_tts_text = str(review.get("approved_tts_text") or "").strip()
+    tts_source = dict(script_cut)
+    if isinstance(script_cut.get("narration"), dict):
+        tts_source["narration"] = fields.get("text", "")
+    elif "narration" not in tts_source:
+        tts_source["narration"] = fields.get("text", "")
+    if "tts_text" in fields:
+        tts_source["tts_text"] = fields.get("tts_text")
+    if "elevenlabs_prompt" in fields:
+        tts_source["elevenlabs_prompt"] = fields.get("elevenlabs_prompt")
+    new_tts_text = approved_tts_text or resolve_script_cut_tts_text(tts_source)
+
+    source_tool_value = fields.get("narration_tool") or authoring.get("tool") or fields.get("tool")
+    source_tool = str(source_tool_value or "").strip().lower()
+    global_provider = str(
+        _as_dict(_as_dict(script_data.get("script_metadata")).get("elevenlabs")).get("provider") or ""
+    ).strip().lower()
+    tool = source_tool or global_provider or str(narration.get("tool") or "elevenlabs").strip().lower()
+    # An authored B-roll line is a voiced choice even if the previous manifest
+    # had materialized the optional B-roll silence default.
+    if is_b_roll(cut) and (new_text or new_tts_text) and not source_tool and tool == "silent":
+        tool = "elevenlabs"
+    if tool == "silent":
+        new_text = ""
+        new_tts_text = ""
+
+    authoring_status = str(authoring.get("status") or fields.get("authoring_status") or "").strip().lower()
+    if tool == "silent":
+        authoring_status = "silent"
+    elif authoring_status not in {"draft", "human_locked", "reviewed"}:
+        authoring_status = "human_locked" if str(review.get("status") or "") == "approved" else "draft"
+
+    if isinstance(fields.get("silence_contract"), dict):
+        silence_contract = deepcopy(fields["silence_contract"])
+        if narration.get("silence_contract") != silence_contract:
+            narration["silence_contract"] = silence_contract
+            delivery_changed = True
+    elif not new_text and not new_tts_text and source_tool in {"", "silent"} and tool == "silent" and is_b_roll(cut):
+        optional_narration = resolve_manifest_narration(cut)
+        if optional_narration and optional_narration.get("tool") == "silent":
+            silence_contract = deepcopy(_as_dict(optional_narration.get("silence_contract")))
+            if narration.get("silence_contract") != silence_contract:
+                narration["silence_contract"] = silence_contract
+                delivery_changed = True
+
+    narration_changed = apply_authoring_update(
+        narration,
+        text=new_text,
+        tts_text=new_tts_text,
+        tool=tool or "elevenlabs",
+        authoring_status=authoring_status,
+        source="script_sync",
+        expected_revision=int(revision.get("number") or 0),
+        now=now_iso(),
+    )
+    current_revision = _as_dict(narration.get("revision"))
+    if untracked_tts_delivery_changed and int(current_revision.get("tts_revision") or 0) == starting_tts_revision:
+        _invalidate_untracked_tts_delivery_change(narration)
+        narration_changed = True
+    binding_changed = _sync_narration_source_binding(
+        cut,
+        selector=selector,
+        force_rebind=narration_changed,
+    )
+    return bool(delivery_changed or narration_changed or binding_changed), narration_changed
+
+
+def _sync_narration_only_unlocked(*, script_path: Path, manifest_path: Path) -> tuple[int, int]:
+    """Project narration authoring without applying any visual or inventory edits."""
+
+    if yaml is None:
+        raise SystemExit("PyYAML is required.")
+    script_text, script_data = load_structured_document(script_path)
+    manifest_text, manifest_data = load_structured_document(manifest_path)
+    if not script_data or not manifest_data:
+        raise SystemExit("Failed to parse script or manifest YAML.")
+    if not isinstance(script_data, dict) or not isinstance(manifest_data, dict):
+        raise SystemExit("Script and manifest must parse as mappings.")
+
+    script_request_updates = apply_narration_change_requests_to_script(script_data)
+    script_request_updates += _sync_nested_audio_from_flat_script(script_data)
+    story_text_reconciled = reconcile_audio_story_text(script_data)
+    script_request_updates += int(story_text_reconciled)
+    narration_state_changed = bool(script_request_updates)
+    script_scene_map, script_cut_map = build_script_maps(script_data)
+    updated = 0
+    skipped = 0
+
+    for projection_key in ("audio_story_plan", "narration_spans"):
+        projection = deepcopy(script_data.get(projection_key))
+        if projection is not None and manifest_data.get(projection_key) != projection:
+            manifest_data[projection_key] = projection
+            updated += 1
+            narration_state_changed = True
+    span_refs_by_selector = build_narration_span_refs(script_data)
+
+    for scene in _as_list(manifest_data.get("scenes")):
+        if not isinstance(scene, dict):
+            continue
+        scene_id = _normalized_id(scene.get("scene_id"))
+        if not scene_id:
+            continue
+        script_scene = script_scene_map.get(scene_id)
+        if not isinstance(script_scene, dict):
+            continue
+        for cut in _as_list(scene.get("cuts")):
+            if not isinstance(cut, dict):
+                continue
+            cut_id = _normalized_id(cut.get("cut_id"))
+            if not cut_id:
+                continue
+            script_cut = script_cut_map.get(make_scene_cut_selector(scene_id, cut_id))
+            if not isinstance(script_cut, dict):
+                skipped += 1
+                continue
+            selector = make_scene_cut_selector(scene_id, cut_id)
+            cut_changed, narration_changed = _sync_narration_only_cut(
+                cut,
+                script_cut,
+                script_data=script_data,
+                selector=selector,
+            )
+            if cut_changed:
+                updated += 1
+            narration_state_changed = narration_state_changed or narration_changed
+
+            narration = _ensure_audio_narration(cut)
+            span_refs = deepcopy(span_refs_by_selector.get(selector, []))
+            if narration.get("span_refs") != span_refs:
+                narration["span_refs"] = span_refs
+                updated += 1
+                narration_state_changed = True
+
+    context_invalidated = invalidate_stale_tts_context_audio(manifest_data)
+    updated += len(context_invalidated)
+    narration_state_changed = narration_state_changed or bool(context_invalidated)
+    if narration_state_changed:
+        workflow = _as_dict(manifest_data.get("narration_workflow"))
+        final_review = _as_dict(workflow.get("final_audio_review"))
+        final_review.update(
+            {
+                "status": "stale" if final_review.get("status") == "approved" else "pending",
+                "approved_audio_set_hash": "",
+                "approved_timeline_hash": "",
+                "invalidated_at": now_iso(),
+                "invalidation_reason": "script narration/global audio-story sync changed canonical inputs",
+            }
+        )
+        workflow["schema_version"] = "narration_run_workflow_v1"
+        workflow["final_audio_review"] = final_review
+        manifest_data["narration_workflow"] = workflow
+
+    new_yaml = yaml.safe_dump(manifest_data, allow_unicode=True, sort_keys=False, width=1000)
+    new_manifest_text = replace_yaml_block(manifest_text, new_yaml)
+    new_script_text = script_text
+    if script_request_updates:
+        script_yaml = yaml.safe_dump(script_data, allow_unicode=True, sort_keys=False, width=1000)
+        new_script_text = replace_yaml_block(script_text, script_yaml)
+    state_path = manifest_path.parent / "state.txt"
+    original_file_bytes = {
+        script_path: script_path.read_bytes(),
+        manifest_path: manifest_path.read_bytes(),
+    }
+    try:
+        if script_request_updates:
+            script_path.write_text(new_script_text, encoding="utf-8")
+        manifest_path.write_text(new_manifest_text, encoding="utf-8")
+        if narration_state_changed:
+            append_state_snapshot(
+                state_path,
+                {
+                    "status": "P710",
+                    "runtime.stage": "narration_script_sync_updated",
+                    "runtime.narration.phase": "authoring",
+                    "slot.p710.status": "in_progress",
+                    "slot.p710.note": "script/global narration changed; regenerate bound audio",
+                    "slot.p730.status": "pending",
+                    "slot.p740.status": "pending",
+                    "slot.p750.status": "pending",
+                    "stage.narration.status": "in_progress",
+                },
+            )
+    except Exception:
+        for path, original_bytes in original_file_bytes.items():
+            path.write_bytes(original_bytes)
+        raise
+    return updated, skipped
+
+
 def _materialize_location_bible(manifest_data: dict[str, Any], request_map: dict[str, dict[str, Any]]) -> int:
     assets = _ensure_manifest_assets(manifest_data)
     location_bible = _as_list(assets.get("location_bible"))
@@ -924,7 +1320,11 @@ def apply_human_change_requests(*, script_data: dict[str, Any], manifest_data: d
     return changed
 
 
-def _sync_narration_unlocked(*, script_path: Path, manifest_path: Path) -> tuple[int, int]:
+def _sync_narration_unlocked(
+    *, script_path: Path, manifest_path: Path, narration_only: bool = False
+) -> tuple[int, int]:
+    if narration_only:
+        return _sync_narration_only_unlocked(script_path=script_path, manifest_path=manifest_path)
     if yaml is None:
         raise SystemExit("PyYAML is required.")
     script_text, script_data = load_structured_document(script_path)
@@ -1084,6 +1484,7 @@ def sync_narration(
     *,
     script_path: Path,
     manifest_path: Path,
+    narration_only: bool = False,
     assume_run_lock_held: bool = False,
 ) -> tuple[int, int]:
     """Synchronize both authoring artifacts under the server's run-artifact lock."""
@@ -1093,10 +1494,18 @@ def sync_narration(
     if script_path.parent != manifest_path.parent:
         raise ValueError("script and manifest must belong to the same run directory")
     if assume_run_lock_held:
-        return _sync_narration_unlocked(script_path=script_path, manifest_path=manifest_path)
+        return _sync_narration_unlocked(
+            script_path=script_path,
+            manifest_path=manifest_path,
+            narration_only=narration_only,
+        )
     lock_path = manifest_path.parent / ".locks" / "run_artifacts.lock"
     with sync_file_lock(lock_path):
-        return _sync_narration_unlocked(script_path=script_path, manifest_path=manifest_path)
+        return _sync_narration_unlocked(
+            script_path=script_path,
+            manifest_path=manifest_path,
+            narration_only=narration_only,
+        )
 
 
 def main() -> int:
@@ -1108,11 +1517,17 @@ def main() -> int:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--narration-only",
+        action="store_true",
+        help="Sync narration fields and audio-story data without applying visual or inventory changes.",
+    )
     args = parser.parse_args()
 
     updated, skipped = sync_narration(
         script_path=Path(args.script),
         manifest_path=Path(args.manifest),
+        narration_only=args.narration_only,
         assume_run_lock_held=args.assume_run_lock_held,
     )
     print(f"updated={updated} skipped={skipped}")

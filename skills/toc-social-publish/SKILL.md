@@ -21,6 +21,8 @@ description: >-
 
 ## 読むもの
 
+縦型の制作から投稿まで頼まれた場合は 制作を内蔵した `vertical-video-publish` を入口とし、YouTubeショートは `youtube-studio-upload` に引き継ぐ。既存の採用済み縦型動画なら再制作しない。投稿先は明示されたサービスだけとし、制作スキルから渡されたmanifest・採用ファイル・全編の実URLを利用する。
+
 ToC内では marketing/README.md、marketing/browser-use.md の適用方針を確認する。作品の投稿文は既存のpublish-kitを優先する。対象が作品チャンネルかToC製品広報かを取り違えず、製品の宣伝文を作品投稿へ勝手に追加しない。
 
 実行時は [記録と重複防止](references/records.md) と、対象だけを読む：

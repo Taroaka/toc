@@ -9,10 +9,16 @@ from toc.image_prompt_projection_registry import (
     projection_contract_issues,
     registered_drawable_group_order,
     rule_for_source_key,
+    normalize_drawable_prompt_text,
 )
 
 
 class ImagePromptProjectionRegistryTests(unittest.TestCase):
+    def test_internal_numbered_scene_and_cut_ids_never_reach_drawable_text(self):
+        for identifier in ('scene04', 'scene_04', 'scene-04', 'cut02', 'cut_02', 'scene04_cut02_internal'):
+            with self.subTest(identifier=identifier):
+                self.assertEqual(normalize_drawable_prompt_text(identifier + 'の構図を引き継ぐ'), '')
+
     def test_registry_covers_every_compiler_drawable_group_in_order(self) -> None:
         self.assertEqual(projection_registry_contract_issues(), [])
         self.assertEqual(registered_drawable_group_order(), FRAGMENT_GROUP_ORDER)

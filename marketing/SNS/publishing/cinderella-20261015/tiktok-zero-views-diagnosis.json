@@ -1,0 +1,36 @@
+{
+  "checked_at": "2026-10-16T09:34:59.421581+09:00",
+  "account_handle": "@eiyu_no_tabi",
+  "scope": "read-only diagnosis; no post/privacy/AI-label changes",
+  "observed": {
+    "recent_scene_posts": 8,
+    "scene_post_visibility": "誰でも",
+    "scene_post_views": "all8=0",
+    "oldest_post_id": "7696716002406468885",
+    "oldest_post_local_time": "2026-10-15T11:29:00+09:00",
+    "scene_post_time_range": [
+      "2026-10-15T22:49:00+09:00",
+      "2026-10-15T22:57:00+09:00"
+    ],
+    "oldest_individual_analytics": {
+      "views": 0,
+      "watch_time_seconds": 0,
+      "for_you_ineligible_warning": "not_observed_in_web_UI",
+      "retention": "動画データ処理中です。後ほどご確認ください。",
+      "traffic_source_threshold": "動画の視聴数が100回に達するとデータが表示されます"
+    },
+    "newest_post_id": "7696893471361191188",
+    "newest_individual_analytics_views": 0,
+    "aggregate_views": 0,
+    "profile_views": 0,
+    "public_profile_web_access": "unavailable: previous403, currentPleasewait/timeout; this alone does not prove an account restriction"
+  },
+  "conclusion": "Root cause not established. Public privacy setting verified; zero counts reproduced in aggregate and two individual analytics. Need mobile Account check and post ForYou eligibility decision to distinguish moderation/recommendation restriction from reporting lag or lack of distribution. Do not assert shadowban, AI-label penalty, bulk-upload penalty, or black-bar penalty without actual decision.",
+  "mobile_check_requested": true,
+  "sources": [
+    "https://support.tiktok.com/en/safety-hc/account-and-user-safety/account-status",
+    "https://support.tiktok.com/en/safety-hc/account-and-user-safety/content-violations-and-bans",
+    "https://support.tiktok.com/en/using-tiktok/creating-videos/ai-generated-content"
+  ],
+  "evidence": "tiktok-zero-views-oldest-analytics.png"
+}

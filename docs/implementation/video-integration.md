@@ -2,7 +2,7 @@
 
 `script.md` から asset/image/narration/video request を作り、生成、合成、ordinary output checks
 を一つの流れで定義する。production order は
-`script → skeleton manifest → asset → scene image → narration/TTS → duration → video → BGM/SE (p860) → render`。
+`script → skeleton manifest → asset → scene image → image consistency/repair → narration/TTS → duration/video preparation → video → BGM/SE (p860) → render`。
 
 ## 1. Canonical boundaries
 
@@ -22,7 +22,9 @@ script.md
   → asset_inventory.md / asset_plan.md / asset requests
   → reusable assets and file checks
   → production manifest / image requests / stills
+  → image-only consistency and required image repairs
   → narration text / TTS / measured audio
+  → audio-dependent video preparation
   → motion requests / clips
   → user video approval / p860 BGM and SE proposals, generation, selection, mix settings
   → stream normalization / render
@@ -51,6 +53,8 @@ New stills are generated for continuity anchors or explicit image requests. Exis
 be reused when their bytes and provenance match.
 
 ## 4. Audio Story authoring
+
+新規cinematic runでは、人物・衣装・道具・姿勢・接触・位置関係など、画像だけで判断できる不一致をナレーション開始前に修正します。共通入口と再開時の検証は [画像・動画準備](video-preparation.md) に従います。ナレーションの実測尺が必要な同期確認は音声生成後に行います。
 
 原稿の具体性は [Narration Prompt Projection](narration-prompting.md#音声だけで理解できる説明の具体性) に従う。
 場所・対象・期限・因果の省略を原稿段階で補い、TTS用の表記変換でも意味を保持する。
@@ -271,3 +275,12 @@ python -m toc.narration_audio --source narration_list.txt --concat --out narrati
 ```
 
 認証APIを呼ばない回帰検証は `tests/test_narration_audio_policy.py`。原音保持、目標LUFS、先頭の間、無音、フロント経由の派生cacheを実ファイルで検証する。
+
+
+### 動画生成前の音声タイムライン計測
+
+語りそのものの実測尺と、配置後の音声タイムラインを分ける。`spoken_audio_seconds` は原音の
+実測合計のまま保持し、明示された `render.video_duration_seconds` があるcutでは、
+実測音声＋`narration_offset_seconds` が区間内に収まることを検証して先頭・末尾の余白を計上する。
+動画予定尺だけから未指定の音声paddingを補わず、欠落音声や切り詰めが必要な区間は未完とする。
+`cinematic_direction_v1` が理由付きで明示した無音は、人工的な人間承認を付けずに計上する。

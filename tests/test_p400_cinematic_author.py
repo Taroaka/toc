@@ -424,6 +424,34 @@ def test_resume_reuses_completed_scene_after_transport_failure(tmp_path):
     assert doc['scenes'][0]['scene_id'] == scenes[0]['scene_id']
 
 
+def test_guidance_only_update_preserves_accepted_scene_resume(tmp_path, monkeypatch):
+    import toc.p400_authoring as module
+    _, _, resources, scenes = sample(tmp_path)
+    calls = []
+
+    async def interrupted(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 2: raise RuntimeError('offline')
+        return SimpleNamespace(payload={'result_json': json.dumps(scenes[0])}, transcript=(),
+            provenance=SimpleNamespace(as_dict=lambda: {}))
+
+    with pytest.raises(RuntimeError, match='offline'):
+        asyncio.run(author_cinematic_direction(run_dir=tmp_path, resources=resources, grounding='',
+            client_factory=lambda: None, turn_runner=interrupted))
+    monkeypatch.setattr(module, 'SHOT_AUTHOR_GUIDANCE', module.SHOT_AUTHOR_GUIDANCE + '\nClarify ordinary end views.')
+    resumed_calls = []
+
+    async def resumed(**kwargs):
+        resumed_calls.append(kwargs)
+        return SimpleNamespace(payload={'result_json': json.dumps(scenes[1])}, transcript=(),
+            provenance=SimpleNamespace(as_dict=lambda: {}))
+
+    doc = asyncio.run(author_cinematic_direction(run_dir=tmp_path, resources=resources, grounding='',
+        client_factory=lambda: None, turn_runner=resumed))
+    assert len(resumed_calls) == 1
+    assert doc['scenes'] == scenes
+
+
 def test_unscoped_final_validation_does_not_regenerate_healthy_scenes(tmp_path, monkeypatch):
     import toc.p400_authoring as module
     story, sources, resources, scenes = sample(tmp_path)
@@ -442,3 +470,101 @@ def test_unscoped_final_validation_does_not_regenerate_healthy_scenes(tmp_path, 
         asyncio.run(author_cinematic_direction(run_dir=tmp_path, resources=resources, grounding='',
             client_factory=lambda: None, turn_runner=turn))
     assert len(prompts) == len(scenes)
+
+
+def test_same_beat_variant_requires_a_verified_earlier_cut_state_handoff(tmp_path):
+    from toc.p400_authoring import validate_scene_direction
+    story, _, resources, scenes = sample(tmp_path)
+    row = scenes[0]
+    row['state_variants'] = [{
+        'entity_type': 'character', 'asset_id': 'keeper', 'variant_id': 'changed_sleeve',
+        'transition_id': 'sleeve_change', 'source_event_beat_ids': ['open'],
+        'from_state': '乾いた袖', 'to_state': '濡れた袖', 'generation_prompt': '同じ人物の袖が濡れた状態',
+    }]
+    ref = {'entity_type': 'character', 'asset_id': 'keeper', 'variant_id': 'changed_sleeve',
+           'transition_id': 'sleeve_change', 'consumer_source_event_beat_ids': ['open']}
+    row['cuts'][1]['source_beat_ids'] = ['open', 'wait']
+    row['cuts'][1]['primary_beat_id'] = 'open'
+    row['cuts'][1]['state_variant_refs'] = [ref]
+    errors = validate_scene_direction(row, story['script']['scenes'][0], resources)
+    assert not any('used_before_transition' in e for e in errors)
+
+    # Merely sharing a beat is insufficient; the explicit state handoff must hold.
+    row['cuts'][1]['start_state_facts'] = {'scene': 'different state'}
+    assert any('used_before_transition' in e for e in validate_scene_direction(row, story['script']['scenes'][0], resources))
+    row['cuts'][1]['start_state_facts'] = deepcopy(row['cuts'][0]['end_state_facts'])
+    row['cuts'][1]['start_state_id'] = row['cuts'][0]['end_state_id']
+    row['cuts'][0]['state_variant_refs'] = [ref]
+    assert any('cut[0]' in e and 'used_before_transition' in e for e in validate_scene_direction(row, story['script']['scenes'][0], resources))
+
+
+def source_entry_variant_sample(tmp_path):
+    story, sources, resources, scenes = sample(tmp_path)
+    source = story['script']['scenes'][0]
+    source['event_sequence'][1]['cut_transitions'] = [{
+        'transition_id': 'changed_entry', 'first_frame_brief': '省略後、修理工の袖は濡れている。',
+        'motion_brief': '返事を待つ。', 'motion_end_state': '濡れた袖のまま待つ。',
+    }]
+    sources['story'] = json.dumps(story, ensure_ascii=False).encode()
+    (tmp_path / 'story.md').write_bytes(sources['story'])
+    row = scenes[0]
+    row['state_variants'] = [{
+        'entity_type': 'character', 'asset_id': 'keeper', 'variant_id': 'changed_sleeve',
+        'transition_id': 'sleeve_change', 'source_event_beat_ids': ['wait'],
+        'from_state': '乾いた袖', 'to_state': '濡れた袖', 'generation_prompt': '同じ人物の濡れた袖',
+    }]
+    cut = row['cuts'][1]
+    cut['continuity']['mode'] = 'ellipsis'
+    cut['continuity']['ellipsis_reason'] = 'sourceの開始画が既に濡れた袖を指定するため、間の動作を省略。'
+    cut['state_variant_refs'] = [{
+        'entity_type': 'character', 'asset_id': 'keeper', 'variant_id': 'changed_sleeve',
+        'transition_id': 'sleeve_change', 'consumer_source_event_beat_ids': ['wait'],
+        'source_entry': {'beat_id': 'wait', 'transition_id': 'changed_entry',
+                         'first_frame_brief': source['event_sequence'][1]['cut_transitions'][0]['first_frame_brief']},
+    }]
+    return story, sources, resources, scenes
+
+
+def test_same_beat_variant_allows_an_explicit_source_bound_ellipsis(tmp_path):
+    from toc.p400_authoring import validate_scene_direction
+    story, _, resources, scenes = source_entry_variant_sample(tmp_path)
+    assert validate_scene_direction(scenes[0], story['script']['scenes'][0], resources) == []
+
+
+def test_source_bound_variant_entry_also_supports_a_scene_opening(tmp_path):
+    from toc.p400_authoring import validate_scene_direction
+    story, _, resources, scenes = source_entry_variant_sample(tmp_path)
+    source = story['script']['scenes'][0]
+    row = scenes[0]
+    row['cuts'][0]['state_variant_refs'] = deepcopy(row['cuts'][1].pop('state_variant_refs'))
+    ref = row['cuts'][0]['state_variant_refs'][0]
+    ref['consumer_source_event_beat_ids'] = ['open']
+    ref['source_entry']['beat_id'] = 'open'
+    row['state_variants'][0]['source_event_beat_ids'] = ['open']
+    source['event_sequence'][0]['cut_transitions'] = source['event_sequence'][1].pop('cut_transitions')
+    assert validate_scene_direction(row, source, resources) == []
+
+
+@pytest.mark.parametrize('fault', [
+    'missing', 'wrong_beat', 'wrong_transition', 'fabricated_quote', 'duplicate_transition',
+    'continuous', 'no_reason', 'future_transition', 'malformed',
+])
+def test_variant_source_entry_cannot_bypass_chronology_or_source_binding(tmp_path, fault):
+    from toc.p400_authoring import validate_scene_direction
+    story, _, resources, scenes = source_entry_variant_sample(tmp_path)
+    source = story['script']['scenes'][0]
+    cut = scenes[0]['cuts'][1]
+    ref = cut['state_variant_refs'][0]
+    if fault == 'missing': del ref['source_entry']
+    elif fault == 'wrong_beat': ref['source_entry']['beat_id'] = 'open'
+    elif fault == 'wrong_transition': ref['source_entry']['transition_id'] = 'unknown'
+    elif fault == 'fabricated_quote': ref['source_entry']['first_frame_brief'] = 'invented'
+    elif fault == 'duplicate_transition': source['event_sequence'][1]['cut_transitions'] *= 2
+    elif fault == 'continuous': cut['continuity']['mode'] = 'continuous'
+    elif fault == 'no_reason': cut['continuity']['ellipsis_reason'] = ''
+    elif fault == 'future_transition':
+        source['event_sequence'].append({'beat_id': 'later', 'must_be_seen': False})
+        scenes[0]['state_variants'][0]['source_event_beat_ids'] = ['later']
+    elif fault == 'malformed': ref['source_entry'] = {'beat_id': []}
+    assert any('state_variant_used_before_transition' in error or 'source_entry_invalid' in error
+               for error in validate_scene_direction(scenes[0], source, resources))

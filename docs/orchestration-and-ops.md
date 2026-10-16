@@ -214,3 +214,15 @@ output/<topic>_<timestamp>/
 7. 画像/音声/動画/SE/BGMはそれぞれの生成・採用・配置・mix/render工程を区別する。BGMを選んだだけでmix完了、1cut動画を選んだだけで全編動画完了にはしない。素材差し替えが後続出力を古くする場合は影響範囲だけを未完へ戻す。
 8. 採用が完了した素材を再開処理で不要に再生成しない。再実行は同じ候補/hashなら重複保存・重複採用をしない。既存の合格素材と無関係な工程状態を保つ。
 9. 返信では保存/正式参照への反映、更新した工程state、残件を簡潔に伝える。実際に完了していない工程を「終わった」ように表示しない。
+
+同じrunの別itemで生成済みの画像を、ユーザーの明示指示に従って未完成itemへ再利用する場合は、
+`scripts/adopt-generated-image.py` を使う。`--run-dir`、`--kind`、`--item-id`、
+`--source-kind`、`--source-item-id`、現行snapshotの `--expected-revision` と
+`--expected-request-digest`、選定画像の `--expected-source-sha256`、
+`--authorization`（ユーザー発言）と `--reason`（場面への適合理由）を指定する。
+元画像の有効な生成履歴とdecodeを確認し、異なる既存画像を上書きせず、run lock内でコピーする。
+採用記録は `logs/app_server/image_gen/*_adoption.json` に、元画像の生成receiptとhash、
+元と採用先のrequest bindingを区別して保存する。採用先のpromptで新規生成したとは記録しない。
+serverと通常のpipeline検証はこの明示的再利用を別種のprovenanceとして照合する。
+画像・参照・request・元receiptの変更や後続candidate挿入は採用の検証を無効にする。
+採用だけでp680完了にはせず、通常の再開・出力検証を通す。

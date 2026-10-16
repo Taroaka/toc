@@ -1,0 +1,193 @@
+{
+  "job_id": "cinderella-scenes01-08-20261015",
+  "source_run": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554",
+  "mode": "publish",
+  "visibility": "public",
+  "timezone": "Asia/Tokyo",
+  "scheduled_at": null,
+  "platform": "tiktok",
+  "account_handle": "@eiyu_no_tabi",
+  "instagram_status": "skipped_by_user",
+  "authorization": "User explicitly requested creation and TikTok/Instagram publication; subsequent instruction skips Instagram.",
+  "ai_disclosure": true,
+  "ai_disclosure_evidence": "Existing production provenance and prior publishing plan identify generated visuals and audio.",
+  "cover": "frame selected from the scene, no additional overlay",
+  "scenes": [
+    {
+      "number": 1,
+      "story_scene_id": "SC01",
+      "manifest_scene_id": "10",
+      "start_seconds": 0,
+      "duration_seconds": 96,
+      "end_seconds": 96,
+      "title": "灰かぶりの願い",
+      "hook_lines": [
+        "灰の中でも、",
+        "願いは消えなかった。"
+      ],
+      "filename": "scene01_letterbox.mp4",
+      "caption": "シンデレラ / Cinderella｜シーン1/8「灰かぶりの願い」\n灰の中でも、願いは消えなかった。\n\n横画面のまま楽しむ、AI映像の物語。\n全編はYouTube「英雄の旅｜AIシネマ」にて。\n映像・音声にAI生成技術を使用しています。\n\n#シンデレラ #Cinderella #AI映像 #物語",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene01/scene01_letterbox.mp4",
+      "state": "ready",
+      "video_sha256": "a632aee7155a57c14cd9760959dc099114c993fbb93fc7335802ec89d9dda7c1",
+      "plan_sha256": "9830ec87c973ba4b26fdd603f0efeebea7958382f57c5a72801c97d0cd5bbb0a",
+      "cover_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene01/start.jpg",
+      "cover_sha256": "caea885d78530f40ae37370c4cfd5c6206dbf0b52a36fb860045efcb87010ad9",
+      "cover_selection": "original first frame in upload UI"
+    },
+    {
+      "number": 2,
+      "story_scene_id": "SC02",
+      "manifest_scene_id": "20",
+      "start_seconds": 96,
+      "duration_seconds": 100,
+      "end_seconds": 196,
+      "title": "魔法と真夜中の約束",
+      "hook_lines": [
+        "かぼちゃが馬車に。",
+        "魔法の期限は、午前0時。"
+      ],
+      "filename": "scene02_letterbox.mp4",
+      "caption": "シンデレラ / Cinderella｜シーン2/8「魔法と真夜中の約束」\nかぼちゃが馬車に。魔法の期限は、午前0時。\n\n横画面のまま楽しむ、AI映像の物語。\n全編はYouTube「英雄の旅｜AIシネマ」にて。\n映像・音声にAI生成技術を使用しています。\n\n#シンデレラ #Cinderella #AI映像 #物語",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene02/scene02_letterbox.mp4",
+      "state": "ready",
+      "video_sha256": "bc0b833f2bf35eb196ea6e112ce74bd8e50afd54378d7249383a1081fbff3e62",
+      "plan_sha256": "17ff3341260beed3bb777b6176c8138c70e9fe907d22afa482d63b7ac61171e8",
+      "cover_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene02/start.jpg",
+      "cover_sha256": "027ab1f582bbffcab50c15835a6852f6221e7e4d0e7829331717d487e4899edb",
+      "cover_selection": "original first frame in upload UI"
+    },
+    {
+      "number": 3,
+      "story_scene_id": "SC03",
+      "manifest_scene_id": "30",
+      "start_seconds": 196,
+      "duration_seconds": 66,
+      "end_seconds": 262,
+      "title": "はじめての舞踏会",
+      "hook_lines": [
+        "誰も知らない彼女が、",
+        "舞踏会の視線を集める。"
+      ],
+      "filename": "scene03_letterbox.mp4",
+      "caption": "シンデレラ / Cinderella｜シーン3/8「はじめての舞踏会」\n誰も知らない彼女が、舞踏会の視線を集める。\n\n横画面のまま楽しむ、AI映像の物語。\n全編はYouTube「英雄の旅｜AIシネマ」にて。\n映像・音声にAI生成技術を使用しています。\n\n#シンデレラ #Cinderella #AI映像 #物語",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene03/scene03_letterbox.mp4",
+      "state": "ready",
+      "video_sha256": "b6315260d3a4f67167af9307c247ea9cb0e6c35ff08c54ea113ccbfc4549fd4e",
+      "plan_sha256": "7a68e9864b8efd98869840b67c7c0067406ee5c1c9ac666f7623af8dc756dd93",
+      "cover_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene03/start.jpg",
+      "cover_sha256": "d3ac11ebc13ccc7e066f57c478451557dee5c2f18bc25636ce9008d581d67632",
+      "cover_selection": "original first frame in upload UI"
+    },
+    {
+      "number": 4,
+      "story_scene_id": "SC04",
+      "manifest_scene_id": "40",
+      "start_seconds": 262,
+      "duration_seconds": 62,
+      "end_seconds": 324,
+      "title": "もう一度、あの場所へ",
+      "hook_lines": [
+        "もう一度、あの人に。",
+        "胸に灯った舞踏会の記憶。"
+      ],
+      "filename": "scene04_letterbox.mp4",
+      "caption": "シンデレラ / Cinderella｜シーン4/8「もう一度、あの場所へ」\nもう一度、あの人に。胸に灯った舞踏会の記憶。\n\n横画面のまま楽しむ、AI映像の物語。\n全編はYouTube「英雄の旅｜AIシネマ」にて。\n映像・音声にAI生成技術を使用しています。\n\n#シンデレラ #Cinderella #AI映像 #物語",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene04/scene04_letterbox.mp4",
+      "state": "ready",
+      "video_sha256": "d236ae3986f82950115e4d58ace4c7b0944c59aac8eedf648739dcf3f8be9378",
+      "plan_sha256": "4d1c00a24b3cef4cec6bf8000b666a9a654e1648deb3315ed02cb7a28f3b6012",
+      "cover_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene04/start.jpg",
+      "cover_sha256": "8edde3655bcd5b749fd46957e39004eb671c56eef1dde1516dcf5c4f189894d3",
+      "cover_selection": "original first frame in upload UI"
+    },
+    {
+      "number": 5,
+      "story_scene_id": "SC05",
+      "manifest_scene_id": "50",
+      "start_seconds": 324,
+      "duration_seconds": 70,
+      "end_seconds": 394,
+      "title": "真夜中とガラスの靴",
+      "hook_lines": [
+        "午前0時、魔法が消える。",
+        "残されたのは、ガラスの靴。"
+      ],
+      "filename": "scene05_letterbox.mp4",
+      "caption": "シンデレラ / Cinderella｜シーン5/8「真夜中とガラスの靴」\n午前0時、魔法が消える。残されたのは、ガラスの靴。\n\n横画面のまま楽しむ、AI映像の物語。\n全編はYouTube「英雄の旅｜AIシネマ」にて。\n映像・音声にAI生成技術を使用しています。\n\n#シンデレラ #Cinderella #AI映像 #物語",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene05/scene05_letterbox.mp4",
+      "state": "ready",
+      "video_sha256": "271086995bcf2c1c082088e26aa2eecd137e3ffa14e62d667ff0d7dc4cc81e2b",
+      "plan_sha256": "f1f1f591dadc23e5bfa9c78921a4cb45311ef0e0d6d7afe78a1d5ecbc7e34e03",
+      "cover_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene05/start.jpg",
+      "cover_sha256": "afd5e298bfef34fde0d5a598857b7ac418593ed52bfcef29744b47c7ab11a15f",
+      "cover_selection": "original first frame in upload UI"
+    },
+    {
+      "number": 6,
+      "story_scene_id": "SC06",
+      "manifest_scene_id": "60",
+      "start_seconds": 394,
+      "duration_seconds": 52,
+      "end_seconds": 446,
+      "title": "靴の持ち主を探して",
+      "hook_lines": [
+        "この靴が合う人を、",
+        "王子は探し続ける。"
+      ],
+      "filename": "scene06_letterbox.mp4",
+      "caption": "シンデレラ / Cinderella｜シーン6/8「靴の持ち主を探して」\nこの靴が合う人を、王子は探し続ける。\n\n横画面のまま楽しむ、AI映像の物語。\n全編はYouTube「英雄の旅｜AIシネマ」にて。\n映像・音声にAI生成技術を使用しています。\n\n#シンデレラ #Cinderella #AI映像 #物語",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene06/scene06_letterbox.mp4",
+      "state": "ready",
+      "video_sha256": "5960cdfcd1312baefb53ae949dda8a6f7cedd6f8757bb84353afc15b5106c8a5",
+      "plan_sha256": "c6ab30b73efa443f2e68f9f80db22333599ff9ebb1d92f3e5a2790b230beafac",
+      "cover_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene06/start.jpg",
+      "cover_sha256": "d1aeeb95940dcc0d42644024152c5e9f1f8fd61b99bf3c1558a22379d087f453",
+      "cover_selection": "original first frame in upload UI"
+    },
+    {
+      "number": 7,
+      "story_scene_id": "SC07",
+      "manifest_scene_id": "70",
+      "start_seconds": 446,
+      "duration_seconds": 64,
+      "end_seconds": 510,
+      "title": "明かされる正体",
+      "hook_lines": [
+        "ガラスの靴が合ったとき、",
+        "隠れていた真実が動き出す。"
+      ],
+      "filename": "scene07_letterbox.mp4",
+      "caption": "シンデレラ / Cinderella｜シーン7/8「明かされる正体」\nガラスの靴が合ったとき、隠れていた真実が動き出す。\n\n横画面のまま楽しむ、AI映像の物語。\n全編はYouTube「英雄の旅｜AIシネマ」にて。\n映像・音声にAI生成技術を使用しています。\n\n#シンデレラ #Cinderella #AI映像 #物語",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene07/scene07_letterbox.mp4",
+      "state": "ready",
+      "video_sha256": "554712bafd4fdeb3b97a27fd9d9796b1b39a2cb1b15e5da9c3a40fdee552dfef",
+      "plan_sha256": "8e0f6554af8e210dc6100d88cb0e2b35905e0d75ca760fa8baadb31b9aacc306",
+      "cover_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene07/start.jpg",
+      "cover_sha256": "ef18ce73f58375e1631468071fac206f79eef92012d475f8c8a80300c4d585db",
+      "cover_selection": "original first frame in upload UI"
+    },
+    {
+      "number": 8,
+      "story_scene_id": "SC08",
+      "manifest_scene_id": "80",
+      "start_seconds": 510,
+      "duration_seconds": 43,
+      "end_seconds": 553,
+      "title": "赦しと新しい人生",
+      "hook_lines": [
+        "彼女が選んだのは、赦し。",
+        "そして、新しい人生へ。"
+      ],
+      "filename": "scene08_letterbox.mp4",
+      "caption": "シンデレラ / Cinderella｜シーン8/8「赦しと新しい人生」\n彼女が選んだのは、赦し。そして、新しい人生へ。\n\n横画面のまま楽しむ、AI映像の物語。\n全編はYouTube「英雄の旅｜AIシネマ」にて。\n映像・音声にAI生成技術を使用しています。\n\n#シンデレラ #Cinderella #AI映像 #物語",
+      "video_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene08/scene08_letterbox.mp4",
+      "state": "ready",
+      "video_sha256": "9b1d6bac8b8bd3e38a1b4ca0ccf2e2c825b555ca9eba58a564c71541760a32c1",
+      "plan_sha256": "ac55f4a2aa76b32e8e08ed3e09a21a5ec6621fc22918049031bee335746e9128",
+      "cover_path": "/Users/kantaro/Downloads/toc/output/シンデレラ_20260926_1554/shorts/scenes01-08_20261015/scene08/start.jpg",
+      "cover_sha256": "1239643ffe44f2a354b6dd7b4d7c8c4701c0e6c1ba575c451b00734d469b5e1a",
+      "cover_selection": "original first frame in upload UI"
+    }
+  ]
+}

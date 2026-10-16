@@ -1,0 +1,13 @@
+# 2026-10-15 10:50: preserve completed repair work and validate effective frames
+
+The prior child-state fix let scene_01 pass. Scene_02's durable attempt 12 response successfully corrected the asset evidence; the terminal error is a parent first_frame_brief containing relative continuity prose. That parent has an authored shot_plan, and its actual child frames have concrete descriptions. The parent projection currently compiles a non-executed summary as an extra still before projecting the children. Also, the successful bounded response was logged but its applied candidate was not saved before the next diagnostic; resuming would repeat an already paid repair and hit the retained cap.
+
+Changes must keep budgets and upstream bytes unchanged: compile actual child stills, use the same shot's concrete authored description when a subject view is purely non-drawable continuity metadata (no inferred/generated prose), and replay a saved exact-base bounded patch only against current diagnostics and source-bound pending context. Persist every applied candidate without clearing the dispatched reservation or resetting counters. Unknown/new errors still obey the cap. Regressions cover cap-exhausted interrupted repair recovery, exact-base and scope refusal, parent-summary vs actual-frame validation, and preserved part views/current concrete source text.
+
+## Verification
+
+Four regression cases fail on the earlier behavior and now pass: same-frame authored state projection, actual child-frame validation, replay of an interrupted exact-base patch with the cap exhausted, and keeping the dispatched reservation/counters while checkpointing an applied candidate. Related suites: 173 passed, 1 known baseline test deselected, 12 subtests passed. Actual scene_02 pending candidate plus the logged attempt-12 bounded response passes current projection diagnostics in memory; upstream files and the repair ledger were not changed for that reproduction. Pointer and whitespace checks pass. Local review confirmed no generated fallback prose, no inference from story names, bounded replay scope, source-bound pending context, and unchanged attempt caps.
+
+## Resume outcome
+
+2026-10-15 10:55 JST: restart helper passed normal health checks. Computer Use resumed the same run once; job cd3313eda6f144d0a43775bb6b37cc2c is running. scene_01 was reused, the exact-base attempt-12 response was replayed against current diagnostics, and scene_02 was accepted at 10:55:43. Repair ledger remains at 12 p420 attempts; no counter or limit reset occurred. Research/story/visual_value byte hashes remain unchanged. Remaining scene authoring continues; p680 remains pending. Frontend proof: frontend-resumed-1055.png.

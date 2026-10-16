@@ -91,9 +91,21 @@ def _positive_seconds(value: Any) -> float | None:
         return None
     try:
         seconds = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if not math.isfinite(seconds) or seconds <= 0:
+        return None
+    return seconds
+
+
+def _nonnegative_seconds(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(seconds) or seconds < 0:
         return None
     return seconds
 
@@ -110,11 +122,16 @@ def _confirmed_silence(narration: dict[str, Any], *, b_roll: bool = False) -> bo
     contract = narration.get("silence_contract")
     if not isinstance(contract, dict):
         return False
+    authored_cinematic_silence = (
+        narration.get("authoring_status") == "silent"
+        and contract.get("source") == "cinematic_direction_v1"
+    )
     return (
         contract.get("intentional") is True
         and (b_roll or contract.get("confirmed_by_human") is True
-             or (contract.get("source") == "boundary_b_roll_v1" and contract.get("kind") == "b_roll"))
-        and bool(str(contract.get("kind") or "").strip())
+             or (contract.get("source") == "boundary_b_roll_v1" and contract.get("kind") == "b_roll")
+             or authored_cinematic_silence)
+        and (bool(str(contract.get("kind") or "").strip()) or authored_cinematic_silence)
         and bool(str(contract.get("reason") or "").strip())
     )
 
@@ -137,6 +154,7 @@ def measure_manifest_runtime(
     invalid: list[str] = []
     spoken_audio_seconds = 0.0
     intentional_silence_seconds = 0.0
+    audio_padding_seconds = 0.0
     video_timeline_seconds = 0.0
     audio_item_count = 0
     video_item_count = 0
@@ -171,6 +189,20 @@ def measure_manifest_runtime(
             cut_id = _selector_value(node.get("cut_id"), str(cut_index + 1)) if cuts else ""
             selector = f"scene{scene_id}_cut{cut_id}" if cuts else f"scene{scene_id}"
             audio_item_count += 1
+            render = node.get("render")
+            has_render_allocation = (
+                isinstance(render, dict) and "video_duration_seconds" in render
+            )
+            render_duration: float | None = None
+            render_offset: float | None = None
+            if has_render_allocation:
+                render_duration = _positive_seconds(render.get("video_duration_seconds"))
+                if render_duration is None:
+                    invalid.append(f"{selector}:render_video_duration")
+                render_offset = _nonnegative_seconds(render.get("narration_offset_seconds", 0))
+                if render_offset is None:
+                    invalid.append(f"{selector}:render_narration_offset")
+
             narration = resolve_manifest_narration(node)
             if not isinstance(narration, dict):
                 missing.append(f"{selector}:narration")
@@ -187,22 +219,37 @@ def measure_manifest_runtime(
                     (missing if silence_status == "missing" else invalid).append(f"{selector}:{issue}")
                     continue
                 intentional_silence_seconds += silence_seconds
-                continue
+                measured_audio_seconds = silence_seconds
+            else:
+                output = str(narration.get("output") or "").strip()
+                if not output:
+                    missing.append(f"{selector}:audio_output")
+                    continue
+                output_path = Path(output)
+                resolved_path = output_path if output_path.is_absolute() else Path(base_dir) / output_path
+                try:
+                    probed_seconds = _positive_seconds(probe(resolved_path))
+                except Exception:
+                    probed_seconds = None
+                if probed_seconds is None:
+                    invalid.append(f"{selector}:audio_duration")
+                    continue
+                spoken_audio_seconds += probed_seconds
+                measured_audio_seconds = probed_seconds
 
-            output = str(narration.get("output") or "").strip()
-            if not output:
-                missing.append(f"{selector}:audio_output")
-                continue
-            output_path = Path(output)
-            resolved_path = output_path if output_path.is_absolute() else Path(base_dir) / output_path
-            try:
-                probed_seconds = _positive_seconds(probe(resolved_path))
-            except Exception:
-                probed_seconds = None
-            if probed_seconds is None:
-                invalid.append(f"{selector}:audio_duration")
-                continue
-            spoken_audio_seconds += probed_seconds
+            if (
+                has_render_allocation
+                and render_duration is not None
+                and render_offset is not None
+            ):
+                required_seconds = measured_audio_seconds + render_offset
+                if render_duration < required_seconds:
+                    invalid.append(f"{selector}:render_audio_allocation")
+                else:
+                    # Render allocation contributes both leading offset and the
+                    # tail silence added by the renderer. Without an explicit
+                    # render duration, keep the measured audio timeline raw.
+                    audio_padding_seconds += render_duration - measured_audio_seconds
 
         raw_render_units = scene.get("render_units")
         render_units = (
@@ -245,7 +292,9 @@ def measure_manifest_runtime(
     if video_item_count == 0 and "manifest:scenes" not in missing:
         missing.append("manifest:video_timeline")
 
-    audio_timeline_seconds = spoken_audio_seconds + intentional_silence_seconds
+    audio_timeline_seconds = (
+        spoken_audio_seconds + intentional_silence_seconds + audio_padding_seconds
+    )
     effective_seconds = min(audio_timeline_seconds, video_timeline_seconds)
     if not video_sources:
         video_timeline_source = "none"

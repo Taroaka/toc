@@ -135,6 +135,77 @@ def test_author_attachments_are_private_snapshots(tmp_path,monkeypatch):
     assert result['status']=='unchanged'
 
 
+def test_preparation_context_omits_execution_copies_preserves_authoring(tmp_path,monkeypatch):
+    root,data=setup(tmp_path,monkeypatch)
+    from server import cut_direction_api
+    resources,_,_=cut_direction_api._read_direction(root,data)
+    scene=data['scenes'][0]
+    scene['cinematic_direction']={'direction':'Preserve the director intent and source ordering.'}
+    cut=scene['cuts'][0]
+    cut['shot_plan']=_plan()
+    cut['shots']=[{'selector':'child','cut_contract':{'derived':'X'*1200000},
+        'image_generation':{'output':'assets/scenes/scene10_cut01.png','references':['assets/characters/keeper.png'],
+            'api_prompt_payload':{'trace':'X'*1200000}},
+        'video_generation':{'model':'chosen_model','first_frame':'assets/scenes/scene10_cut01.png',
+            'api_prompt_payload':{'trace':'X'*1200000}}}]
+    cut['audio']['narration']['candidates']=[{'old_history':'X'*1200000}]
+    story='Original story evidence must remain intact.'
+    (root/'story.md').write_text(story)
+    source={'script_metadata':{'topic':'fixture'},'human_change_requests':[{'note':'preserve this direction'}],
+        'audio_story_plan':{'continuous_full_draft':'Full narration remains'},
+        'narration_spans':[{'text':'Later narration remains'}],
+        'scenes':[copy.deepcopy(scene),{'scene_id':999,'unrelated_execution':'X'*1200000}]}
+    (root/'script.md').write_text(json.dumps(source))
+    before=copy.deepcopy(data);raw=(root/'script.md').read_bytes()
+    snapshot={'boundaries':{'next':{'scene_id':999,'handoff':'keep boundary'}},'images':[],'files':{}}
+    context=route.RuntimeHooks(root).context(data,str(scene['scene_id']),snapshot)
+    assert len(json.dumps(context))<100000
+    assert context['source_documents']['story.md']==story
+    projected=context['source_documents']['script.md']
+    assert projected['audio_story_plan']==source['audio_story_plan']
+    assert projected['human_change_requests']==source['human_change_requests']
+    assert projected['narration_spans']==source['narration_spans']
+    assert [s['scene_id'] for s in projected['scenes']]==[scene['scene_id']]
+    view=context['scene']['cuts'][0]
+    assert view['shot_plan']==cut['shot_plan']
+    assert view['cut_contract']==cut['cut_contract']
+    assert view['audio']['narration']['text']==cut['audio']['narration']['text']
+    assert view['shots'][0]['image_generation']['references']==cut['shots'][0]['image_generation']['references']
+    assert context['neighboring_scenes']==snapshot['boundaries']
+    assert context['scene']['cinematic_direction']==scene['cinematic_direction']
+    assert data==before and (root/'script.md').read_bytes()==raw
+
+
+def test_preparation_rejects_oversized_prompt_before_runtime(tmp_path,monkeypatch):
+    from toc import story_author_runtime
+    async def unexpected(**kwargs):raise AssertionError('oversized prompt reached runtime')
+    monkeypatch.setattr(story_author_runtime,'run_structured_story_turn',unexpected)
+    with pytest.raises(service.NeedsInput,match='入力.*上限'):
+        asyncio.run(route.RuntimeHooks(tmp_path)._author({'source':'x'*1100000},[],{}))
+
+
+def test_preparation_review_uses_same_compact_scene_view(tmp_path,monkeypatch):
+    root,data=setup(tmp_path,monkeypatch)
+    scene=data['scenes'][0]
+    scene['cuts'][0]['image_generation']['api_prompt_payload']={'trace':'X'*1200000}
+    hook=route.RuntimeHooks(root);seen=[]
+    async def author(payload,images,hashes):seen.append(payload);return {'status':'ready'}
+    monkeypatch.setattr(hook,'_author',author)
+    context={'prepared_image_hashes':{},'scene':copy.deepcopy(scene),
+        'source_documents':{'story.md':'full story','script.md':{'scenes':[copy.deepcopy(scene)],
+            'narration_spans':[{'text':'keep global narration'}]}},'neighboring_scenes':{'next':'boundary'}}
+    before=copy.deepcopy(context)
+    asyncio.run(hook.review(scene,context))
+    assert len(json.dumps(seen[0]))<100000
+    assert seen[0]['scene']['cuts'][0]['cut_contract']==scene['cuts'][0]['cut_contract']
+    assert 'scene' not in seen[0]['source']
+    assert 'scenes' not in seen[0]['source']['source_documents']['script.md']
+    assert seen[0]['source']['source_documents']['story.md']=='full story'
+    assert seen[0]['source']['source_documents']['script.md']['narration_spans']==[{'text':'keep global narration'}]
+    assert seen[0]['source']['neighboring_scenes']==context['neighboring_scenes']
+    assert context==before
+
+
 def test_higgsfield_frame_mode_is_passed_to_manifest_capability_check():
     from toc.stage_evaluation.pipeline import _manifest_checks
     rows=[]

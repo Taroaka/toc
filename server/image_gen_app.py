@@ -487,7 +487,7 @@ CREATE_MODE_NORMAL = "normal"
 CREATE_MODE_SCENE_STORYBOARD = "scene_storyboard"
 CREATE_MODE_WORLD_WALK = "world_walk"
 CREATE_MODE_SCENE_STORYBOARD_RUN_SUFFIX = "storyboard"
-CREATE_STOP_TARGETS = {"p650", "p680"}
+CREATE_STOP_TARGETS = {"p650", "p680", "p730"}
 VIDEO_GENERATION_DURATION_MAX_SECONDS = 60
 # Request-bound provenance is the canonical production image-generation route.
 # The generated_images time-order fallback remains only as an explicit legacy
@@ -657,7 +657,7 @@ class CreateRunRequest(BaseModel):
     source: str | None = Field(default=None, max_length=4000)
     cinematic_preferences: str | None = Field(default=None, max_length=12000)
     generate_images: bool = True
-    stop_target: str = Field(default="p680", pattern="^(p650|p680)$")
+    stop_target: str = Field(default="p730", pattern="^(p650|p680|p730)$")
     target_duration_seconds: int = Field(default=300, ge=300, le=1200, strict=True)
     review_mode: Literal["standard", "preapproved"] = "standard"
 
@@ -680,7 +680,8 @@ class CreateWorldWalkRunRequest(BaseModel):
 
 class ResumeRunRequest(BaseModel):
     continue_waiting: bool = False
-    stop_target: str = Field(default="p680", pattern="^(p680)$")
+    rewrite_narration: bool = False
+    stop_target: str = Field(default="p680", pattern="^(p680|p730)$")
     operation_id: str | None = Field(default=None, pattern="^[0-9a-f]{32}$")
 
 
@@ -2176,6 +2177,7 @@ def _copy_saved_image_to_generation_destination_nofollow(
     saved_path: Path,
     output: str,
     kind: str,
+    require_absent: bool = False,
 ) -> _GenerationDestinationCopyReceipt:
     binding = _assert_bound_run_root(run_dir)
     relative, destination = _canonical_regeneration_output(
@@ -2316,6 +2318,8 @@ def _copy_saved_image_to_generation_destination_nofollow(
             if previous_destination_stat is not None
             else None
         )
+        if require_absent and previous_destination_stat is not None:
+            raise _UnsafeGenerationDestinationError('adoption destination appeared during copy')
         # A held directory descriptor prevents symlink traversal, but the
         # directory can still be renamed after the ancestry check. Preserve
         # the old entry so a failed post-commit check can restore it through
@@ -2626,7 +2630,7 @@ def _inspect_p680_regeneration_plan(
                 try:
                     validate_image_bytes(path)
                     refs = [resolve_run_relative(run_dir, ref) for ref in item.references]
-                    valid = _has_completed_app_server_image_provenance(
+                    valid = _has_current_image_provenance(
                         run_dir, item_id=str(item.id), destination=path,
                         prompt_sha256=hashlib.sha256(str(item.prompt).encode("utf-8")).hexdigest(),
                         reference_sha256s=[_file_sha256(ref) for ref in refs],
@@ -3047,6 +3051,23 @@ def _manifest_cut_contract(data: dict[str, Any], *, min_cuts_per_scene: int = 1)
         for cut_index, cut in enumerate(cuts, start=1):
             if not isinstance(cut, dict):
                 issues.append(f"scene {scene_id} cut[{cut_index}]: invalid cut")
+                continue
+            if cut.get("shot_plan") is not None:
+                # The parent carries narration and result-state source metadata.
+                # Only projected shots and their explicit end images execute.
+                selector = str(cut.get("selector") or make_scene_cut_selector(scene_id, cut.get("cut_id") or cut_index))
+                try:
+                    schedule = _validated_shot_schedule(cut, parent_selector=selector)
+                except ShotTimelineError as exc:
+                    issues.append(str(exc))
+                    continue
+                for shot, _selector, _start, _duration, _api_duration in schedule:
+                    required_outputs.add(shot["image_generation"]["output"])
+                    result_frame = (shot.get("video_generation") or {}).get("result_frame")
+                    if isinstance(result_frame, dict):
+                        result_output = result_frame.get("output") or (result_frame.get("image_generation") or {}).get("output")
+                        if result_output:
+                            required_outputs.add(str(result_output))
                 continue
             image_generation = cut.get("image_generation")
             if not isinstance(image_generation, dict):
@@ -7001,7 +7022,7 @@ def _manifest_scene_targets(
                         "scene_index": scene_index,
                     }
                 )
-                if include_auxiliary_image_targets:
+                if include_auxiliary_image_targets and cut.get("shot_plan") is None:
                     video_generation = cut.get("video_generation")
                     video_generation = (
                         video_generation
@@ -8833,6 +8854,8 @@ def _prepare_manifest_narration_generation(
     if len(item_ids) != len(set(item_ids)):
         raise ValueError("bulk narration generation contains duplicate item_id values")
     manifest_path, original_text, data = _read_manifest_data(run_dir)
+    from toc.scene_direction_service import require_images_ready
+    require_images_ready(run_dir, data)
     tts_contexts = _narration_tts_context_by_selector(data)
     prepared: list[dict[str, Any]] = []
     for item in items:
@@ -13569,6 +13592,14 @@ def _has_completed_app_server_image_provenance(
     return False
 
 
+def _has_current_image_provenance(run_dir: Path, **request_fields: Any) -> bool:
+    """Accept native generation or explicitly recorded reuse, preserving their identities."""
+    from toc.image_adoption import has_current_image_adoption
+
+    return (_has_completed_app_server_image_provenance(run_dir, **request_fields)
+            or has_current_image_adoption(run_dir, **request_fields))
+
+
 def _validate_request_bound_image_result(
     result: Any,
     *,
@@ -13824,7 +13855,7 @@ async def _generate_request_item_output_with_slot(
             destination_decodes = True
         except (ValueError, OSError):
             pass
-        if destination_decodes and _has_completed_app_server_image_provenance(
+        if destination_decodes and _has_current_image_provenance(
             run_dir,
             item_id=str(item.id),
             destination=destination,
@@ -14335,7 +14366,7 @@ def _validate_generated_outputs(run_dir: Path, kind: str) -> None:
             ):
                 references = [resolve_run_relative(run_dir, str(ref)) for ref in item.references]
                 reference_sha256s = [_file_sha256(reference) for reference in references]
-                if not _has_completed_app_server_image_provenance(
+                if not _has_current_image_provenance(
                     run_dir,
                     item_id=str(item.id),
                     destination=output,
@@ -14393,6 +14424,7 @@ def _mark_asset_generation_handoff(run_dir: Path, *, asset_quality_passed: bool 
         "slot.p570.status": "done", "slot.p570.note": "asset outputs validated",
         "stage.asset.status": "done", "runtime.stage": "asset_images_generated",
     })
+    _finalize_p500_supervisor_result(run_dir, terminal_status="done")
 
 
 def _finalize_p500_supervisor_result(
@@ -14416,12 +14448,11 @@ def _finalize_p500_supervisor_result(
             *[
                 str(value).strip()
                 for value in payload.get("completed_slots") or []
-                if str(value).strip()
+                if str(value).strip() and str(value).strip() != "p540"
             ],
             "p510",
             "p520",
             "p530",
-            "p540",
             "p550",
             "p560",
             "p570",
@@ -14821,6 +14852,182 @@ async def _run_create_job(
             reservation.close()
 
 
+def _prepare_automatic_narration_text(run_dir: Path) -> None:
+    """Bind saved script narration to revisions without rewriting authored speech."""
+    _, _, data = _read_manifest_data(run_dir)
+    _, _, script = _read_script_data(run_dir)
+    requests: list[NarrationTextSaveRequest] = []
+    targets = _manifest_scene_targets(data)
+    if not targets:
+        raise ValueError("video_manifest.md has no narration targets")
+    for target in targets:
+        cut = _script_cut_for_manifest_target(script, target)
+        if cut is None:
+            raise ValueError(f"script narration target missing: {target['selector']}")
+        nested = resolve_manifest_narration(cut) or {}
+        narration = resolve_manifest_narration(target['cut']) or {}
+        text = str(cut.get('narration', nested.get('text', '')) or '').strip()
+        tts = resolve_script_cut_tts_text(cut) or str(nested.get('tts_text') or text)
+        authoring = _dict_value(cut.get('narration_authoring'))
+        tool = str(cut.get('narration_tool') or authoring.get('tool') or
+                   ('silent' if authoring.get('status') == 'silent' else None) or
+                   nested.get('tool') or narration.get('tool') or 'elevenlabs')
+        if tool != 'silent' and not text:
+            raise ValueError(f"saved narration text is missing: {target['selector']}")
+        if tool == 'silent' and (text or tts or not (
+                authoring.get('status') == 'silent' or cut.get('narration_tool') == 'silent' or
+                _dict_value(nested.get('silence_contract')).get('intentional') is True or
+                _dict_value(narration.get('silence_contract')).get('intentional') is True)):
+            raise ValueError(f"invalid intentional silence: {target['selector']}")
+        status = str(_dict_value(cut.get('narration_authoring')).get('status') or narration.get('authoring_status') or 'draft')
+        request = NarrationTextSaveRequest(
+            run_id=run_dir.name, item_id=target['selector'], text=text, tts_text=tts,
+            tool=tool, authoring_status='silent' if tool == 'silent' else ('human_locked' if status in {'human_locked', 'reviewed'} else 'draft'),
+            expected_revision=int(_dict_value(narration.get('revision')).get('number') or 0),
+        )
+        _require_script_narration_source_current(cut, narration, request)
+        if not _narration_grounding_is_current(target, narration) or request.expected_revision == 0:
+            requests.append(request)
+    # Validate the complete inventory before saving or starting any paid request.
+    for request in requests:
+        _save_frontend_narration_text(run_dir, request)
+    # Flat script silence is an authored choice, not a fabricated listening approval.
+    path, original, latest = _read_manifest_data(run_dir)
+    changed = False
+    for target in _manifest_scene_targets(latest):
+        narration = resolve_manifest_narration(target['cut']) or {}
+        if narration.get('tool') == 'silent' and not _dict_value(narration.get('silence_contract')).get('intentional'):
+            narration['silence_contract'] = {'intentional': True, 'source': 'script',
+                'reason': 'Preserved authored silent narration.'}
+            changed = True
+    if changed:
+        _backup_run_file(run_dir, "video_manifest.md", label="before_script_silence_projection")
+        _write_manifest_data(path, original, latest)
+
+
+def _automatic_narration_requests(run_dir: Path) -> list[NarrationGenerateItem]:
+    _, _, data = _read_manifest_data(run_dir)
+    pending: list[NarrationGenerateItem] = []
+    for target in _manifest_scene_targets(data):
+        narration = resolve_manifest_narration(target['cut']) or {}
+        if str(narration.get('tool')) == 'silent':
+            if not current_audio_is_ready(narration):
+                raise NarrationRevisionConflict(f"intentional silence is stale: {target['selector']}")
+            continue
+        revision = _dict_value(narration.get('revision'))
+        if not _narration_grounding_is_current(target, narration):
+            raise NarrationRevisionConflict(f"narration grounding changed: {target['selector']}")
+        reusable = False
+        for candidate in _list_value(narration.get('candidates')):
+            if not isinstance(candidate, dict) or candidate.get('status') not in {'candidate', 'selected'}:
+                continue
+            path_text = str(candidate.get('output') or '')
+            if (not path_text or candidate.get('generated_from_tts_hash') != revision.get('tts_hash')
+                    or candidate.get('generated_from_text_hash') != revision.get('text_hash')):
+                continue
+            _validate_run_relative_audio_path(run_dir, path_text, must_exist=False)
+            path = resolve_run_relative(run_dir, path_text)
+            if (path.is_file() and candidate.get('output_sha256') == _audio_file_sha256(path)
+                    and (_probe_media_duration_seconds(path) or 0) > 0
+                    and (narration.get('tool') != 'elevenlabs' or
+                         _dict_value(candidate.get('provider_request')).get('effective_delivery_hash') ==
+                         _effective_narration_delivery(narration).get('effective_delivery_hash'))
+                    and _narration_candidate_context_is_current(data, selector=target['selector'], candidate=candidate)):
+                reusable = True
+                break
+        if not reusable:
+            pending.append(NarrationGenerateItem(
+                item_id=target['selector'], tool=str(narration.get('tool') or 'elevenlabs'),
+                expected_revision=int(revision.get('number') or 0), expected_tts_hash=str(revision.get('tts_hash') or ''),
+            ))
+    return pending
+
+
+async def _author_automatic_narration(run_dir: Path, *, force: bool = False) -> dict[str, Any]:
+    from toc.narration_authoring import author_full_run_narration
+    await _run_blocking_with_cancel_barrier(lambda: subprocess.run(
+        [sys.executable, str(ROOT / "scripts/prepare-stage-context.py"),
+         "--stage", "narration", "--run-dir", str(run_dir), "--flow", "immersive"],
+        cwd=ROOT, check=True, capture_output=True, text=True))
+    return await author_full_run_narration(run_dir=run_dir,
+        client_factory=lambda: create_codex_app_server_client(cwd=run_dir), force=force)
+
+
+async def _ensure_image_consistency_before_narration(run_dir: Path) -> None:
+    from server.video_preparation_api import ensure_image_consistency
+    await ensure_image_consistency(run_dir)
+
+
+async def _continue_create_narration(job_id: str, *, run_id: str, operation_id: str | None = None, rewrite_narration: bool = False) -> None:
+    """Continue under the caller's run lease using the durable frontend TTS lane."""
+    from toc.media_resume import MediaJournal
+    run_dir = safe_run_dir(run_id, ROOT)
+    phase = 'p710'
+    preparation_phase = 'image_consistency'
+    try:
+        await _set_create_job(job_id, {'currentProcess': phase, 'currentProcessNumber': 710,
+            'message': 'ナレーション前に画像の整合性を確認・修正中'})
+        await _ensure_image_consistency_before_narration(run_dir)
+        preparation_phase = 'narration'
+        await _set_create_job(job_id, {'currentProcess': phase, 'currentProcessNumber': 710,
+            'stopTarget': 'p730', 'stopTargetNumber': 730, 'message': '全編の通し原稿を執筆し、カットへ割り当て中'})
+        append_state_snapshot(run_dir / 'state.txt', {'status': 'P710', 'slot.p710.status': 'in_progress',
+            'stage.narration.status': 'in_progress', 'runtime.resume.narration.status': 'running',
+            'runtime.create_job.status': 'running', 'runtime.create_job.error_code': '',
+            'runtime.stage': 'narration_preparing', 'runtime.failure.stage': '',
+            'runtime.failure.phase': '', 'runtime.failure.error_kind': '', 'last_error': ''})
+        saved_tts_operation = None
+        if operation_id:
+            saved_operation = MediaJournal.load(run_dir, operation_id)
+            if saved_operation.data['kind'] == 'narration_drafts':
+                await _resume_saved_media_operation(run_dir, operation_id)
+            elif saved_operation.data['kind'] in {'narration', 'narration_bulk'}:
+                if not rewrite_narration:
+                    saved_tts_operation = operation_id
+            else:
+                raise ValueError('non-narration operation cannot enter narration continuation')
+        async with _serialized_run_write(run_dir, 'run_artifacts'):
+            from toc.scene_direction_service import require_images_ready
+            require_images_ready(run_dir, _read_manifest_data(run_dir)[2])
+            if saved_tts_operation:
+                from toc.narration_authoring import full_run_narration_current
+                _, _, source = _read_script_data(run_dir)
+                _, _, projection = _read_manifest_data(run_dir)
+                if not full_run_narration_current(source, projection, run_dir=run_dir):
+                    raise ValueError('saved TTS operation lacks current full-run authorship; rewrite narration before generating')
+            await _author_automatic_narration(run_dir, force=rewrite_narration)
+            await _run_blocking_with_cancel_barrier(_prepare_automatic_narration_text, run_dir)
+        if saved_tts_operation:
+            phase = 'p730'
+            await _resume_saved_media_operation(run_dir, saved_tts_operation)
+        pending = _automatic_narration_requests(run_dir)
+        phase = 'p730'
+        append_state_snapshot(run_dir / 'state.txt', {'status': 'P730', 'slot.p710.status': 'done',
+            'slot.p730.status': 'in_progress', 'runtime.stage': 'narration_generating'})
+        await _set_create_job(job_id, {'currentProcess': phase, 'currentProcessNumber': 730,
+            'message': f'ナレーション音声を生成中（{len(pending)}件）'})
+        if pending:
+            request = BulkNarrationGenerateRequest(run_id=run_id, items=pending, concurrency=2)
+            journal = MediaJournal.create(run_dir, 'narration_bulk', request.model_dump(mode='json'))
+            await _set_create_job(job_id, {'mediaOperationId': journal.id})
+            await _resume_saved_media_operation(run_dir, journal.id)
+        if _automatic_narration_requests(run_dir):
+            raise RuntimeError('current narration audio candidates are missing or stale')
+        append_state_snapshot(run_dir / 'state.txt', {'status': 'P730', 'slot.p710.status': 'done',
+            'slot.p730.status': 'done', 'slot.p730.note': 'current narration audio candidates generated and measured',
+            'runtime.stage': 'narration_audio_candidates_ready', 'runtime.resume.narration.status': 'completed',
+            'runtime.create_job.status': 'completed', 'runtime.failure.stage': '', 'runtime.failure.phase': '',
+            'runtime.failure.error_kind': '', 'last_error': ''})
+        await _set_create_job(job_id, {'status': 'completed', 'currentProcess': 'p730', 'currentProcessNumber': 730,
+            'message': 'ナレーション音声の生成完了', 'error': None, 'errorCode': None})
+    except BaseException as exc:
+        append_state_snapshot(run_dir / 'state.txt', {'status': 'FAILED',
+            'runtime.stage': 'narration_generation_failed', 'runtime.failure.stage': phase,
+            'runtime.failure.phase': preparation_phase, 'runtime.resume.narration.status': 'failed',
+            f'slot.{phase}.status': 'failed', 'last_error': str(exc)})
+        raise
+
+
 async def _run_create_job_bound(
     job_id: str,
     *,
@@ -14838,7 +15045,7 @@ async def _run_create_job_bound(
     if review_mode not in {"standard", "preapproved"}:
         raise ValueError("review_mode must be standard or preapproved")
     if stop_target not in CREATE_STOP_TARGETS:
-        raise ValueError("stop_target must be p650 or p680")
+        raise ValueError("stop_target must be p650, p680 or p730")
     if (
         create_mode == CREATE_MODE_SCENE_STORYBOARD
         and stop_target != "p680"
@@ -14849,6 +15056,8 @@ async def _run_create_job_bound(
     if not 300 <= target_duration_seconds <= 1200:
         raise ValueError("target_duration_seconds must be between 300 and 1200")
     run_dir_for_log = safe_run_dir(run_id, ROOT)
+    image_stop_target = "p680" if stop_target == "p730" else stop_target
+    narration_started = False
     job_started = time.monotonic()
     try:
         async with _run_execution_leases_guard:
@@ -14903,7 +15112,7 @@ async def _run_create_job_bound(
                 topic=title,
                 source=source,
                 run_id=run_id,
-                stop_target=stop_target,
+                stop_target=image_stop_target,
                 target_duration_seconds=target_duration_seconds,
                 **helper_binding,
             )
@@ -14913,7 +15122,7 @@ async def _run_create_job_bound(
                 topic=title,
                 source=source,
                 run_id=run_id,
-                stop_target=stop_target,
+                stop_target=image_stop_target,
                 target_duration_seconds=target_duration_seconds,
                 materialize_only=True,
                 **helper_binding,
@@ -14967,8 +15176,12 @@ async def _run_create_job_bound(
             request={"step": "stop_target_validation", "runId": run_id, "createMode": create_mode, "stopTarget": stop_target},
             response={"elapsedMs": int((time.monotonic() - validation_started) * 1000)},
         )
-        if stop_target == "p650":
+        if stop_target == "p650" or not generate_images:
             await _set_create_job(job_id, {"status": "paused", "message": "p650で中断しました", "currentProcess": "p650"})
+        elif stop_target == "p730" and generate_images:
+            narration_started = True
+            await _continue_create_narration(job_id, run_id=run_id,
+                **({"rewrite_narration": True} if (_create_jobs.get(job_id) or {}).get("rewriteNarration") else {}))
         else:
             await _set_create_job(job_id, {"status": "completed", "message": "作成完了", "currentProcess": "p680"})
     except FrontendCreateLockError as exc:
@@ -14984,12 +15197,13 @@ async def _run_create_job_bound(
             write_run_log=False,
         )
     except Exception as exc:
-        with suppress(Exception):
-            _invalidate_published_image_generation_handoff(
-                run_dir_for_log,
-                invalidated_by="create_job.post_handoff_failure",
-                reason=str(exc),
-            )
+        if not narration_started:
+            with suppress(Exception):
+                _invalidate_published_image_generation_handoff(
+                    run_dir_for_log,
+                    invalidated_by="create_job.post_handoff_failure",
+                    reason=str(exc),
+                )
         with suppress(Exception):
             await _sync_process_current_process(job_id, run_id)
         if retained_reservation is None:
@@ -15015,7 +15229,7 @@ async def _run_create_job_bound(
             if (run_dir / "state.txt").exists():
                 current_state = parse_state_file(run_dir / "state.txt")
                 existing_runtime_stage = str(current_state.get("runtime.stage") or "")
-                preserve_runtime_stage = existing_runtime_stage in {
+                preserve_runtime_stage = narration_started or existing_runtime_stage in {
                     "semantic_review_blocked_transport",
                     "semantic_review_failed_before_media_generation",
                     "semantic_review_failed_after_media_generation",
@@ -16187,6 +16401,7 @@ async def _run_image_only_resume_job_bound(
 ) -> None:
     run_dir = safe_run_dir(run_id, ROOT)
     started = time.monotonic()
+    narration_started = False
     try:
         async with _run_execution_leases_guard:
             lease_already_reserved = job_id in _run_execution_leases
@@ -16278,6 +16493,11 @@ async def _run_image_only_resume_job_bound(
                 run_id,
                 create_mode=create_mode,
             )
+        if (_create_jobs.get(job_id) or {}).get("stopTarget") == "p730":
+            narration_started = True
+            await _continue_create_narration(job_id, run_id=run_id,
+                **({"rewrite_narration": True} if (_create_jobs.get(job_id) or {}).get("rewriteNarration") else {}))
+            return
         await _sync_process_current_process(job_id, run_id)
         await _set_create_job(
             job_id,
@@ -16304,12 +16524,13 @@ async def _run_image_only_resume_job_bound(
             },
         )
     except Exception as exc:
-        with suppress(Exception):
-            _invalidate_published_image_generation_handoff(
-                run_dir,
-                invalidated_by="image_only_resume.post_handoff_failure",
-                reason=str(exc),
-            )
+        if not narration_started:
+            with suppress(Exception):
+                _invalidate_published_image_generation_handoff(
+                    run_dir,
+                    invalidated_by="image_only_resume.post_handoff_failure",
+                    reason=str(exc),
+                )
         with suppress(Exception):
             await _sync_process_current_process(job_id, run_id)
         detail = _create_run_error_message(exc)
@@ -16491,7 +16712,17 @@ async def _run_p500_resume_job_bound(
 ) -> None:
     run_dir = safe_run_dir(run_id, ROOT)
     started = time.monotonic()
+    narration_started = False
     try:
+        if (_create_jobs.get(job_id) or {}).get("stopTarget") == "p730" and (
+            (_create_jobs.get(job_id) or {}).get("resumeMode") == "narration_start"
+            or (_create_jobs.get(job_id) or {}).get("mediaOperationId")
+        ):
+            narration_started = True
+            await _continue_create_narration(job_id, run_id=run_id,
+                operation_id=(_create_jobs.get(job_id) or {}).get("mediaOperationId"),
+                **({"rewrite_narration": True} if (_create_jobs.get(job_id) or {}).get("rewriteNarration") else {}))
+            return
         operation_id = (_create_jobs.get(job_id) or {}).get("mediaOperationId")
         if not operation_id and (_create_jobs.get(job_id) or {}).get("resumeMode") == "narration_start":
             from toc.media_resume import MediaJournal
@@ -16535,6 +16766,11 @@ async def _run_p500_resume_job_bound(
                         ),
                     })
                 raise
+            if (_create_jobs.get(job_id) or {}).get("stopTarget") == "p730":
+                narration_started = True
+                await _continue_create_narration(job_id, run_id=run_id,
+                **({"rewrite_narration": True} if (_create_jobs.get(job_id) or {}).get("rewriteNarration") else {}))
+                return
             if narration_start:
                 append_state_snapshot(run_dir / "state.txt", {"runtime.resume.narration.status": "completed"})
             await _set_create_job(job_id, {
@@ -16620,6 +16856,11 @@ async def _run_p500_resume_job_bound(
             run_id,
             create_mode=create_mode,
         )
+        if (_create_jobs.get(job_id) or {}).get("stopTarget") == "p730":
+            narration_started = True
+            await _continue_create_narration(job_id, run_id=run_id,
+                **({"rewrite_narration": True} if (_create_jobs.get(job_id) or {}).get("rewriteNarration") else {}))
+            return
         await _sync_process_current_process(job_id, run_id)
         await _set_create_job(
             job_id,
@@ -16644,10 +16885,11 @@ async def _run_p500_resume_job_bound(
     except Exception as exc:
         # The subprocess owns both the create/resume lease and canonical resume
         # state. Preserve its semantic failure and applied checkpoint verbatim.
-        with suppress(Exception):
-            await _record_p500_resume_failure_state(run_dir, exc)
+        if not narration_started:
+            with suppress(Exception):
+                await _record_p500_resume_failure_state(run_dir, exc)
         failed_job = _create_jobs.get(job_id) or {}
-        if not failed_job.get("mediaOperationId") and failed_job.get("resumeMode") != "narration_start":
+        if not narration_started and not failed_job.get("mediaOperationId") and failed_job.get("resumeMode") != "narration_start":
             with suppress(Exception):
                 _invalidate_published_image_generation_handoff(
                     run_dir,
@@ -16755,6 +16997,13 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
                 raise HTTPException(status_code=404, detail="saved media operation was not found") from exc
             except (ValueError, KeyError, TypeError) as exc:
                 raise HTTPException(status_code=409, detail="saved media operation is invalid: " + str(exc)) from exc
+            if req.rewrite_narration:
+                if req.stop_target != "p730":
+                    raise HTTPException(status_code=400, detail="rewrite_narration requires stop_target p730")
+                if media_operation is not None and media_operation.data["kind"] not in {"narration", "narration_bulk", "narration_drafts"}:
+                    raise HTTPException(status_code=409, detail="finish the unrelated media operation before rewriting narration")
+                MediaJournal.supersede_narration_operations(run_dir)
+                media_operation = None
             if media_operation is not None:
                 try:
                     media_operation.verify_inputs()
@@ -16784,7 +17033,8 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
                         and state.get("slot.p710.status") == "failed"
                         and state.get("runtime.resume.narration.status") == "journal_setup_failed"
                     )
-                    if not (req.continue_waiting and waiting) and not setup_retry:
+                    narration_retry = req.stop_target == "p730" and state.get("runtime.resume.narration.status") == "failed"
+                    if not ((req.continue_waiting or req.stop_target == "p730") and waiting) and not setup_retry and not narration_retry and not (req.rewrite_narration and req.stop_target == "p730"):
                         raise HTTPException(
                             status_code=409,
                             detail="run already reached strict p680 completion; no requested waiting stage is available",
@@ -16854,7 +17104,7 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
                     detail=f"run target duration is invalid: {exc}",
                 ) from exc
 
-            effective_stop = "p710" if resume_mode == "narration_start" else req.stop_target
+            effective_stop = ("p730" if req.stop_target == "p730" else "p710") if resume_mode == "narration_start" else req.stop_target
             if media_operation is not None:
                 effective_stop = {
                     "narration_drafts": "p710", "narration": "p730", "narration_bulk": "p730",
@@ -16862,6 +17112,8 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
                     "sound": "p860",
                     "render_freeze": "p910", "render": "p920",
                 }[media_operation.data["kind"]]
+                if req.stop_target == "p730" and media_operation.data["kind"] == "narration_drafts":
+                    effective_stop = "p730"
             job = {
                 "jobId": job_id,
                 "runId": run_id,
@@ -16870,6 +17122,7 @@ async def api_resume_run(run_id: str, req: ResumeRunRequest) -> dict[str, Any]:
                 "title": title,
                 "createMode": create_mode,
                 "resumeMode": resume_mode,
+                "rewriteNarration": req.rewrite_narration,
                 "mediaOperationId": media_operation.id if media_operation else None,
                 "targetDurationSeconds": target_duration_seconds,
                 "stopTarget": effective_stop,
@@ -17489,6 +17742,8 @@ def _durable_media_operation(kind: str):
 async def _resume_saved_media_operation(run_dir: Path, operation_id: str) -> dict[str, Any]:
     from toc.media_resume import ACTIVE_MEDIA_JOURNAL, MediaJournal
     journal = MediaJournal.load(run_dir, operation_id)
+    if journal.data.get("status") == "superseded":
+        raise ValueError("saved media operation was superseded by an explicit replacement")
     journal.verify_inputs()
     handlers = {
         "sound": (_sound_design_api.durable_generate, _sound_design_api.SoundGenerateRequest),
@@ -17654,7 +17909,10 @@ async def api_candidates(
 async def api_create_narration_drafts(req: NarrationDraftCreateRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
     try:
+        await _ensure_image_consistency_before_narration(run_dir)
         async with _serialized_run_write(run_dir, "run_artifacts"):
+            from toc.scene_direction_service import require_images_ready
+            require_images_ready(run_dir, _read_manifest_data(run_dir)[2])
             result = _create_narration_drafts_in_manifest(run_dir, replace=req.replace)
             authoring_workspace = await asyncio.to_thread(_materialize_narration_authoring_workspace, run_dir)
     except RuntimeError as exc:
@@ -17748,6 +18006,7 @@ async def api_narration_generate(req: NarrationGenerateRequest) -> dict[str, Any
     run_dir = safe_run_dir(req.run_id, ROOT)
     item = NarrationGenerateItem.model_validate(req.model_dump(exclude={"run_id"}))
     try:
+        await _ensure_image_consistency_before_narration(run_dir)
         async with _serialized_run_write(run_dir, "run_artifacts"):
             prepared = _prepare_manifest_narration_generation(run_dir, [item])
     except NarrationRevisionConflict as exc:
@@ -17804,6 +18063,7 @@ async def api_narration_generate(req: NarrationGenerateRequest) -> dict[str, Any
 async def api_narration_generate_bulk(req: BulkNarrationGenerateRequest) -> dict[str, Any]:
     run_dir = safe_run_dir(req.run_id, ROOT)
     try:
+        await _ensure_image_consistency_before_narration(run_dir)
         async with _serialized_run_write(run_dir, "run_artifacts"):
             prepared = _prepare_manifest_narration_generation(run_dir, req.items)
     except NarrationRevisionConflict as exc:

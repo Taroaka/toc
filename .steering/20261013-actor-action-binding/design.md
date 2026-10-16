@@ -1,0 +1,5 @@
+# 方針
+
+既存のinitial_view.subjects、performance、events、motion、end_stateを使用する。新schema、語句判定gate、作品専用分岐は作らない。SHOT_AUTHOR_GUIDANCEはp400、video preparation、cut directionの共通入口。会話実行はcanonical設計と実payloadを照合する。
+
+人物別の開始状態と演技、道具の保持、原因となる動作と結果の順序を記述する。周囲の人物の待機も選択された演技であり、動かす人物と混同しない。開始・途中・終了の確認で主体の取り違えと保持物の消失を確認する。

@@ -1,10 +1,9 @@
 """Bounded, deterministic JSON object decoding for author transports.
 
 The author transport carries a JSON document inside a string.  A provider can
-occasionally append one closing brace after an otherwise complete object.  The
-repair in this module is deliberately smaller than a general JSON fixer: it
-only removes one redundant final ``}`` when the prefix is already a complete
-JSON object and the suffix contains no other content.
+occasionally append one closing brace or transpose two adjacent closers. The
+two rules here require a complete strict object after one proved delimiter
+correction; strings, keys, values and incomplete/truncated output are untouched.
 """
 
 from __future__ import annotations
@@ -48,6 +47,7 @@ class JsonSyntaxRepairReceipt:
     original_text: str
     normalized_text: str
     removed_suffix: str = ""
+    edit_offset: int | None = None
 
     @classmethod
     def clean(cls, text: str) -> "JsonSyntaxRepairReceipt":
@@ -79,7 +79,7 @@ class JsonSyntaxRepairReceipt:
         return hashlib.sha256(self.normalized_text.encode("utf-8")).hexdigest()
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "repaired": self.repaired,
             "rule": self.rule,
             "original_sha256": self.original_sha256,
@@ -88,6 +88,11 @@ class JsonSyntaxRepairReceipt:
             "normalized_length": len(self.normalized_text),
             "removed_suffix": self.removed_suffix,
         }
+        if self.edit_offset is not None:
+            result['edit_offset'] = self.edit_offset
+            result['original_pair'] = self.original_text[self.edit_offset:self.edit_offset+2]
+            result['normalized_pair'] = self.normalized_text[self.edit_offset:self.edit_offset+2]
+        return result
 
 
 class JsonSyntaxRepairError(ValueError):
@@ -167,14 +172,51 @@ def _decode_first_value(
     return decoder.raw_decode(text, start)
 
 
+def _decode_one_transposed_pair(text: str, error: json.JSONDecodeError):
+    """Prove one reversed adjacent closing pair from the prefix stack."""
+    position = error.pos
+    pair = text[position:position+2]
+    if error.msg != "Expecting ',' delimiter" or pair not in (']}', '}]') or not text.lstrip().startswith('{'):
+        return None
+    stack, quoted, escaped = [], False, False
+    closing = {'}': '{', ']': '['}
+    for char in text[:position]:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in '{[':
+            stack.append(char)
+        elif char in '}]':
+            if not stack or stack.pop() != closing[char]:
+                return None
+    if quoted or len(stack) < 2 or stack[-1] != closing[pair[1]] or stack[-2] != closing[pair[0]]:
+        return None
+    normalized = text[:position] + pair[::-1] + text[position+2:]
+    try:
+        value = json.loads(normalized, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_non_json_constant)
+    except (json.JSONDecodeError, _DuplicateKeyError, _NonJSONConstantError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    return value, JsonSyntaxRepairReceipt(repaired=True, rule='one_transposed_closing_pair',
+        original_text=text, normalized_text=normalized, edit_offset=position)
+
+
 def decode_json_object_with_repair(
     text: str,
 ) -> tuple[dict[str, Any], JsonSyntaxRepairReceipt]:
-    """Decode one JSON object, applying only the bounded suffix repair.
+    """Decode one JSON object, applying one bounded delimiter correction.
 
     A successful repair requires the prefix to parse completely as an object
     with duplicate keys rejected, and the remaining input to be exactly one
-    redundant closing brace surrounded by JSON whitespace.  No truncation,
+    redundant closing brace surrounded by JSON whitespace. Alternatively a
+    prefix-stack-proved adjacent closing pair may be transposed once. No truncation,
     quote repair, guessed delimiters, prose stripping, or concatenated JSON is
     attempted.
     """
@@ -216,6 +258,9 @@ def decode_json_object_with_repair(
         raise JsonSyntaxRepairError(str(exc), diagnostic=diagnostic) from exc
     except json.JSONDecodeError as exc:
         parse_error = exc
+        transposed = _decode_one_transposed_pair(text, exc)
+        if transposed is not None:
+            return transposed
         try:
             candidate, end = _decode_first_value(text, decoder)
         except (_DuplicateKeyError, _NonJSONConstantError) as strict_error:

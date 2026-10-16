@@ -15,6 +15,56 @@ from toc.story_author_pipeline import author_story_from_research
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize("ids", [("CH1", "CH2"), ("pilot-A", "sailor-B")])
+def test_resources_bind_arbitrary_lifecycle_characters_without_phantom_protagonist(ids):
+    module = _load_frontend_run_module()
+    research = {"story_materials": {"setting": {"places": ["道"]}, "characters": [
+        {"character_id": ids[0], "name": "旅人／案内人", "role": "道を探す人物"},
+        {"character_id": ids[1], "name": "同行者", "role": "主人公を支える人物"},
+    ]}}
+    scene = {"scene_id": "opening", "canonical_scene_index": 1,
+             "source_basis": {"character_ids": list(ids)},
+             "start_state": {"characters": [{"character_id": ids[0]}]},
+             "event_sequence": [{"participants": list(ids)}],
+             "end_state": {"characters": list(ids)}}
+    profile = module._profile_from_research(module._story_profile("test", "source"), research)
+    profile["story"] = {"script": {"scenes": [scene]}}
+    profile["story_scenes"] = [scene]
+    resources = module._cinematic_resources(profile)
+    assert len(resources["characters"]) == 2
+    assert all(r["name"] for r in resources["characters"].values())
+    assert {tuple(r["source_role_ids"]) for r in resources["characters"].values()} == {(ids[0],), (ids[1],)}
+    assert set(resources["scene_assets"]["opening"]["character_ids"]) == set(resources["characters"])
+    assert module._scene_acceptance_role_character_id(profile, scene_index=1, role_id=ids[0]) in resources["characters"]
+
+
+def test_explicit_primary_character_is_not_duplicated_and_ensembles_need_no_primary():
+    module = _load_frontend_run_module()
+    research = {"story_materials": {"setting": {"places": ["道"]}, "characters": [
+        {"character_id": "actor-A", "name": "旅人", "role": "protagonist"},
+    ]}}
+    scene = {"scene_id": "opening", "canonical_scene_index": 1,
+             "source_basis": {"character_ids": ["actor-A"]},
+             "event_sequence": [{"participants": ["actor-A"]}]}
+    profile = module._profile_from_research(module._story_profile("test", "source"), research)
+    profile["story"] = {"script": {"scenes": [scene]}}
+    profile["story_scenes"] = [scene]
+    resources = module._cinematic_resources(profile)
+    assert len(resources["characters"]) == 1
+    assert resources["characters"][profile["protagonist_asset_id"]]["name"] == "旅人"
+    assert resources["scene_assets"]["opening"]["character_ids"] == [profile["protagonist_asset_id"]]
+
+    for role in ("protagonist", "主人公"):
+        research["story_materials"]["characters"].append({"character_id": "actor-B", "name": "同行者", "role": role})
+        scene["source_basis"]["character_ids"] = ["actor-A", "actor-B"]
+        scene["event_sequence"][0]["participants"] = ["actor-A", "actor-B"]
+        profile = module._profile_from_research(module._story_profile("test", "source"), research)
+        profile["story"] = {"script": {"scenes": [scene]}}
+        profile["story_scenes"] = [scene]
+        assert len(module._cinematic_resources(profile)["characters"]) == 2
+        research["story_materials"]["characters"].pop()
+
+
 def _load_frontend_run_module():
     """Load the legacy frontend profile adapter under a test-only module name."""
 

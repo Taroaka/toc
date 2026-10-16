@@ -111,6 +111,35 @@ def test_image_targets_replace_parent_alias_with_unique_shot_images() -> None:
     assert len({target["image_generation"]["output"] for target in targets}) == 2
 
 
+def test_shot_execution_ignores_parent_result_metadata_but_requires_child_end_image() -> None:
+    manifest = shot_manifest()
+    parent = manifest["scenes"][0]["cuts"][0]
+    parent["video_generation"]["result_state_reference"] = {"required": True}
+    parent["video_generation"]["result_frame"] = {
+        "output": "assets/scenes/unused_parent_result.png",
+        "image_generation": {"output": "assets/scenes/unused_parent_result.png"},
+    }
+    child = parent["shots"][0]
+    child["video_generation"]["result_state_reference"] = {"required": True}
+    child["video_generation"]["result_frame"] = {
+        "output": "assets/scenes/child_result.png",
+        "image_generation": {"output": "assets/scenes/child_result.png"},
+    }
+    targets = image_gen_app._manifest_image_targets(manifest)
+    assert {t["selector"] for t in targets} == {
+        "scene3_cut2_shots01", "scene3_cut2_shots02", "scene3_cut2_shots01_result_frame",
+    }
+    issues, outputs = image_gen_app._manifest_cut_contract(manifest)
+    assert issues == []
+    assert outputs == {
+        "assets/scenes/scene3_cut2_shots01.png", "assets/scenes/scene3_cut2_shots02.png",
+        "assets/scenes/child_result.png",
+    }
+    del child["video_generation"]["result_frame"]
+    issues, _outputs = image_gen_app._manifest_cut_contract(manifest)
+    assert any("required result_frame is missing" in issue for issue in issues)
+
+
 def test_shot_video_items_expose_child_model_and_timeline(tmp_path: Path) -> None:
     manifest = shot_manifest()
     for shot in manifest["scenes"][0]["cuts"][0]["shots"]:

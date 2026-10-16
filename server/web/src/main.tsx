@@ -1218,6 +1218,12 @@ function runtimeStageLabel(runtimeStage?: string | null): string {
     create_run_failed: 'ToC作成失敗',
     scene_images_generating: 'シーン画像生成中',
     scene_images_ready_for_handoff: 'シーン画像の引き継ぎ準備完了',
+    narration_full_draft_authoring: '全編のナレーション原稿を執筆中',
+    narration_cut_allocation: '通し原稿をカットへ割り当て中',
+    narration_full_run_authored: '通し原稿とカット割り当てを作成済み',
+    narration_generating: 'ナレーション音声を生成中',
+    narration_audio_candidates_ready: 'ナレーション音声を生成済み',
+    narration_generation_failed: 'ナレーション工程で停止',
   };
   return labels[runtimeStage] || runtimeStage;
 }

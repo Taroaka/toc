@@ -115,6 +115,15 @@ class RepairSession:
         with self._lock():
             return self._read()['pending'].get(self._key(unit))
 
+    def checkpoint_candidate(self, unit, candidate):
+        """Retain an applied patch without recycling its attempt reservation."""
+        with self._lock():
+            ledger = self._read()
+            context = ledger['pending'].get(self._key(unit))
+            if context is not None:
+                ledger['pending'][self._key(unit)] = {**context, 'previous_output': candidate}
+                self._write(ledger)
+
     def claim(self, unit):
         """Mark a reserved repair submitted. An interrupted submission costs a new attempt."""
         with self._lock():

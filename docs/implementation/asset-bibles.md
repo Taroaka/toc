@@ -58,6 +58,11 @@ Asset identity fields:
 reusable である場合だけ explicit variant として定義する。variant は main reference から派生し、
 別 identity を暗黙に作らない。
 
+基準参照の照明指定と時代背景の説明を区別する。既存profile adapterがcanonicalな
+`story_metadata.time`をそのまま衣装・髪型・素材・身分の整合句へ入れた場合、その完全一致する
+説明句だけは夜間照明の指示として扱わない。`generation_prompt`と説明句の外の描画指定は
+引き続き検証し、`neutral_anchor`には時間帯を固定しない参照照明を明示する。
+
 Sourceにある視覚状態変化で後続画像にも同一性anchorが必要なときは、既存の
 `reference_variants[]` を使う。
 

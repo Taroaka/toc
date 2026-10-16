@@ -141,6 +141,15 @@ p500は実際の使用cutからinventory/planを作り、source identity・引�
 
 各variantの `generation_prompt` は変化後に見える形・素材・状態を具体化し、parent assetの同一性を保つ。`source_event_beat_ids` は現在sceneのsource event IDsでなければならない。変化後状態を通常scene/cut画像に見せるときは、そのcutの `state_variant_refs[]` でparentとvariantを選び、variant状態を使うconsumer beat IDsを同じbindingへ記録する。後続cut/sceneでは、状態作成beatより前の画像からvariantを使わない。p500はvariantをparent asset referenceから派生する通常のasset requestとして生成し、p600は選択されたactual reference pathをimage requestへ束縛する。
 
+同じbeat内でも、sourceが変化後の状態からの開始を明記する場合は、その省略を保持する。
+作者は該当する `state_variant_refs[]` に任意の `source_entry` を置き、`beat_id`、
+そのbeatの `cut_transitions` にある一意の `transition_id`、その `first_frame_brief` の原文を記録する。
+beatは最初のconsumer beatかつvariant作成beatで、sourceの開始画が実際に選択状態を表すことを作者が確認する。
+構造検証はID・原文一致と、scene先頭の `scene_entry` または理由付き `ellipsis` を要求する。
+未来beatの状態利用、根拠なしの同一beat利用、連続動作の途中での未説明な状態変更は許可しない。
+原文の意味を単語検索で推測したり、省略を埋める変化過程を追加したりしない。
+開始状態の順序・参照不整合は、そのcutの参照リストだけを既存p420修復へ返して再検証する。
+
 動画の連続動作を結果状態で終える場合、p400の`result_frame.state_variant_refs[]`は必要なcharacter/object/location variantsをまとめて選ぶ。p600は同じcutのprimary scene imageを場所・camera・relative layout anchorにし、after-state variantsと場面specificなend-state briefで別のscene stillを作る。asset sheetをlast frameに流用しない。p800はこのscene stillを `last_frame` へpathとbytes hashで束縛する。結果画は同じcutの画像であり、新しいstory cutではない。構造・描画の妥当性を別の品質採点gateへ委ねない。
 
 既存manifest cutの画面設計を後段で任意に複数shotへ分ける契約は、[Cut内ショット設計](shot-direction.md)を参照する。shot列は親cutの視覚timelineを分割するもので、story/script、source event、親cutの尺・音声・cut contractを書き換えない。人物の目的・感情、見える身体部分、動きの時間、カメラを意図に応じて選び、各shotの画像・動画requestへ投影する。
@@ -148,6 +157,13 @@ p500は実際の使用cutからinventory/planを作り、source identity・引�
 終幕を執筆するときは `docs/script-creation.md` の「終幕の焦点と観客の余韻」を確認する。最後の主要cutで中心人物・中心関係を見届けられるようにし、脇役の後始末や人物なしBロールを機械的な最終画にしない。
 
 ## 行為・反応とフレーム間の整合
+
+全体の人物設計で役割・外見・所作を区別したうえで、各scene/shotでは
+[人物と行為の個別対応](shot-direction.md#人物と行為を個別に結び付ける)を具体化する。
+誰が誰に働きかけ、誰が道具を保持して使い、周囲がどう見守るかを人物/memberごとに記す。
+同じ場面説明を全人物へ複製せず、行為主体を取り違え得るshotでは既存の `performance[]` を使う。
+効果の発生だけで原因となる人物の動作を省略しない。性格の基調とその場の行為を区別し、
+原作にない行動・感情を事実として追加しない。全員を動かす規則にはしない。
 
 人物間の行為を設計するときは、相手がどう受け止め、どの表情・視線・応答でそれが分かるかを
 既存のperformance/end-state欄へ具体化する。反応が目的の場面はその時間を確保し、

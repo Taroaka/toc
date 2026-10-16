@@ -95,7 +95,7 @@ scripts/ai/install-codex-skills.sh
 - `selfhelp-trend-researcher`: 話題の自己啓発系人物の候補出し→紹介骨格（Hybridで未検証も明示）
 - `ai-idea-studio`: AI発案のオリジナル案を量産→1案深掘り（制作可能な骨格）
 - `era-explainer`: 時代解説（例: 縄文）を cloud_island_walk 等の体験フォーマットへ落とし込み
-- `vertical-shorts-creator`: 承認済みの横動画から縦ショート（9:16, ~60秒）を作る（scene選定→コマンド提示）
+- `vertical-video-publish`: 完成動画から縦型を制作し、依頼に応じて指定SNSへの投稿・公開確認まで行う（既定はシーン別の上下黒帯＋文字、クロップは明示指定時）
 
 補助資料や共通ナレッジを shared skills 間で使い回す場合は `skills/_shared/` に置き、installer の対象外にする。
 

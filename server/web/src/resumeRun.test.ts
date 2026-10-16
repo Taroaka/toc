@@ -9,7 +9,7 @@ describe('resumeRun', () => {
     const onMessage = vi.fn();
     const result = await resumeRun('物語 run', { fetchJson, sleep: async () => {}, onMessage });
     expect(fetchJson.mock.calls[0][0]).toBe('/api/image-gen/runs/' + encodeURIComponent('物語 run') + '/resume');
-    expect(JSON.parse(fetchJson.mock.calls[0][1].body)).toEqual({ stop_target: 'p680' });
+    expect(JSON.parse(fetchJson.mock.calls[0][1].body)).toEqual({ stop_target: 'p730' });
     expect(fetchJson.mock.calls[1][0]).toBe('/api/image-gen/runs/create/job');
     expect(onMessage).toHaveBeenCalledWith('再開中');
     expect(result.status).toBe('completed');
@@ -35,7 +35,7 @@ describe('resumeRun', () => {
     });
 
     expect(JSON.parse(fetchJson.mock.calls[0][1].body)).toEqual({
-      stop_target: 'p680',
+      stop_target: 'p730',
       continue_waiting: true,
     });
   });
@@ -47,6 +47,6 @@ describe('resumeRun', () => {
 
     await resumeRun('run', { fetchJson, sleep: async () => {}, onMessage: vi.fn() });
 
-    expect(JSON.parse(fetchJson.mock.calls[0][1].body)).toEqual({ stop_target: 'p680' });
+    expect(JSON.parse(fetchJson.mock.calls[0][1].body)).toEqual({ stop_target: 'p730' });
   });
 });

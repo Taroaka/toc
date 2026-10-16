@@ -37,6 +37,30 @@ def test_grounded_request_is_registered_and_bound_to_its_cut(tmp_path):
     assert again == (resolved, registry, records)
 
 
+def test_existing_character_alias_reuses_exact_source_binding_and_rejects_other_person(tmp_path):
+    story, sources, base, rows = fixture(tmp_path)
+    research = {'story_materials': {'characters': [{'name': '修理工／職人'}, {'name': '修理工／訪問者'}]}}
+    entity = {'source': 'research', 'pointer': '/story_materials/characters/0/name'}
+    base['characters']['keeper']['name'] = '修理工／職人'
+    base['characters']['keeper']['source_entity'] = entity
+    base['characters']['keeper']['source_role_ids'] = ['C1']
+    story['script']['scenes'][0]['event_sequence'][0]['participants'] = ['C1']
+    rows[0]['asset_requests'] = [{
+        'request_id': 'worker', 'kind': 'character', 'name': '修理工',
+        'source_entity': entity, 'source_role_id': 'C1',
+        'source_evidence': [{'source': 'story', 'pointer': '/script/scenes/0/event_sequence/0/what_happens', 'quote': '修理工が手紙を読む。'}],
+        'used_in_cuts': ['a', 'b'], 'existing_asset_id': 'keeper',
+    }]
+    rows[0]['cuts'][0]['character_ids'] = ['request:worker']
+    rows[0]['cuts'][0]['object_ids'] = []
+    resolved, registry, _ = resolve_asset_requests(rows, story, research, base)
+    assert resolved[0]['cuts'][0]['character_ids'] == ['keeper']
+    assert len(registry['characters']) == 1
+    rows[0]['asset_requests'][0]['source_entity'] = {'source': 'research', 'pointer': '/story_materials/characters/1/name'}
+    with pytest.raises(ValueError, match='identity_mismatch'):
+        resolve_asset_requests(rows, story, research, base)
+
+
 @pytest.mark.parametrize('fault', ['bad_pointer', 'wrong_quote', 'unused', 'wrong_cut', 'other_scene', 'duplicate_id', 'metaphor', 'unknown_existing'])
 def test_invalid_missing_asset_is_rejected(tmp_path, fault):
     story, sources, base, rows = fixture(tmp_path)
@@ -362,6 +386,44 @@ def test_earlier_unrelated_quote_cannot_authorize_a_later_asset(tmp_path):
     ]
     with pytest.raises(ValueError, match='future_beat'):
         resolve_asset_requests(rows, story, json.loads(sources['research']), base)
+
+
+@pytest.mark.parametrize('object_name', ['布', '小箱'])
+def test_typed_physical_symbol_and_explicit_opening_object_prove_early_presence(tmp_path, object_name):
+    story, sources, base, rows = fixture(tmp_path)
+    research = {'story_materials': {'symbols_and_themes': [
+        {'kind': 'object', 'item': object_name, 'meaning': '記憶を象徴する'},
+    ]}}
+    scene = story['script']['scenes'][0]
+    scene['start_state']['objects'] = [f'旅人が身に着けた{object_name}']
+    scene['event_sequence'][0]['what_happens'] = '旅人が歩く。'
+    scene['event_sequence'][1]['what_happens'] = f'旅人が{object_name}を手渡す。'
+    request = rows[0]['asset_requests'][0]
+    request['name'] = object_name
+    request['source_entity'] = {'source': 'research', 'pointer': '/story_materials/symbols_and_themes/0/item'}
+    request['source_evidence'] = [{'source': 'story', 'pointer': '/script/scenes/0/event_sequence/1/what_happens',
+                                  'quote': f'旅人が{object_name}を手渡す。'}]
+    _, registry, records = resolve_asset_requests(rows, story, research, base)
+    opening = next(ref for ref in records[0]['source_evidence'] if '/start_state/' in ref['pointer'])
+    assert opening == {'source': 'story', 'pointer': '/script/scenes/0/start_state/objects/0',
+                       'quote': f'旅人が身に着けた{object_name}'}
+    assert len(records[0]['source_evidence']) == 2
+    assert request['source_evidence'] == [request['source_evidence'][0]]
+    assert len(registry['objects']) == 1
+
+    scene['start_state']['objects'] = []
+    with pytest.raises(ValueError, match='future_beat'):
+        resolve_asset_requests(rows, story, research, base)
+
+
+@pytest.mark.parametrize('bad_kind, pointer_field', [('theme', 'item'), ('motif', 'item'), ('object', 'meaning')])
+def test_abstract_symbol_or_meaning_cannot_become_a_physical_asset(tmp_path, bad_kind, pointer_field):
+    story, sources, base, rows = fixture(tmp_path)
+    research = {'story_materials': {'symbols_and_themes': [{'kind': bad_kind, 'item': '手紙', 'meaning': '手紙'}]}}
+    rows[0]['asset_requests'][0]['source_entity'] = {'source': 'research',
+        'pointer': f'/story_materials/symbols_and_themes/0/{pointer_field}'}
+    with pytest.raises(ValueError, match='physical_source_required'):
+        resolve_asset_requests(rows, story, research, base)
 
 
 def test_base_registry_does_not_change_after_a_source_role_is_resolved(tmp_path):

@@ -451,6 +451,51 @@ def test_p400_allows_later_cut_to_reuse_state_variant_from_its_creation_beat(tmp
         direction, story, resources, research={}))
 
 
+@pytest.mark.parametrize('variant_index', [0, 1])
+def test_p400_author_preflight_reuses_prior_scene_result_variant(tmp_path, variant_index):
+    import asyncio
+    import json
+    from toc.p400_authoring import author_cinematic_direction
+    from toc.downstream_repair import projection_diagnostics
+    from toc.production_diagnostics import AuthoringValidationError
+
+    story, resources, rows, first = _state_variant_fixture(tmp_path)
+    later = rows[1]['cuts'][0]
+    later['object_ids'] = ['box']
+    ref = deepcopy(first['cuts'][0]['result_frame']['state_variant_refs'][variant_index])
+    ref['consumer_source_event_beat_ids'] = ['exit']
+    later['result_frame'] = {'state_variant_refs': [ref],
+        'brief': '工房の作業台の横で、修理工が開いた箱を残している。'}
+    before = deepcopy(rows)
+    calls = []
+
+    async def turn(**kwargs):
+        row = rows[len(calls)]
+        calls.append(kwargs)
+        return SimpleNamespace(payload={'result_json': json.dumps(row)}, transcript=(),
+            provenance=SimpleNamespace(as_dict=lambda: {}))
+
+    result = asyncio.run(author_cinematic_direction(run_dir=tmp_path, resources=resources,
+        grounding='', client_factory=lambda: None, turn_runner=turn))
+    assert len(calls) == 2
+    assert result['scenes'] == before
+    assert not projection_diagnostics(rows[1], story['script']['scenes'][1], resources,
+        available_state_variants=first['state_variants'])
+    # Missing provenance remains a failure; the preflight must not silently
+    # invent or import variants from a future or otherwise unavailable scene.
+    with pytest.raises(AuthoringValidationError, match='variant_unbound'):
+        projection_diagnostics(rows[1], story['script']['scenes'][1], resources)
+
+    async def no_generation(**kwargs):
+        raise AssertionError('completed scene was regenerated')
+
+    resumed = asyncio.run(author_cinematic_direction(run_dir=tmp_path, resources=resources,
+        grounding='', client_factory=lambda: None, turn_runner=no_generation))
+    assert resumed['scenes'] == before
+    ledger = tmp_path / 'logs/repair/ledger.json'
+    assert not ledger.exists() or not json.loads(ledger.read_text())['events']
+
+
 def test_p400_rejects_later_variant_reference_without_direction_or_resource_definition(tmp_path):
     from toc.p400_authoring import bind_direction, validate_direction
 

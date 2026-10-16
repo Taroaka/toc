@@ -9,6 +9,7 @@ quality heuristics and return a small ``stage`` result with ordinary checks.
 from __future__ import annotations
 
 import re
+import math
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -441,7 +442,20 @@ def _manifest_checks(
                     invalid.append(f"scene{scene_id}:cut{cut_id}:duplicate")
                 if cut_id:
                     seen_cut_ids.add(cut_id)
-        for node in ([scene] if not isinstance(cuts, list) or not cuts else [cut for cut in cuts if isinstance(cut, dict)]):
+        parent_nodes = [scene] if not isinstance(cuts, list) or not cuts else [cut for cut in cuts if isinstance(cut, dict)]
+        typed_nodes = []
+        for parent_node in parent_nodes:
+            typed_nodes.append(parent_node)
+            shots = parent_node.get('shots')
+            if shots is not None and not isinstance(shots, list):
+                invalid.append(f'scene{scene_id}:shots.type')
+            elif isinstance(shots, list):
+                for shot in shots:
+                    if isinstance(shot, dict):
+                        typed_nodes.append(shot)
+                    else:
+                        invalid.append(f'scene{scene_id}:shot.type')
+        for node in typed_nodes:
             for key in ("image_generation", "video_generation", "audio"):
                 if key in node and not isinstance(node[key], dict):
                     invalid.append(f"scene{scene_id}:{key}.type")
@@ -452,15 +466,26 @@ def _manifest_checks(
             video = as_dict(node.get("video_generation"))
             duration = video.get("duration_seconds", node.get("duration_seconds"))
             minimum, maximum = 1, 15
-            if as_dict(node.get("cut_contract")).get("cinematic_direction_contract") == "cinematic_direction_v1":
+            container = isinstance(node.get('shots'), list) and bool(node['shots'])
+            if container:
+                # Parent cuts own the narration interval, not a provider call.
+                # Provider/model/duration limits apply to the executed children.
+                duration = node.get('duration_seconds', node.get('target_duration_seconds'))
+                maximum = float('inf')
+            elif as_dict(node.get("cut_contract")).get("cinematic_direction_contract") == "cinematic_direction_v1":
                 from toc.video_provider_capabilities import resolve_video_provider_capabilities
                 input_mode = str(video.get("input_mode") or ("first_last_frame" if video.get("last_frame") else "image_to_video" if video.get("first_frame") or image.get("output") else ""))
                 capabilities = resolve_video_provider_capabilities(tool=str(video.get("tool") or ""), model=str(video.get("model") or ""), input_mode=input_mode)
                 minimum, maximum = capabilities.duration_min_seconds, capabilities.duration_max_seconds
                 if not capabilities.supported:
                     invalid.append(f"scene{scene_id}:unsupported_video_capabilities")
-            if duration is not None and (not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration < minimum or duration > maximum):
-                invalid.append(f"scene{scene_id}:duration_seconds")
+            if duration is not None:
+                try:
+                    valid_duration = isinstance(duration, (int, float)) and not isinstance(duration, bool) and math.isfinite(duration) and minimum <= duration <= maximum
+                except OverflowError:
+                    valid_duration = False
+                if not valid_duration:
+                    invalid.append(f"scene{scene_id}:duration_seconds")
             audio = as_dict(node.get("audio"))
             narration = audio.get("narration")
             if narration is not None and not isinstance(narration, dict):

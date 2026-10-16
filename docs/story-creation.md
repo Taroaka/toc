@@ -166,6 +166,21 @@ Architect・完成story・p400のcoverage対象はこの採用event集合だけ�
 
 ### Story Author runtime
 
+新規 `story.md` は `story_metadata.scene_character_binding_contract: scene_character_binding_v1`
+を持ち、全sceneに `character_ids` 配列を出力する。これは人物素材との受け渡しに使う派生indexであり、
+人物IDの独立した正本ではない。`source_basis.character_ids`、`start_state.characters`、
+`event_sequence[].participants / character_ids`、`end_state.characters` の順に明示された人物IDを集め、
+重複を除いて保存する。状態の人物は文字列IDまたは `character_id` を持つレコードで記述する。
+途中から登場する人物も含め、人物名・役割の説明・本文からIDを推測しない。
+生成スキーマでこのキーを必須とし、通常のscene bindingで初稿・再生成・局所修復後に同じ規則で確定する。
+保存前の通常検証はキーの欠落、型不正、参照元との不一致、未登録人物を拒否する。
+人物なしのsceneは `character_ids: []`、人物が参加しないbeatは `participants: []` と明示できる。
+この契約マーカーを持たない既存成果物には従来の互換規則を適用する。
+下流の人物素材adapterも、既存の階層化された人物参照を同じ集約規則で読み取る。
+人物は調査registryのIDと原典の `source_entity` へ結びつけ、説明文の「主人公」などの部分一致で
+人物を選ばない。legacy主人公aliasは明示された主人公が一意の場合だけ使い、
+それ以外も登録人物IDで処理する。名前が空の仮人物や同一人物の重複素材を作らない。
+
 新規 `story.md` の物語本文は、決定論関数で汎用 prose を連結して作らない。
 既定は `gpt-6-astra` の Story Architect と Scene Author、
 `gpt-6-luna` の局所 Repair Author とする。source/readset を解決した

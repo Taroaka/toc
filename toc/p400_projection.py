@@ -184,14 +184,16 @@ def project_scene(direction, *, source_scene, scene_id, resources, scene_intent,
                 plan['geometry'] = deepcopy(execution['geometry'])
             if execution['focus'].get('initial'):
                 plan['spatial_composition']['focus_intent'] = execution['focus']['initial']
-        try:
-            payload = compile_image_api_prompt_v2(first_frame_visual_plan=plan, character_ids=chars, object_ids=objects,
-                location_ids=[cut['location_id']], reference_images=references, story_time=story_time,
-                scene_time_of_day=source_scene.get('time_of_day', ''))
-        except AuthoringValidationError as exc:
-            raise AuthoringValidationError('cinematic_cut:' + json.dumps({
-                'scene_id': direction['scene_id'], 'cut_index': index-1, 'reason': str(exc)},
-                ensure_ascii=False), target=selector) from exc
+        payload = None
+        if 'shot_plan' not in cut:
+            try:
+                payload = compile_image_api_prompt_v2(first_frame_visual_plan=plan, character_ids=chars, object_ids=objects,
+                    location_ids=[cut['location_id']], reference_images=references, story_time=story_time,
+                    scene_time_of_day=source_scene.get('time_of_day', ''))
+            except AuthoringValidationError as exc:
+                raise AuthoringValidationError('cinematic_cut:' + json.dumps({
+                    'scene_id': direction['scene_id'], 'cut_index': index-1, 'reason': str(exc)},
+                    ensure_ascii=False), target=selector) from exc
 
         narration = {'tool': 'elevenlabs' if cut['narration'].strip() else 'silent', 'text': cut['narration'],
             'tts_text': cut['narration'], 'output': f'assets/audio/{selector}.mp3'}
@@ -361,9 +363,14 @@ def project_scene(direction, *, source_scene, scene_id, resources, scene_intent,
             if native['mode'] != 'off':
                 manifest_cut['video_generation']['tool'] = 'higgsfield'
         if 'shot_plan' in cut:
-            from toc.shot_projection import project_cut_shots
-            manifest_cut = project_cut_shots(manifest_cut, cut['shot_plan'], resources,
-                                              story_time=story_time, time_of_day=source_scene.get('time_of_day', ''))
+            from toc.shot_projection import project_cut_shots, ShotImageProjectionError
+            try:
+                manifest_cut = project_cut_shots(manifest_cut, cut['shot_plan'], resources,
+                                                  story_time=story_time, time_of_day=source_scene.get('time_of_day', ''))
+            except ShotImageProjectionError as exc:
+                raise AuthoringValidationError('cinematic_cut:' + json.dumps({
+                    'scene_id': direction['scene_id'], 'cut_index': index-1, **exc.issue},
+                    ensure_ascii=False), target=selector) from exc
             script_cut['shot_plan'] = deepcopy(manifest_cut['shot_plan'])
         script_cuts.append(script_cut); manifest_cuts.append(manifest_cut)
         for bid in refs:

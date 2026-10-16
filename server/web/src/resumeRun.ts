@@ -13,7 +13,7 @@ export async function resumeRun(runId: string, options: ResumeOptions): Promise<
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      stop_target: 'p680',
+      stop_target: 'p730',
       ...(options.continueWaiting ? { continue_waiting: true } : {}),
     }),
   });
